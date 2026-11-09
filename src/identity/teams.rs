@@ -11,6 +11,7 @@
 //! - Plätze je Konto: verschiedene Personen über alle Teams des Eigentümers, er selbst
 //!   eingeschlossen; Grenze aus seinem Lizenzdokument, sonst Free (3).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -73,7 +74,11 @@ async fn role_of(
 }
 
 /// Rolle der Person im Team; fremde Teams sind "nicht gefunden" (IDs lassen sich nicht abtasten).
-async fn require_member(identity: &Identity, team: &str, user: &User) -> ApiResult<Role> {
+pub(crate) async fn require_member(
+    identity: &Identity,
+    team: &str,
+    user: &User,
+) -> ApiResult<Role> {
     let mut conn = identity.db.acquire().await?;
     role_of(&mut conn, team, &user.id)
         .await?
@@ -946,39 +951,149 @@ pub async fn license_delete(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Tickets
+// Konto und Projekte für die App (`/api/v1/me`, `/api/v1/projects`)
 
-#[derive(Debug, Deserialize)]
-pub struct TicketRequest {
-    team: String,
+/// Plätze des eigenen Kontos (Grenze aus der eigenen Lizenz, belegt über alle eigenen Teams).
+pub async fn account_seats(identity: &Identity, user: &User) -> ApiResult<Seats> {
+    let mut conn = identity.db.acquire().await?;
+    Ok(seats(&mut conn, identity, &user.id).await?.0)
 }
 
-/// Kurzlebiges Ticket für `hello`, im Format der Webseite (`docs/ticket-format.md`).
-pub async fn issue_ticket(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<TicketRequest>,
-) -> ApiResult<Json<Value>> {
-    let identity = identity(&state)?;
-    let user = authenticate(identity, &headers).await?;
-    if !identity.limiter.hit(
-        "ticket",
-        &user.id,
-        Rule {
-            limit: 600,
-            window_s: 3600,
-        },
-        now_s(),
-    ) {
+/// Ein Projekt der Liste, wie die Webseite es ausgibt (`wiki/Team-Schnittstelle.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectView {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub owner_id: String,
+    pub plan: String,
+    pub seats: Seats,
+    /// Nur für owner und admin (wer Einladungen verwalten darf).
+    pub pending_invitations: Option<u32>,
+}
+
+/// Alle Teams der Person mit Plätzen des jeweiligen Eigentümerkontos. Vier Abfragen
+/// unabhängig von der Zahl der Teams (keine Abfrage je Team oder je Eigentümer): Teams,
+/// belegte Plätze je Eigentümer, Lizenzen der Eigentümer, offene Einladungen. Indizes:
+/// `team_members_user`, `teams_owner`, `invitations_open`, Primärschlüssel von `licenses`.
+pub async fn projects_of(identity: &Identity, user: &User) -> ApiResult<Vec<ProjectView>> {
+    let now = now_s();
+    let mut conn = identity.db.acquire().await?;
+    let teams: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.name, m.role, t.owner_id FROM team_members m JOIN teams t ON t.id = m.team_id \
+         WHERE m.user_id = ? ORDER BY t.name, t.id",
+    )
+    .bind(&user.id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if teams.is_empty() {
+        return Ok(Vec::new());
+    }
+    let used: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT t.owner_id, COUNT(DISTINCT m.user_id) FROM teams t JOIN team_members m ON m.team_id = t.id \
+         WHERE t.owner_id IN (SELECT t2.owner_id FROM team_members m2 JOIN teams t2 ON t2.id = m2.team_id WHERE m2.user_id = ?) \
+         GROUP BY t.owner_id",
+    )
+    .bind(&user.id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let documents: Vec<(String, String)> = sqlx::query_as(
+        "SELECT user_id, document FROM licenses WHERE user_id IN \
+         (SELECT t.owner_id FROM team_members m JOIN teams t ON t.id = m.team_id WHERE m.user_id = ?)",
+    )
+    .bind(&user.id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let pending: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT i.team_id, COUNT(*) FROM invitations i \
+         JOIN team_members m ON m.team_id = i.team_id AND m.user_id = ? AND m.role IN ('owner', 'admin') \
+         WHERE i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > ? GROUP BY i.team_id",
+    )
+    .bind(&user.id)
+    .bind(now)
+    .fetch_all(&mut *conn)
+    .await?;
+    let used: HashMap<String, u32> = used
+        .into_iter()
+        .map(|(owner, n)| (owner, u32::try_from(n).unwrap_or(u32::MAX)))
+        .collect();
+    let licenses: HashMap<String, LicenseClaims> = documents
+        .into_iter()
+        .filter_map(|(owner, document)| {
+            license::verify(
+                &document,
+                &identity.config.license_keys,
+                &identity.config.license_revoked,
+            )
+            .ok()
+            .map(|claims| (owner, claims))
+        })
+        .collect();
+    let pending: HashMap<String, u32> = pending
+        .into_iter()
+        .map(|(team, n)| (team, u32::try_from(n).unwrap_or(u32::MAX)))
+        .collect();
+    Ok(teams
+        .into_iter()
+        .map(|(id, name, role, owner_id)| {
+            let lic = licenses.get(&owner_id);
+            let manages = Role::parse(&role).is_some_and(|r| r.rank() >= Role::Admin.rank());
+            ProjectView {
+                pending_invitations: manages.then(|| pending.get(&id).copied().unwrap_or(0)),
+                plan: lic
+                    .filter(|l| l.active(now))
+                    .map_or("free", |l| l.plan.as_str())
+                    .to_owned(),
+                seats: Seats {
+                    limit: license::seats_for(lic, now),
+                    used: used.get(&owner_id).copied().unwrap_or(0),
+                },
+                id,
+                name,
+                role,
+                owner_id,
+            }
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tickets
+
+/// Tickets je Konto und Stunde (alte und neue Route teilen sich den Zähler).
+const TICKET_RULE: Rule = Rule {
+    limit: 600,
+    window_s: 3600,
+};
+
+/// Adresse des Live-Kanals aus `PUBLIC_URL`: `http` wird `ws`, `https` wird `wss`.
+pub fn live_url(public_url: &str) -> String {
+    if let Some(rest) = public_url.strip_prefix("https://") {
+        format!("wss://{rest}/v1/live")
+    } else if let Some(rest) = public_url.strip_prefix("http://") {
+        format!("ws://{rest}/v1/live")
+    } else {
+        format!("{public_url}/v1/live")
+    }
+}
+
+/// Dienst: kurzlebiges Ticket für `hello`, im Format der Webseite (`docs/ticket-format.md`).
+/// Nur für Mitglieder; fremde und unbekannte Teams sind gleichermaßen "nicht gefunden".
+/// Gibt Ticket und Ablauf (Unix-Sekunden) zurück.
+pub async fn issue(identity: &Identity, user: &User, team: &str) -> ApiResult<(String, i64)> {
+    if !identity
+        .limiter
+        .hit("ticket", &user.id, TICKET_RULE, now_s())
+    {
         return Err(ApiError::RATE_LIMITED);
     }
-    let role = require_member(identity, &body.team, &user).await?;
+    let role = require_member(identity, team, user).await?;
     let now = now_s();
     let claims = TicketClaims {
         v: 1,
         kid: identity.ticket_kid().to_owned(),
         sub: user.id.clone(),
-        prj: body.team.clone(),
+        prj: team.to_owned(),
         role,
         seat_ok: true,
         iat: now,
@@ -988,8 +1103,25 @@ pub async fn issue_ticket(
     };
     let payload = serde_json::to_vec(&claims).map_err(|_| ApiError::INTERNAL)?;
     let ticket = signed::sign(&payload, TICKET_CONTEXT, identity.signing_key());
+    Ok((ticket, claims.exp))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TicketRequest {
+    team: String,
+}
+
+/// `POST /v1/tickets` (alte Form). Die App nutzt `POST /api/v1/relay-ticket`.
+pub async fn issue_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TicketRequest>,
+) -> ApiResult<Json<Value>> {
+    let identity = identity(&state)?;
+    let user = authenticate(identity, &headers).await?;
+    let (ticket, _) = issue(identity, &user, &body.team).await?;
     Ok(Json(
-        json!({ "ticket": ticket, "expiresIn": TICKET_TTL_S, "live": format!("{}/v1/live", identity.config.public_url.replacen("http", "ws", 1)) }),
+        json!({ "ticket": ticket, "expiresIn": TICKET_TTL_S, "live": live_url(&identity.config.public_url) }),
     ))
 }
 

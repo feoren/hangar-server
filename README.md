@@ -20,7 +20,8 @@ gehosteten Dienst für Dritte anbieten und die Lizenzprüfung umgehen sind es ni
 Das Relay kennt nur einen Weg: ein gültiges Ticket im `hello`. Formate:
 [docs/ticket-format.md](docs/ticket-format.md), [docs/license-format.md](docs/license-format.md),
 Protokoll: [docs/protocol.md](docs/protocol.md), Widerrufe: [docs/revocation-format.md](docs/revocation-format.md),
-Sicherheit: [docs/security.md](docs/security.md).
+Sicherheit: [docs/security.md](docs/security.md), Konto-API der App im Selbstbetrieb:
+[docs/account-api.md](docs/account-api.md).
 
 > Das E2E-Verfahren braucht vor jeder Freigabe eine externe kryptografische Prüfung. Der Server
 > speichert und verteilt nur opake Daten; die Kryptografie liegt in der App (Schritt E).
@@ -31,6 +32,7 @@ Sicherheit: [docs/security.md](docs/security.md).
 Cargo.toml, Cargo.lock      ein Crate, Versionen fest
 migrations/                 0001_relay.sql (Relay), 0002_identity.sql (Selbstbetrieb),
                             0003_magic_link_browser.sql (Anmeldelink an den Browser gebunden)
+                            bis 0009_app_platform.sql (Plattform der App je Gerät)
 src/
   main.rs                   Befehle: serve, healthcheck, login-link
   lib.rs                    Zusammenbau (auch für die Tests)
@@ -40,10 +42,11 @@ src/
   relay/                    conn (WebSocket), team (Log, Sequenz, Replay, Snapshot),
                             reservations ("first wins"), claims (Hash-Vergleich), store (SQLite)
   identity/                 auth (Tokens, Magic Link, Device Flow), teams (Einladungen, Plätze,
-                            Lizenz, Tickets), pages (Browserseiten)
+                            Lizenz, Tickets), api (Konto-API /api/v1 wie die Webseite),
+                            account (/account/devices), pages (Browserseiten)
   mail/                     Versand (SMTP/log/none), Vorlagen, Texte in 12 Sprachen
   http/                     Router, Sicherheitsheader, Ratenbegrenzung
-tests/                      relay.rs, identity.rs, vectors.rs (Integrationstests)
+tests/                      relay.rs, identity.rs, account_api.rs, vectors.rs (Integrationstests)
 testdata/                   Testvektoren für Tickets und Lizenzen
 tools/php/verify_vectors.php  Gegenprobe der Vektoren mit PHP/libsodium
 docs/                       Formate, Protokoll, Wünsche an das Protokoll-Crate, Sicherheit, Abhängigkeiten
@@ -54,7 +57,7 @@ Dockerfile, docker-compose.yml, Caddyfile, .env.example
 
 Zwei Crates gehören der App (MIT) und liegen als **feste, unveränderte Kopien** unter `vendor/`,
 eingebunden als Pfadabhängigkeiten (Herkunft und Commit je Crate in `HERKUNFT.md`, derzeit
-`b30b9d5`). So baut das Image ohne Zugriff auf das App-Repository oder GitHub.
+`b13f4dc`). So baut das Image ohne Zugriff auf das App-Repository oder GitHub.
 
 | Crate | Inhalt | Im Relay |
 | --- | --- | --- |
@@ -264,9 +267,20 @@ Alle Schlüssel mit Erklärung in [.env.example](.env.example). Die wichtigsten:
 ## Selbstbetrieb Schritt für Schritt
 
 1. `IDENTITY=local`, `SERVER_SECRET`, `PUBLIC_URL`; Mail per SMTP oder `MAIL_TRANSPORT=none`.
-2. Erste Person anmelden: In Hangar den Server eintragen und anmelden (Device Flow). Die Seite
-   `/device` fragt nach der E-Mail-Adresse. Bei `SIGNUP=invite` und ohne Mail: auf dem Host
+2. Erste Person anmelden: In Hangar als Server-Adresse **`<PUBLIC_URL>/api/v1`** eintragen (z. B.
+   `https://team.example.org/api/v1`) und anmelden (Device Flow). Unter dieser einen Basis bietet
+   der Server dieselbe Konto-API wie hangar.feoren.com ([docs/account-api.md](docs/account-api.md));
+   das Ticket nennt den Live-Kanal `wss://<Host>/v1/live` selbst. Die Seite `/device` fragt nach
+   der E-Mail-Adresse. Bei `SIGNUP=invite` und ohne Mail: auf dem Host
    `docker compose run --rm teamserver login-link admin@example.org` und den Link öffnen.
+   Verbundene Geräte stehen unter `<PUBLIC_URL>/account/devices` (Hangar verlinkt die Seite) und
+   lassen sich dort trennen.
+
+   > **TLS ist Pflicht außerhalb des eigenen Rechners.** Hangar akzeptiert `http`/`ws` nur für
+   > `127.0.0.1`, `localhost` und `[::1]`. Im LAN oder im Netz braucht der Server ein Zertifikat,
+   > etwa über den mitgelieferten Caddy (`Caddyfile`, Let's Encrypt) oder Caddy mit
+   > `tls internal` und der eigenen CA auf den Rechnern im LAN; `PUBLIC_URL` beginnt dann mit
+   > `https://`.
 3. Team anlegen, Personen per E-Mail-Adresse einladen. Ohne Mail gibt die API den
    Einladungslink an den Admin zurück; er reicht ihn selbst weiter. Der Link gilt einmal, 7
    Tage, nur für diese Adresse.
@@ -276,10 +290,28 @@ Alle Schlüssel mit Erklärung in [.env.example](.env.example). Die wichtigsten:
 
 ### HTTP-API (nur Selbstbetrieb)
 
+Konto-API der App unter **`/api/v1`**, gleich der Webseite (Einzelheiten:
+[docs/account-api.md](docs/account-api.md)); Eingaben JSON oder Formular, Fehler als
+`application/problem+json`:
+
 | Methode und Pfad | Zweck |
 | --- | --- |
-| `POST /oauth/device_authorization` | Device Flow starten (`client_id=hangar`, optional `device_name`) |
-| `POST /oauth/token` | `device_code` einlösen bzw. `refresh_token` rotieren (RFC 8628, RFC 6749) |
+| `POST /api/v1/oauth/device` | Device Flow starten (`client_id=hangar-desktop`, optional `scope=team`, `device_name`, `platform`) |
+| `POST /api/v1/oauth/token` | `device_code` einlösen bzw. `refresh_token` rotieren |
+| `POST /api/v1/oauth/revoke` | RFC 7009: Erneuerungstoken beendet die ganze Gerätesitzung; immer 200 |
+| `GET /api/v1/me` | eigenes Konto mit Plätzen |
+| `GET /api/v1/projects` | Teams mit Rolle, Plätzen des Eigentümers, offenen Einladungen |
+| `POST /api/v1/relay-ticket` | Ticket für `hello` (`project_id`) mit `relay_url` |
+| `GET /api/v1/keys` | öffentlicher Ticketschlüssel |
+| `GET/POST /account/devices` | Browserseite: verbundene Geräte ansehen und trennen |
+
+Weitere Routen (Verwaltung und Browser; die alten OAuth-Routen bleiben für bestehende Skripte,
+`client_id` dort `hangar` oder `hangar-desktop`, nur Formular):
+
+| Methode und Pfad | Zweck |
+| --- | --- |
+| `POST /oauth/device_authorization` | Device Flow starten (alte Form) |
+| `POST /oauth/token` | `device_code` einlösen bzw. `refresh_token` rotieren (alte Form) |
 | `GET/POST /device` | Browserseite: Code bestätigen |
 | `POST /auth/email`, `GET/POST /auth/magic/{token}` | Anmeldelink anfordern und einlösen |
 | `GET /v1/me` | eigenes Konto und Teams |
@@ -290,9 +322,9 @@ Alle Schlüssel mit Erklärung in [.env.example](.env.example). Die wichtigsten:
 | `POST .../invitations/{id}/resend`, `DELETE .../invitations/{id}` | erneut senden, widerrufen |
 | `POST /v1/invitations/accept`, `GET/POST /invite/{token}` | annehmen (App bzw. Browser) |
 | `GET/PUT/DELETE /v1/license` | Lizenzdokument |
-| `POST /v1/tickets` | Ticket für `hello` (`team`) |
+| `POST /v1/tickets` | Ticket für `hello` (`team`, alte Form von `/api/v1/relay-ticket`) |
 
-Fehler: `{"error":"<code>"}` mit passendem Status (`unauthorized`, `forbidden`, `not_found`,
+Fehler der Routen außerhalb von `/api/v1`: `{"error":"<code>"}` mit passendem Status (`unauthorized`, `forbidden`, `not_found`,
 `invalid_request`, `rate_limited`, `seats_full`, `wrong_account`, `invalid_license`,
 `license_expired`, `license_email_mismatch`, `license_in_use`).
 

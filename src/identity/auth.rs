@@ -24,7 +24,13 @@ use crate::mail::i18n::{fill, pick};
 use crate::mail::templates::{escape, MailKind};
 use crate::util::{normalize_email, now_s, random_bytes, random_id, random_token, token_hash};
 
-pub const CLIENT_ID: &str = "hangar";
+/// Erlaubte `client_id`: `hangar-desktop` sendet die App (wie bei der Webseite), `hangar` bleibt
+/// für bestehende Skripte und ältere Fassungen der Selbstbetrieb-Doku gültig. Beide Namen
+/// bezeichnen denselben öffentlichen Client ohne Geheimnis; ein Unterschied in den Rechten
+/// entsteht dadurch nicht.
+pub const CLIENT_IDS: [&str; 2] = ["hangar-desktop", "hangar"];
+/// Einziger Scope (wie die Webseite); leer heißt ebenfalls `team`.
+pub const SCOPE: &str = "team";
 pub const ACCESS_TTL_S: i64 = 3600;
 pub const REFRESH_TTL_S: i64 = 30 * 86_400;
 pub const BROWSER_TTL_S: i64 = 12 * 3600;
@@ -32,7 +38,24 @@ pub const MAGIC_TTL_S: i64 = 15 * 60;
 pub const ADMIN_LINK_TTL_S: i64 = 60 * 60;
 pub const DEVICE_TTL_S: i64 = 600;
 pub const DEVICE_INTERVAL_S: i64 = 5;
-const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// Geräteanfragen je Adresse (alte und neue Route teilen sich den Zähler).
+const DEVICE_RULE: Rule = Rule {
+    limit: 30,
+    window_s: 3600,
+};
+/// Tokenabfragen je Adresse und 15 Minuten (wie die Webseite).
+const TOKEN_RULE: Rule = Rule {
+    limit: 600,
+    window_s: 900,
+};
+/// Widerrufe nach RFC 7009 je Adresse und 15 Minuten (wie die Webseite).
+const REVOKE_RULE: Rule = Rule {
+    limit: 60,
+    window_s: 900,
+};
+/// Längste angenommene Tokens und Gerätecodes (ausgegeben werden 43 bis 47 Zeichen).
+const MAX_TOKEN_LEN: usize = 128;
 /// Buchstaben ohne Vokale und Verwechselbares (RFC 8628, Abschnitt 6.1): 20^8 Möglichkeiten.
 const USER_CODE_ALPHABET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXZ";
 
@@ -112,20 +135,23 @@ pub async fn find_or_create_user(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn new_session(
     tx: &mut Tx,
     user_id: &str,
     kind: &str,
     label: &str,
+    platform: Option<&str>,
     ttl_s: i64,
     now: i64,
 ) -> Result<String, sqlx::Error> {
     let id = format!("s_{}", random_id());
-    sqlx::query("INSERT INTO auth_sessions (id, user_id, kind, label, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO auth_sessions (id, user_id, kind, label, platform, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(user_id)
         .bind(kind)
         .bind(label)
+        .bind(platform)
         .bind(now)
         .bind(now)
         .bind(now + ttl_s)
@@ -153,12 +179,22 @@ async fn store_token(
     Ok(token)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct TokenResponse {
     access_token: String,
     token_type: &'static str,
     expires_in: i64,
     refresh_token: String,
+    scope: &'static str,
+}
+
+/// Ohne die Tokens: Debug-Ausgaben dürfen nie Geheimnisse tragen.
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("expires_in", &self.expires_in)
+            .finish_non_exhaustive()
+    }
 }
 
 async fn issue_app_tokens(
@@ -179,6 +215,7 @@ async fn issue_app_tokens(
         token_type: "Bearer",
         expires_in: ACCESS_TTL_S,
         refresh_token: refresh,
+        scope: SCOPE,
     })
 }
 
@@ -188,7 +225,7 @@ pub async fn start_browser_session(
     user_id: &str,
     now: i64,
 ) -> Result<String, sqlx::Error> {
-    let session = new_session(tx, user_id, "browser", "Browser", BROWSER_TTL_S, now).await?;
+    let session = new_session(tx, user_id, "browser", "Browser", None, BROWSER_TTL_S, now).await?;
     store_token(tx, &session, "browser", "htb_", BROWSER_TTL_S, now).await
 }
 
@@ -224,7 +261,7 @@ pub async fn housekeeping(db: &Db) -> Result<(), sqlx::Error> {
 /// Erlaubte Rücksprungziele nach dem Anmeldelink (keine offenen Weiterleitungen).
 fn safe_return(raw: Option<&str>) -> String {
     match raw {
-        Some(path) if path == "/device" => path.to_owned(),
+        Some(path) if path == "/device" || path == DEVICES_PAGE => path.to_owned(),
         Some(path)
             if path.strip_prefix("/device?code=").is_some_and(|c| {
                 c.len() == 9 && c.bytes().all(|b| b.is_ascii_uppercase() || b == b'-')
@@ -236,6 +273,9 @@ fn safe_return(raw: Option<&str>) -> String {
     }
 }
 
+/// Browserseite der verbundenen Geräte; der Pfad ist fest in der App (`BaseUrl::devices_page`).
+pub const DEVICES_PAGE: &str = "/account/devices";
+
 /// Rücksprung nach dem Anmeldelink. Ein Gerätecode im Ziel gilt nur in dem Browser, der den
 /// Link angefordert hat: sonst könnte jemand einen Link mit seinem eigenen Code an eine fremde
 /// Adresse schicken lassen, und die Person ließe mit einem Klick sein Gerät zu.
@@ -246,7 +286,8 @@ fn return_after_magic(stored: &str, bound: Option<&str>, browser: Option<&str>) 
         }
         _ => false,
     };
-    if same_browser {
+    // Die Geräteliste trägt keinen Code: sie darf in jedem Browser das Ziel sein.
+    if same_browser || stored == DEVICES_PAGE {
         safe_return(Some(stored))
     } else {
         "/device".into()
@@ -608,17 +649,224 @@ pub fn normalize_user_code(raw: &str) -> Option<String> {
         .then(|| format!("{}-{}", &letters[..4], &letters[4..]))
 }
 
+/// Gerätename für Sitzungsliste und Bestätigungsseite: Steuerzeichen werden zu Leerzeichen,
+/// ohne Rand, gekürzt; leer wird `Hangar`.
+pub fn clean_label(raw: Option<&str>, max_chars: usize) -> String {
+    let spaced: String = raw
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let label: String = spaced.trim().chars().take(max_chars).collect();
+    let label = label.trim_end();
+    if label.is_empty() {
+        "Hangar".into()
+    } else {
+        label.to_owned()
+    }
+}
+
+/// Plattform der App (`windows`, `macos`, `linux`, ...): `[A-Za-z0-9 ._-]`, 1 bis 40 Zeichen,
+/// sonst keine (wie die Webseite).
+pub fn clean_platform(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    let fine = !value.is_empty()
+        && value.len() <= 40
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'.' | b'_' | b'-'));
+    fine.then(|| value.to_owned())
+}
+
+/// Token oder Gerätecode in brauchbarer Länge.
+fn usable_token(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.is_empty() && v.len() <= MAX_TOKEN_LEN)
+}
+
+pub fn client_ok(client_id: Option<&str>) -> bool {
+    client_id.is_some_and(|id| CLIENT_IDS.contains(&id))
+}
+
+/// Scope der Anfrage: leer oder fehlend heißt `team`, sonst nur `team` (auch mehrfach).
+pub fn scope_ok(scope: Option<&str>) -> bool {
+    scope.is_none_or(|s| s.split(' ').filter(|p| !p.is_empty()).all(|p| p == SCOPE))
+}
+
+/// Antwort auf den Start des Device Flows (RFC 8628, Abschnitt 3.2).
+#[derive(Serialize)]
+pub struct DeviceStart {
+    device_code: String,
+    pub user_code: String,
+    verification_uri: String,
+    verification_uri_complete: String,
+    expires_in: i64,
+    interval: i64,
+}
+
+/// Dienst: Device Flow starten. Fehler als OAuth-Code (`rate_limited` wird zu 429).
+pub async fn start_device(
+    identity: &Identity,
+    ip: &str,
+    client_id: Option<&str>,
+    scope: Option<&str>,
+    label: &str,
+    platform: Option<&str>,
+) -> Result<DeviceStart, &'static str> {
+    if !identity.limiter.hit("device-ip", ip, DEVICE_RULE, now_s()) {
+        return Err("rate_limited");
+    }
+    if !client_ok(client_id) {
+        return Err("invalid_client");
+    }
+    if !scope_ok(scope) {
+        return Err("invalid_scope");
+    }
+    let device_code = random_token();
+    let code = user_code();
+    let now = now_s();
+    sqlx::query("INSERT INTO device_codes (hash, user_code, label, platform, created_at, expires_at, interval_s, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')")
+        .bind(token_hash(&device_code))
+        .bind(&code)
+        .bind(label)
+        .bind(platform)
+        .bind(now)
+        .bind(now + DEVICE_TTL_S)
+        .bind(DEVICE_INTERVAL_S)
+        .execute(&identity.db)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Device Flow: Start");
+            "server_error"
+        })?;
+    Ok(DeviceStart {
+        device_code,
+        verification_uri: identity.url("/device"),
+        verification_uri_complete: identity.url(&format!("/device?code={code}")),
+        user_code: code,
+        expires_in: DEVICE_TTL_S,
+        interval: DEVICE_INTERVAL_S,
+    })
+}
+
+/// Dienst: Token-Endpunkt (Gerätecode einlösen oder Erneuerungstoken rotieren). Fehler als
+/// OAuth-Code nach RFC 6749 5.2 und RFC 8628 3.5; `rate_limited` wird zu 429.
+pub async fn exchange(
+    identity: &Identity,
+    ip: &str,
+    client_id: Option<&str>,
+    grant_type: Option<&str>,
+    device_code: Option<&str>,
+    refresh_token: Option<&str>,
+) -> Result<TokenResponse, &'static str> {
+    if !identity.limiter.hit("token-ip", ip, TOKEN_RULE, now_s()) {
+        return Err("rate_limited");
+    }
+    if !client_ok(client_id) {
+        return Err("invalid_client");
+    }
+    match grant_type {
+        Some(DEVICE_GRANT) => match usable_token(device_code) {
+            Some(code) => poll_device(&identity.db, code).await,
+            None => Err("invalid_request"),
+        },
+        Some("refresh_token") => match usable_token(refresh_token) {
+            Some(token) => refresh(&identity.db, token).await,
+            None => Err("invalid_request"),
+        },
+        Some(_) => Err("unsupported_grant_type"),
+        None => Err("invalid_request"),
+    }
+}
+
+/// Dienst: Widerruf durch die App (RFC 7009). Ein Erneuerungstoken beendet die ganze
+/// Gerätesitzung (alle Tokens der Familie), ein Zugriffstoken nur sich selbst. Unbekannte,
+/// fremde oder schon widerrufene Tokens ändern nichts und sehen gleich aus (keine Auskunft).
+/// Browsertokens sind ausgenommen. `token_type_hint` ist nur ein Hinweis (RFC 7009 2.1).
+pub async fn revoke_token(
+    identity: &Identity,
+    ip: &str,
+    client_id: Option<&str>,
+    token: Option<&str>,
+    hint: Option<&str>,
+) -> Result<(), &'static str> {
+    if !identity.limiter.hit("revoke-ip", ip, REVOKE_RULE, now_s()) {
+        return Err("rate_limited");
+    }
+    if !client_ok(client_id) {
+        return Err("invalid_client");
+    }
+    let Some(token) = usable_token(token) else {
+        return Err("invalid_request");
+    };
+    if !matches!(hint, None | Some("" | "refresh_token" | "access_token")) {
+        return Err("invalid_request");
+    }
+    let internal = |error: sqlx::Error| {
+        tracing::error!(%error, "Widerruf (RFC 7009)");
+        "server_error"
+    };
+    let now = now_s();
+    let hash = token_hash(token);
+    let mut tx = begin_write(&identity.db).await.map_err(internal)?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT t.kind, t.session_id FROM auth_tokens t JOIN auth_sessions s ON s.id = t.session_id \
+         WHERE t.hash = ? AND t.kind IN ('access', 'refresh') AND s.kind = 'app'",
+    )
+    .bind(&hash)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?;
+    match row {
+        Some((kind, session)) if kind == "refresh" => {
+            sqlx::query(
+                "UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            )
+            .bind(now)
+            .bind(&session)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+            sqlx::query("DELETE FROM auth_tokens WHERE session_id = ?")
+                .bind(&session)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+            tx.commit().await.map_err(internal)?;
+            tracing::info!("App abgemeldet: Gerätesitzung widerrufen (RFC 7009)");
+        }
+        Some(_) => {
+            sqlx::query("DELETE FROM auth_tokens WHERE hash = ?")
+                .bind(&hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+            tx.commit().await.map_err(internal)?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthForm {
     client_id: Option<String>,
+    scope: Option<String>,
     /// Anzeigename des Geräts für die Sitzungsliste (z. B. "Hangar auf Laptop").
     device_name: Option<String>,
+    platform: Option<String>,
 }
 
+/// Fehler der alten OAuth-Routen: `{"error": code}` (Form bleibt für bestehende Clients).
 fn oauth_error(code: &'static str) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": code }))).into_response()
+    let status = match code {
+        "rate_limited" => StatusCode::TOO_MANY_REQUESTS,
+        "server_error" => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, Json(json!({ "error": code }))).into_response()
 }
 
+/// `POST /oauth/device_authorization` (nur Formular). Die App nutzt `/api/v1/oauth/device`.
 pub async fn device_authorization(
     State(state): State<AppState>,
     ip: ClientIp,
@@ -627,87 +875,65 @@ pub async fn device_authorization(
     let Ok(identity) = identity(&state) else {
         return ApiError::NOT_FOUND.into_response();
     };
-    if form.client_id.as_deref() != Some(CLIENT_ID) {
-        return oauth_error("invalid_client");
-    }
-    if !identity.limiter.hit(
-        "device-ip",
+    let label = clean_label(form.device_name.as_deref(), 64);
+    let platform = clean_platform(form.platform.as_deref());
+    match start_device(
+        identity,
         &ip.key(),
-        Rule {
-            limit: 30,
-            window_s: 3600,
-        },
-        now_s(),
-    ) {
-        return ApiError::RATE_LIMITED.into_response();
+        form.client_id.as_deref(),
+        form.scope.as_deref(),
+        &label,
+        platform.as_deref(),
+    )
+    .await
+    {
+        Ok(started) => Json(started).into_response(),
+        Err(code) => oauth_error(code),
     }
-    let label: String = form
-        .device_name
-        .unwrap_or_else(|| "Hangar".into())
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect();
-    let device_code = random_token();
-    let code = user_code();
-    let now = now_s();
-    let stored = sqlx::query("INSERT INTO device_codes (hash, user_code, label, created_at, expires_at, interval_s, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')")
-        .bind(token_hash(&device_code))
-        .bind(&code)
-        .bind(&label)
-        .bind(now)
-        .bind(now + DEVICE_TTL_S)
-        .bind(DEVICE_INTERVAL_S)
-        .execute(&identity.db)
-        .await;
-    if let Err(error) = stored {
-        return ApiError::from(error).into_response();
-    }
-    Json(json!({
-        "device_code": device_code,
-        "user_code": code,
-        "verification_uri": identity.url("/device"),
-        "verification_uri_complete": identity.url(&format!("/device?code={code}")),
-        "expires_in": DEVICE_TTL_S,
-        "interval": DEVICE_INTERVAL_S,
-    }))
-    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TokenForm {
-    grant_type: String,
+    grant_type: Option<String>,
     client_id: Option<String>,
     device_code: Option<String>,
     refresh_token: Option<String>,
 }
 
-pub async fn token(State(state): State<AppState>, Form(form): Form<TokenForm>) -> Response {
+/// `POST /oauth/token` (nur Formular). Die App nutzt `/api/v1/oauth/token`.
+pub async fn token(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    Form(form): Form<TokenForm>,
+) -> Response {
     let Ok(identity) = identity(&state) else {
         return ApiError::NOT_FOUND.into_response();
     };
-    if form.client_id.as_deref() != Some(CLIENT_ID) {
-        return oauth_error("invalid_client");
-    }
-    let result = match form.grant_type.as_str() {
-        DEVICE_GRANT => match form.device_code.as_deref() {
-            Some(code) => poll_device(&identity.db, code).await,
-            None => Err("invalid_request"),
-        },
-        "refresh_token" => match form.refresh_token.as_deref() {
-            Some(token) => refresh(&identity.db, token).await,
-            None => Err("invalid_request"),
-        },
-        _ => Err("unsupported_grant_type"),
-    };
-    match result {
+    match exchange(
+        identity,
+        &ip.key(),
+        form.client_id.as_deref(),
+        form.grant_type.as_deref(),
+        form.device_code.as_deref(),
+        form.refresh_token.as_deref(),
+    )
+    .await
+    {
         Ok(tokens) => Json(tokens).into_response(),
         Err(code) => oauth_error(code),
     }
 }
 
-/// status, expires_at, interval_s, last_poll_at, user_id, label
-type DeviceRow = (String, i64, i64, Option<i64>, Option<String>, String);
+/// status, expires_at, interval_s, last_poll_at, user_id, label, platform
+type DeviceRow = (
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 async fn poll_device(db: &Db, device_code: &str) -> Result<TokenResponse, &'static str> {
     let now = now_s();
@@ -717,13 +943,13 @@ async fn poll_device(db: &Db, device_code: &str) -> Result<TokenResponse, &'stat
     };
     let mut tx = begin_write(db).await.map_err(internal)?;
     let row: Option<DeviceRow> = sqlx::query_as(
-        "SELECT status, expires_at, interval_s, last_poll_at, user_id, label FROM device_codes WHERE hash = ?",
+        "SELECT status, expires_at, interval_s, last_poll_at, user_id, label, platform FROM device_codes WHERE hash = ?",
     )
     .bind(token_hash(device_code))
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
-    let Some((status, expires_at, interval, last_poll, user_id, label)) = row else {
+    let Some((status, expires_at, interval, last_poll, user_id, label, platform)) = row else {
         return Err("invalid_grant");
     };
     if expires_at <= now {
@@ -758,9 +984,17 @@ async fn poll_device(db: &Db, device_code: &str) -> Result<TokenResponse, &'stat
             .execute(&mut *tx)
             .await
             .map_err(internal)?;
-            let session = new_session(&mut tx, &user_id, "app", &label, REFRESH_TTL_S, now)
-                .await
-                .map_err(internal)?;
+            let session = new_session(
+                &mut tx,
+                &user_id,
+                "app",
+                &label,
+                platform.as_deref(),
+                REFRESH_TTL_S,
+                now,
+            )
+            .await
+            .map_err(internal)?;
             let tokens = issue_app_tokens(&mut tx, &session, now)
                 .await
                 .map_err(internal)?;
@@ -832,6 +1066,34 @@ pub async fn refresh(db: &Db, token: &str) -> Result<TokenResponse, &'static str
     Ok(tokens)
 }
 
+/// Anmeldeformular (Anmeldelink per Mail) mit Rücksprung auf `return_to` (nur Pfade aus
+/// [`safe_return`]); ohne Mailversand ein Hinweis, den Admin um einen Link zu bitten.
+pub(crate) fn sign_in_page(
+    identity: &Identity,
+    lang: &str,
+    title: &str,
+    return_to: &str,
+) -> Response {
+    let s = crate::mail::i18n::strings(lang);
+    let body = if identity.mailer.enabled() {
+        format!(
+            r#"<h1>{title}</h1><p>{prompt}</p><form method="post" action="/auth/email">{ret}<label for="email">{label}</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254"><button type="submit">{send}</button></form>"#,
+            title = escape(title),
+            prompt = escape(s.page_email_prompt),
+            ret = hidden("return_to", return_to),
+            label = escape(s.page_email_label),
+            send = escape(s.page_email_send),
+        )
+    } else {
+        format!(
+            r#"<h1>{}</h1><p class="muted">{}</p>"#,
+            escape(title),
+            escape(s.page_no_mail)
+        )
+    };
+    page(lang, title, &body, StatusCode::OK)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DeviceQuery {
     code: Option<String>,
@@ -853,30 +1115,14 @@ pub async fn device_page(
         let return_to = code
             .as_ref()
             .map_or("/device".to_owned(), |c| format!("/device?code={c}"));
-        let body = if identity.mailer.enabled() {
-            format!(
-                r#"<h1>{title}</h1><p>{prompt}</p><form method="post" action="/auth/email">{ret}<label for="email">{label}</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254"><button type="submit">{send}</button></form>"#,
-                title = escape(s.page_device_title),
-                prompt = escape(s.page_email_prompt),
-                ret = hidden("return_to", &return_to),
-                label = escape(s.page_email_label),
-                send = escape(s.page_email_send),
-            )
-        } else {
-            format!(
-                r#"<h1>{}</h1><p class="muted">{}</p>"#,
-                escape(s.page_device_title),
-                escape(s.page_no_mail)
-            )
-        };
-        return page(lang, s.page_device_title, &body, StatusCode::OK);
+        return sign_in_page(identity, lang, s.page_device_title, &return_to);
     };
     let csrf = csrf_token(&identity.config, &user.session_id);
     let signed_in = escape(&fill(s.page_signed_in, &[("email", &user.email)]));
     let label = match &code {
         Some(code) => {
-            let label: Option<String> = sqlx::query_scalar(
-                "SELECT label FROM device_codes WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+            let label: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT label, platform FROM device_codes WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
             )
             .bind(code)
             .bind(now_s())
@@ -885,7 +1131,8 @@ pub async fn device_page(
             .ok()
             .flatten();
             match label {
-                Some(label) => label,
+                Some((label, Some(platform))) => format!("{label} ({platform})"),
+                Some((label, None)) => label,
                 None => {
                     return message(
                         lang,
@@ -1026,7 +1273,7 @@ pub async fn device_decide(
 // ---------------------------------------------------------------------------------------------
 // Sitzungen
 
-async fn revoke(db: &Db, user_id: &str, session_id: &str) -> Result<bool, sqlx::Error> {
+pub(crate) async fn revoke(db: &Db, user_id: &str, session_id: &str) -> Result<bool, sqlx::Error> {
     let mut tx = begin_write(db).await?;
     let done = sqlx::query("UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL")
         .bind(now_s())

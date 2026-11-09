@@ -53,6 +53,13 @@ pub struct Strings {
     pub page_wrong_account: &'static str,
     pub page_signed_in: &'static str,
     pub page_too_many: &'static str,
+    // Seite /account/devices
+    pub page_devices_title: &'static str,
+    pub page_devices_empty: &'static str,
+    pub page_devices_revoke: &'static str,
+    pub page_devices_revoked: &'static str,
+    /// `{created}` und `{used}`: Zeitpunkte als `JJJJ-MM-TT hh:mm UTC`.
+    pub page_devices_meta: &'static str,
 }
 
 pub fn strings(lang: &str) -> &'static Strings {
@@ -149,6 +156,11 @@ pub static DE: Strings = Strings {
     page_wrong_account: "Du bist mit einer anderen Adresse angemeldet. Die Einladung gilt nur für die eingeladene Adresse.",
     page_signed_in: "Angemeldet als {email}",
     page_too_many: "Zu viele Versuche. Bitte später erneut versuchen.",
+    page_devices_title: "Verbundene Geräte",
+    page_devices_empty: "Mit diesem Konto ist kein Gerät verbunden.",
+    page_devices_revoke: "Trennen",
+    page_devices_revoked: "Das Gerät wurde getrennt. Hangar muss sich dort neu anmelden.",
+    page_devices_meta: "Verbunden {created}, zuletzt benutzt {used}",
 };
 
 pub static EN: Strings = Strings {
@@ -194,6 +206,11 @@ pub static EN: Strings = Strings {
     page_wrong_account: "You are signed in with another address. The invitation only works for the invited address.",
     page_signed_in: "Signed in as {email}",
     page_too_many: "Too many attempts. Please try again later.",
+    page_devices_title: "Connected devices",
+    page_devices_empty: "No device is connected to this account.",
+    page_devices_revoke: "Disconnect",
+    page_devices_revoked: "The device was disconnected. Hangar has to sign in there again.",
+    page_devices_meta: "Connected {created}, last used {used}",
 };
 
 pub static TR: Strings = Strings {
@@ -239,6 +256,11 @@ pub static TR: Strings = Strings {
     page_wrong_account: "Başka bir adresle giriş yapmışsın. Davet yalnızca davet edilen adres için geçerli.",
     page_signed_in: "{email} olarak giriş yapıldı",
     page_too_many: "Çok fazla deneme. Lütfen daha sonra tekrar dene.",
+    page_devices_title: "Bağlı cihazlar",
+    page_devices_empty: "Bu hesaba bağlı cihaz yok.",
+    page_devices_revoke: "Bağlantıyı kes",
+    page_devices_revoked: "Cihazın bağlantısı kesildi. Oradaki Hangar yeniden oturum açmalı.",
+    page_devices_meta: "Bağlandı: {created}, son kullanım: {used}",
 };
 
 pub static FR: Strings = Strings {
@@ -284,6 +306,11 @@ pub static FR: Strings = Strings {
     page_wrong_account: "Tu es connecté avec une autre adresse. L'invitation ne vaut que pour l'adresse invitée.",
     page_signed_in: "Connecté avec {email}",
     page_too_many: "Trop de tentatives. Réessaie plus tard.",
+    page_devices_title: "Appareils connectés",
+    page_devices_empty: "Aucun appareil n’est connecté à ce compte.",
+    page_devices_revoke: "Déconnecter",
+    page_devices_revoked: "L’appareil a été déconnecté. Hangar devra s’y reconnecter.",
+    page_devices_meta: "Connecté le {created}, dernière utilisation {used}",
 };
 
 pub static ES: Strings = Strings {
@@ -329,6 +356,11 @@ pub static ES: Strings = Strings {
     page_wrong_account: "Has iniciado sesión con otra dirección. La invitación solo vale para la dirección invitada.",
     page_signed_in: "Sesión iniciada como {email}",
     page_too_many: "Demasiados intentos. Inténtalo más tarde.",
+    page_devices_title: "Dispositivos conectados",
+    page_devices_empty: "No hay ningún dispositivo conectado a esta cuenta.",
+    page_devices_revoke: "Desconectar",
+    page_devices_revoked: "El dispositivo se ha desconectado. Hangar tendrá que volver a iniciar sesión allí.",
+    page_devices_meta: "Conectado el {created}, último uso {used}",
 };
 
 pub static PT: Strings = Strings {
@@ -374,6 +406,11 @@ pub static PT: Strings = Strings {
     page_wrong_account: "Você entrou com outro endereço. O convite vale apenas para o endereço convidado.",
     page_signed_in: "Conectado como {email}",
     page_too_many: "Tentativas demais. Tente novamente mais tarde.",
+    page_devices_title: "Dispositivos conectados",
+    page_devices_empty: "Nenhum dispositivo está conectado a esta conta.",
+    page_devices_revoke: "Desconectar",
+    page_devices_revoked: "O dispositivo foi desconectado. O Hangar nele terá de entrar novamente.",
+    page_devices_meta: "Conectado em {created}, último uso {used}",
 };
 
 pub static EL: Strings = Strings {
@@ -419,6 +456,11 @@ pub static EL: Strings = Strings {
     page_wrong_account: "Έχεις συνδεθεί με άλλη διεύθυνση. Η πρόσκληση ισχύει μόνο για τη διεύθυνση που προσκλήθηκε.",
     page_signed_in: "Συνδεδεμένος/η ως {email}",
     page_too_many: "Πάρα πολλές προσπάθειες. Δοκίμασε ξανά αργότερα.",
+    page_devices_title: "Συνδεδεμένες συσκευές",
+    page_devices_empty: "Καμία συσκευή δεν είναι συνδεδεμένη με αυτόν τον λογαριασμό.",
+    page_devices_revoke: "Αποσύνδεση",
+    page_devices_revoked: "Η συσκευή αποσυνδέθηκε. Το Hangar εκεί πρέπει να συνδεθεί ξανά.",
+    page_devices_meta: "Συνδέθηκε {created}, τελευταία χρήση {used}",
 };
 
 pub static PL: Strings = Strings {
@@ -464,6 +506,11 @@ pub static PL: Strings = Strings {
     page_wrong_account: "Jesteś zalogowany(-a) innym adresem. Zaproszenie działa tylko dla zaproszonego adresu.",
     page_signed_in: "Zalogowano jako {email}",
     page_too_many: "Zbyt wiele prób. Spróbuj ponownie później.",
+    page_devices_title: "Połączone urządzenia",
+    page_devices_empty: "Z tym kontem nie jest połączone żadne urządzenie.",
+    page_devices_revoke: "Odłącz",
+    page_devices_revoked: "Urządzenie zostało odłączone. Hangar musi się na nim zalogować ponownie.",
+    page_devices_meta: "Połączono {created}, ostatnio użyto {used}",
 };
 
 pub static RU: Strings = Strings {
@@ -509,6 +556,11 @@ pub static RU: Strings = Strings {
     page_wrong_account: "Вы вошли с другим адресом. Приглашение действует только для приглашённого адреса.",
     page_signed_in: "Вход выполнен: {email}",
     page_too_many: "Слишком много попыток. Повторите позже.",
+    page_devices_title: "Подключённые устройства",
+    page_devices_empty: "К этой учётной записи не подключено ни одного устройства.",
+    page_devices_revoke: "Отключить",
+    page_devices_revoked: "Устройство отключено. Hangar на нём должен войти снова.",
+    page_devices_meta: "Подключено {created}, последнее использование {used}",
 };
 
 pub static JA: Strings = Strings {
@@ -554,6 +606,11 @@ pub static JA: Strings = Strings {
     page_wrong_account: "別のアドレスでサインインしています。招待は招待されたアドレスでのみ有効です。",
     page_signed_in: "{email} でサインイン中",
     page_too_many: "試行回数が多すぎます。しばらくしてから再度お試しください。",
+    page_devices_title: "接続済みのデバイス",
+    page_devices_empty: "このアカウントに接続されているデバイスはありません。",
+    page_devices_revoke: "接続を解除",
+    page_devices_revoked: "デバイスの接続を解除しました。そのデバイスの Hangar は再度サインインが必要です。",
+    page_devices_meta: "接続日時 {created}、最終使用 {used}",
 };
 
 pub static ZH: Strings = Strings {
@@ -600,6 +657,11 @@ pub static ZH: Strings = Strings {
     page_wrong_account: "你已使用其他地址登录。邀请仅对被邀请的地址有效。",
     page_signed_in: "已登录为 {email}",
     page_too_many: "尝试次数过多,请稍后再试。",
+    page_devices_title: "已连接的设备",
+    page_devices_empty: "此账户没有已连接的设备。",
+    page_devices_revoke: "断开连接",
+    page_devices_revoked: "设备已断开连接。该设备上的 Hangar 需要重新登录。",
+    page_devices_meta: "连接于 {created},最近使用 {used}",
 };
 
 pub static AR: Strings = Strings {
@@ -645,6 +707,11 @@ pub static AR: Strings = Strings {
     page_wrong_account: "أنت مسجّل الدخول بعنوان آخر. الدعوة صالحة فقط للعنوان المدعو.",
     page_signed_in: "مسجّل الدخول باسم {email}",
     page_too_many: "محاولات كثيرة جدًا. حاول لاحقًا.",
+    page_devices_title: "الأجهزة المتصلة",
+    page_devices_empty: "لا يوجد جهاز متصل بهذا الحساب.",
+    page_devices_revoke: "قطع الاتصال",
+    page_devices_revoked: "تم قطع اتصال الجهاز. يجب على Hangar هناك تسجيل الدخول مرة أخرى.",
+    page_devices_meta: "متصل منذ {created}، آخر استخدام {used}",
 };
 
 #[cfg(test)]
@@ -677,7 +744,9 @@ mod tests {
             assert!(
                 s.page_invite_done.contains("{email}")
                     && s.page_magic_prompt.contains("{email}")
-                    && s.page_device_label.contains("{label}"),
+                    && s.page_device_label.contains("{label}")
+                    && s.page_devices_meta.contains("{created}")
+                    && s.page_devices_meta.contains("{used}"),
                 "{lang}"
             );
             for text in [

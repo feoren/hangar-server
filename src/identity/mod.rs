@@ -3,9 +3,12 @@
 //! Stellt Tickets im selben Format aus wie die Webseite; das Relay kennt so nur einen Weg.
 //!
 //! Aufteilung: `auth.rs` (Sitzungen, Tokens, Magic Link, Device Flow), `teams.rs` (Teams,
-//! Einladungen, Lizenz, Tickets), `pages.rs` (Browserseiten). Handler lesen nur die Anfrage
+//! Einladungen, Lizenz, Tickets), `pages.rs` (Browserseiten), `api.rs` (Konto-API der App
+//! unter `/api/v1`, gleich der Webseite), `account.rs` (Browserseite `/account/devices`). Handler lesen nur die Anfrage
 //! und rufen die Dienstfunktionen; die Regeln stehen in den Dienstfunktionen.
 
+pub mod account;
+pub mod api;
 pub mod auth;
 pub mod pages;
 pub mod teams;
@@ -240,4 +243,9 @@ pub fn routes(_identity: Arc<Identity>) -> Router<AppState> {
                 .delete(teams::license_delete),
         )
         .route("/v1/tickets", post(teams::issue_ticket))
+        .route(
+            auth::DEVICES_PAGE,
+            get(account::devices_page).post(account::devices_revoke),
+        )
+        .merge(api::routes())
 }

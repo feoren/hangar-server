@@ -52,7 +52,14 @@ sich ohne Schlüssel nicht umkehren, aber innerhalb der Epoche vergleichen.
 - Prepared Statements überall, SQL-Texte statisch; Kennungen und Hashes vor Gebrauch geprüft.
 - Tokens: 32 Zufallsbytes aus dem Betriebssystem, gespeichert als SHA-256; Zugriff 1 h,
   Erneuerung 30 Tage, Browser 12 h, Anmeldelink 15 min, Gerätecode 10 min, Einladung 7 Tage.
-- Sitzungen sind einzeln widerrufbar (`DELETE /v1/sessions/{id}`), Abmelden widerruft die eigene.
+- Sitzungen sind einzeln widerrufbar (`DELETE /v1/sessions/{id}`, im Browser `/account/devices`
+  mit CSRF-Token und Ursprungsprüfung), Abmelden widerruft die eigene; die App meldet sich über
+  `POST /api/v1/oauth/revoke` (RFC 7009) ab, ein Erneuerungstoken beendet die ganze
+  Gerätesitzung. Wiederverwendung eines rotierten Erneuerungstokens widerruft die Sitzung.
+- Konto-API `/api/v1` ([account-api.md](account-api.md)): Körper höchstens 16 KiB, nur Formular
+  oder flaches JSON, Fehler als problem+json ohne interne Einzelheiten, 401 mit
+  `WWW-Authenticate`; Ratenbegrenzung für Gerätestart, Token, Widerruf und Tickets; nur im
+  Selbstbetrieb vorhanden.
 - Keine Auskunft, ob eine Adresse existiert (gleiche Antwort; Mail nur an erlaubte Adressen).
 - Fremde Teams antworten mit 404, nicht 403.
 - Sicherheitsheader: CSP ohne Skripte (`default-src 'none'`), `X-Frame-Options: DENY`,

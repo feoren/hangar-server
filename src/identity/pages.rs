@@ -19,7 +19,8 @@ main{width:100%;max-width:480px}.brand{display:flex;gap:10px;align-items:center;
 input{width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--canvas);color:var(--text);font:inherit;margin:0 0 16px}
 .row{display:flex;gap:12px;flex-wrap:wrap}button{min-height:44px;padding:10px 20px;border-radius:10px;border:1px solid var(--primary);background:var(--primary);color:var(--on-primary);font-family:inherit;font-size:16px;font-weight:600;line-height:1;cursor:pointer}
 button.secondary{background:transparent;color:var(--text);border-color:var(--border)}button:hover{background:var(--primary-hover)}button.secondary:hover{background:var(--canvas)}
-button:focus-visible,input:focus-visible{outline:3px solid var(--primary);outline-offset:2px}"#;
+button:focus-visible,input:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+.devices{list-style:none;padding:0;margin:0 0 16px}.devices li{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-top:1px solid var(--border);padding:12px 0}.devices li:first-child{border-top:0}.devices p{margin:0;overflow-wrap:anywhere}.devices form{margin:0}"#;
 
 pub async fn stylesheet() -> Response {
     let mut response = (StatusCode::OK, CSS).into_response();

@@ -86,10 +86,18 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
         {
             if !state.config.origin_allowed(origin) {
                 tracing::info!(route, "fremder Origin abgewiesen");
-                return with_headers(
-                    &state.config,
-                    (StatusCode::FORBIDDEN, Json(json!({ "error": "origin" }))).into_response(),
-                );
+                // Unter /api/v1 gilt das Fehlerformat der Konto-API (RFC 9457).
+                let refused = if crate::identity::api::is_api_path(request.uri().path()) {
+                    crate::identity::api::Problem::new(
+                        StatusCode::FORBIDDEN,
+                        "origin",
+                        "Requests from this origin are not allowed.",
+                    )
+                    .into_response()
+                } else {
+                    (StatusCode::FORBIDDEN, Json(json!({ "error": "origin" }))).into_response()
+                };
+                return with_headers(&state.config, refused);
             }
         }
     }

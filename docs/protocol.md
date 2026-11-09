@@ -1,7 +1,7 @@
 # Live-Protokoll (Version 1)
 
 Das Protokoll gehört der App: Crates `hangar-team-protocol` (Schritt C) und `hangar-team-crypto`
-(Schritt E), hier als unveränderte Kopien aus Commit `b30b9d5` unter `vendor/`. Nachrichten,
+(Schritt E), hier als unveränderte Kopien aus Commit `b13f4dc` unter `vendor/`. Nachrichten,
 Grenzen, Regeln der Reservierung, der Claims, des Logs und der E2E-Prüfungen kommen aus den
 Crates; Referenz sind deren READMEs und `docs/wiki/pages/concepts/team-protocol.md` sowie
 `team-crypto.md` im App-Repository. Dieses Dokument
@@ -208,4 +208,8 @@ Webseite und wendet sie auf laufende Verbindungen an.
 ## HTTP neben dem Live-Kanal
 
 - `GET /health`: `{"status":"ok","version":...}` oder 503.
-- Nur Selbstbetrieb: Anmeldung, Teams, Einladungen, Lizenz, Tickets, siehe README.
+- Nur Selbstbetrieb: Konto-API der App unter `/api/v1` (Device Flow, Widerruf, Konto,
+  Projekte, `relay-ticket`), gleich der Webseite: [account-api.md](account-api.md). Die App
+  braucht damit nur die Basis `<PUBLIC_URL>/api/v1`; die Adresse dieses Live-Kanals steht im
+  Ticket (`relay_url`, `ws`/`wss` aus `PUBLIC_URL`). Verwaltung (Teams, Einladungen, Lizenz)
+  unter `/v1/...`, siehe README.
