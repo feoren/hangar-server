@@ -72,6 +72,30 @@ pub struct Subscriber {
     pub tx: mpsc::Sender<Outgoing>,
     /// Wird ausgelöst, wenn die Verbindung nicht mehr mitkommt (Warteschlange voll).
     pub kick: Arc<Notify>,
+    /// Wird ausgelöst, wenn ein Log-Eintrag das Gerät aus dem Team nahm: die Verbindung beginnt
+    /// die Frist, in der sie nur noch `memberlog.get` stellen darf.
+    pub removed: Arc<Notify>,
+}
+
+/// Eine Verbindung eines entfernten Geräts in ihrer Frist: kein Mitglied, keine Präsenz, kein
+/// Empfänger von Ereignissen außer `memberlog.appended` (bis `until`) und dem eigenen
+/// `device.removed`. Beantwortet wird nur `memberlog.get`, mit Einträgen bis `until` (dem
+/// Eintrag, der das Gerät entfernte).
+#[derive(Debug, Clone)]
+struct Departing {
+    holder: Holder,
+    tx: mpsc::Sender<Outgoing>,
+    until: u64,
+}
+
+/// Ergebnis einer Anmeldung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Joined {
+    /// Angemeldet wie üblich.
+    Member,
+    /// Gesperrtes Gerät: nur `welcome`, danach nur `memberlog.get` bis zum entfernenden
+    /// Eintrag, dann Close 4403 (siehe `conn`).
+    Departing,
 }
 
 /// Wem eine Hinweismail gelten könnte (Selbstbetrieb): Mitglied ist nicht verbunden.
@@ -131,6 +155,8 @@ pub struct Team {
     members: BTreeMap<String, Role>,
     presence: HashMap<Holder, PresenceUpdate>,
     subscribers: HashMap<u64, Subscriber>,
+    /// Verbindungen entfernter Geräte in ihrer Frist (siehe `Departing`).
+    departing: HashMap<u64, Departing>,
     offline_since: HashMap<Holder, u64>,
     ops: RecentOps<Reply>,
     /// Das geprüfte Mitgliedschafts-Log (hangar-team-crypto), nach einem Neustart mit `apply_all`
@@ -220,6 +246,7 @@ impl Team {
             members,
             presence: HashMap::new(),
             subscribers: HashMap::new(),
+            departing: HashMap::new(),
             offline_since: HashMap::new(),
             ops: RecentOps::new(RECENT_OPS),
             verifier,
@@ -252,6 +279,7 @@ impl Team {
     /// Nichts verbunden, nichts gehalten, nichts gemerkt: darf aus dem Speicher.
     pub fn idle(&self, now: u64) -> bool {
         self.subscribers.is_empty()
+            && self.departing.is_empty()
             && self.book.iter().next().is_none()
             && self.sessions.is_empty()
             && now.saturating_sub(self.last_activity) > 10 * 60 * 1000
@@ -450,6 +478,7 @@ impl Team {
                     }
                 }
                 _ => {
+                    self.send_departing(&message);
                     let text = self.frame(None, seq, message);
                     for (conn, _) in conns {
                         self.send(conn, text.clone());
@@ -458,6 +487,57 @@ impl Team {
             }
         }
         Ok(())
+    }
+
+    /// Ein entferntes Gerät in seiner Frist bekommt nur, was zu seiner Entfernung führt:
+    /// `memberlog.appended` bis zum entfernenden Eintrag und sein eigenes `device.removed`, beide
+    /// ohne `seq`: die Ereignisse dazwischen (etwa die Freigabe seiner Reservierungen) bekommt es
+    /// nicht, und mit `seq` sähe die App darin eine Lücke und brächte die Sitzung ab, bevor sie
+    /// ihre Entfernung im Log geprüft hat.
+    fn send_departing(&self, message: &ServerMessage) {
+        let mut text = None;
+        for departing in self.departing.values() {
+            let wanted = match message {
+                ServerMessage::MemberLogAppended(m) => m.index <= departing.until,
+                ServerMessage::DeviceRemoved(r) => r.holder == departing.holder,
+                _ => false,
+            };
+            if !wanted {
+                continue;
+            }
+            if text.is_none() {
+                text = self.frame(None, None, message.clone());
+            }
+            if let Some(text) = &text {
+                let _ = departing.tx.try_send(Outgoing::Text(text.clone()));
+            }
+        }
+    }
+
+    /// `memberlog.get` einer Verbindung in ihrer Frist: Einträge nach `after` bis zum
+    /// entfernenden Eintrag. `None`: die Verbindung ist hier nicht in ihrer Frist. `Some(true)`:
+    /// die letzte Seite ist beantwortet, die Verbindung schließt mit 4403.
+    pub async fn departing_log_get(
+        &mut self,
+        db: &Db,
+        conn: u64,
+        op: &OpId,
+        after: u64,
+    ) -> Result<Option<bool>, sqlx::Error> {
+        let Some(departing) = self.departing.get(&conn).cloned() else {
+            return Ok(None);
+        };
+        let entries =
+            store::log_get_until(db, &self.id, after, departing.until, MAX_LOG_ENTRIES + 1).await?;
+        let page = MemberLogEntries::page(entries);
+        let done = !page.more;
+        if let Some(text) = self.frame(Some(op), None, ServerMessage::MemberLogEntries(page)) {
+            let _ = departing.tx.try_send(Outgoing::Text(text));
+        }
+        if done {
+            self.departing.remove(&conn);
+        }
+        Ok(Some(done))
     }
 
     /// Buch (`export`), Log-Position und Notizen in einer Schreibung.
@@ -534,7 +614,44 @@ impl Team {
         proto: u16,
         ticket_iat_ms: u64,
         now: u64,
-    ) -> Result<Result<(), ErrorCode>, sqlx::Error> {
+        allow_departing: bool,
+    ) -> Result<Result<Joined, ErrorCode>, sqlx::Error> {
+        // Erst das gesperrte Gerät, ohne etwas zu schreiben: es zählt nicht als Mitglied.
+        if let Some(until) = store::device_removed(
+            db,
+            &self.id,
+            sub.holder.member.as_str(),
+            sub.holder.device.as_str(),
+        )
+        .await?
+        {
+            let age =
+                store::ticket_age(db, &self.id, sub.holder.member.as_str(), ticket_iat_ms).await?;
+            if !allow_departing || age != store::TicketAge::Current {
+                tracing::info!("hello eines entfernten Geräts abgelehnt");
+                return Ok(Err(ErrorCode::Forbidden));
+            }
+            tracing::info!("hello eines entfernten Geräts: nur memberlog.get bis zur Entfernung");
+            let welcome = ServerMessage::Welcome(Welcome {
+                proto,
+                stream: self.log.stream().clone(),
+                head: self.log.head(),
+                member: sub.holder.member.clone(),
+                epoch: self.book.epoch(),
+            });
+            if let Some(text) = self.frame(Some(op), None, welcome) {
+                let _ = sub.tx.try_send(Outgoing::Text(text));
+            }
+            self.departing.insert(
+                conn,
+                Departing {
+                    holder: sub.holder,
+                    tx: sub.tx,
+                    until,
+                },
+            );
+            return Ok(Ok(Joined::Departing));
+        }
         let seen = store::see_member(
             db,
             &self.id,
@@ -545,17 +662,6 @@ impl Team {
         )
         .await?;
         if matches!(seen, MemberSeen::Removed | MemberSeen::Stale) {
-            return Ok(Err(ErrorCode::Forbidden));
-        }
-        if store::device_removed(
-            db,
-            &self.id,
-            sub.holder.member.as_str(),
-            sub.holder.device.as_str(),
-        )
-        .await?
-        {
-            tracing::info!("hello eines entfernten Geräts abgelehnt");
             return Ok(Err(ErrorCode::Forbidden));
         }
         self.last_activity = now;
@@ -624,7 +730,7 @@ impl Team {
         self.prune_notes();
         self.emit(db, events, None).await?;
         self.deliver_pending(db, &holder.member).await?;
-        Ok(Ok(()))
+        Ok(Ok(Joined::Member))
     }
 
     async fn personalize(
@@ -702,6 +808,7 @@ impl Team {
 
     /// Eine Verbindung meldet sich ab (getrennt, zu langsam, Ticketalter erreicht).
     pub async fn leave(&mut self, db: &Db, conn: u64, now: u64) -> Result<(), sqlx::Error> {
+        self.departing.remove(&conn);
         let Some(sub) = self.subscribers.remove(&conn) else {
             return Ok(());
         };
@@ -765,18 +872,36 @@ impl Team {
         self.emit(db, events, None).await
     }
 
-    /// Ein Gerät verlässt das Team (sein Mitglied bleibt): Reservierungen frei, Claims weg,
-    /// Verbindungen des Geräts mit 4403 zu. Gibt die Ereignisse zurück (ohne `device.removed`).
-    fn drop_device(&mut self, holder: &Holder, now: u64) -> Vec<ServerMessage> {
+    /// Ein Gerät verlässt das Team (sein Mitglied bleibt): Reservierungen frei, Claims weg.
+    /// Seine Verbindungen sind ab sofort keine Empfänger mehr; sie beginnen ihre Frist
+    /// (`Departing`, bis zum Eintrag `until`), in der sie nur noch `memberlog.get` stellen dürfen,
+    /// dann schließt `conn` mit 4403. Gibt die Ereignisse zurück (ohne `device.removed`).
+    fn drop_device(&mut self, holder: &Holder, until: u64, now: u64) -> Vec<ServerMessage> {
         let removed = self.book.remove_device(holder, UnixMillis(now));
         self.dirty = true;
         let events = self.book_messages(removed);
         let notices = self.board.clear_device(holder);
         self.sessions.remove(holder);
         self.deliver_overlaps(notices);
-        self.close_where(close::CLOSE_REMOVED, "device removed", |s| {
-            s.holder == *holder
-        });
+        let gone: Vec<u64> = self
+            .subscribers
+            .iter()
+            .filter(|(_, s)| s.holder == *holder)
+            .map(|(c, _)| *c)
+            .collect();
+        for conn in gone {
+            if let Some(sub) = self.subscribers.remove(&conn) {
+                sub.removed.notify_one();
+                self.departing.insert(
+                    conn,
+                    Departing {
+                        holder: sub.holder,
+                        tx: sub.tx,
+                        until,
+                    },
+                );
+            }
+        }
         self.presence.remove(holder);
         self.offline_since.remove(holder);
         self.prune_notes();
@@ -831,6 +956,11 @@ impl Team {
                 .tx
                 .try_send(Outgoing::Close(close::CLOSE_TEAM_DELETED, "team deleted"));
         }
+        for (_, departing) in self.departing.drain() {
+            let _ = departing
+                .tx
+                .try_send(Outgoing::Close(close::CLOSE_TEAM_DELETED, "team deleted"));
+        }
     }
 
     fn deliver_overlaps(&mut self, notices: Vec<OverlapNotice>) {
@@ -882,6 +1012,11 @@ impl Team {
         now: u64,
     ) -> Result<(), sqlx::Error> {
         let Some(sub) = self.subscribers.get(&conn).cloned() else {
+            // Entfernt, während der Rahmen schon unterwegs war: ein `memberlog.get` bekommt die
+            // Antwort der Frist, damit die App nicht auf eine Antwort wartet, die nie kommt.
+            if let ClientMessage::MemberLogGet(get) = message {
+                self.departing_log_get(db, conn, op, get.after).await?;
+            }
             return Ok(());
         };
         self.last_activity = now;
@@ -1026,13 +1161,13 @@ impl Team {
                 (events, reply, None)
             }
             ClientMessage::TaskReleaseAnswer(m) => {
-                // Bei Annahme trägt die neue Reservierung die Notiz des Wunsches.
+                // Bei Annahme trägt die neue Reservierung keine Notiz: die des Wunsches ist eine
+                // `ReleaseRequestNote` (Absender der Anfragende), eine Reservierungsnotiz öffnet
+                // die App als `ReservationNote` mit dem Halter als Absender. Der neue Halter
+                // sendet seine eigene Notiz danach per `task.reserve`.
                 let before = self.notes.get(&m.task).cloned();
                 if m.accept {
-                    match self.request_notes.get(&m.task).cloned() {
-                        Some(note) => self.notes.insert(m.task, note),
-                        None => self.notes.remove(&m.task),
-                    };
+                    self.notes.remove(&m.task);
                 }
                 let (events, reply) = book(
                     self,
@@ -1401,7 +1536,7 @@ impl Team {
     fn drop_removed(&mut self, admitted: &Admitted, now: u64) -> Vec<ServerMessage> {
         let mut events = Vec::new();
         for holder in &admitted.removed {
-            events.extend(self.drop_device(holder, now));
+            events.extend(self.drop_device(holder, admitted.head.index, now));
             events.push(ServerMessage::DeviceRemoved(DeviceRemoved {
                 holder: holder.clone(),
             }));

@@ -1,7 +1,7 @@
 # Live-Protokoll (Version 1)
 
 Das Protokoll gehört der App: Crates `hangar-team-protocol` (Schritt C) und `hangar-team-crypto`
-(Schritt E), hier als unveränderte Kopien aus Commit `b13f4dc` unter `vendor/`. Nachrichten,
+(Schritt E), hier als unveränderte Kopien aus Commit `79c68ca` unter `vendor/`. Nachrichten,
 Grenzen, Regeln der Reservierung, der Claims, des Logs und der E2E-Prüfungen kommen aus den
 Crates; Referenz sind deren READMEs und `docs/wiki/pages/concepts/team-protocol.md` sowie
 `team-crypto.md` im App-Repository. Dieses Dokument
@@ -27,8 +27,9 @@ beschreibt, wie das Relay es betreibt. Offene Wünsche an das Crate:
   `ticket.renew` der App überall wirkt.
 - Close-Codes: 1008 (`CLOSE_HELLO_TIMEOUT`), 1012 Neustart, 1013 zu langsam gelesen
   (Warteschlange 512 Rahmen voll), 4401 (`CLOSE_ROLE_CHANGED`: neues Ticket nötig), 4403
-  (`CLOSE_REMOVED`: entfernt, Gerät entfernt, kein Platz, Ticket ungültig), 4404
-  (`CLOSE_TEAM_DELETED`: Team gelöscht).
+  (`CLOSE_REMOVED`: entfernt, Gerät entfernt, kein Platz, Ticket ungültig; bei einem entfernten
+  Gerät erst nach seiner Frist, siehe `device.remove`), 4404 (`CLOSE_TEAM_DELETED`: Team
+  gelöscht).
 
 ## Speicher je Verbindung
 
@@ -144,9 +145,34 @@ Gerät, der Owner jedes andere, ein Admin das Gerät eines Mitglieds; genau `hol
 Eintrag oder für ein Gerät, das das Log nicht kennt: `badRequest`. Danach in einer Transaktion:
 Eintrag speichern, Gerät auf die Sperrliste je Team und Holder (`relay_removed_devices`), seine
 Schlüsselpakete und `device.keys` im Team löschen. Dann `ReservationBook::remove_device`,
-`ClaimBoard::clear_device`, `memberlog.appended` und `device.removed` (beide geloggt),
-Verbindungen des Geräts mit 4403 zu. Ein `hello` dieses Geräts wird danach abgelehnt; die App
-meldet sich mit einer neuen Geräte-ID an. Ein Owner oder Admin sollte den Teamschlüssel rotieren.
+`ClaimBoard::clear_device`, `memberlog.appended` und `device.removed` (beide geloggt). Ein
+Owner oder Admin sollte den Teamschlüssel rotieren.
+
+**Frist des entfernten Geräts.** Die App glaubt ihre Entfernung erst, wenn sie den signierten
+Eintrag im Log geprüft hat (die Ereignisse des Relays sind nicht signiert). Deshalb schließt das
+Relay nicht sofort:
+
+- Seine Verbindungen sind ab dem Eintrag keine Empfänger mehr (keine Präsenz, keine Claims, keine
+  Reservierungen, zählen nicht als Mitglied). Sie bekommen nur noch `memberlog.appended` bis zum
+  entfernenden Eintrag und ihr eigenes `device.removed`, beide ohne `seq` (das Crate erlaubt
+  geloggte Ereignisse ohne `seq`): die Ereignisse dazwischen, etwa die Freigabe seiner
+  Reservierungen, bekommt es nicht, und mit `seq` sähe die App darin eine Lücke
+  (`SessionEnd::Gap`) und bräche ab, bevor sie das Log geprüft hat.
+- Danach läuft eine Frist (`Config::removed_grace_ms`, 5 s, nicht über die Umgebung
+  einstellbar). In ihr beantwortet das Relay nur `memberlog.get`, mit Einträgen nach `after` bis
+  einschließlich dem entfernenden Eintrag (`relay_removed_devices.log_index`); spätere Einträge
+  (neue Mitglieder, Geräte, Epochen) bekommt das Gerät nie. Alles andere, auch `ping` und
+  `hello`, beantwortet es mit `err forbidden` und schreibt nichts.
+- Nach der letzten Seite (`more: false`) oder mit Ablauf der Frist: Close 4403.
+- War die Verbindung schon weg: ein späteres `hello` dieses Geräts mit gültigem Ticket bekommt
+  nur `welcome` (Stream, head, Epoche; kein Snapshot, kein Nachspiel, keine Beitrittsereignisse,
+  kein `see_member`) und dann dieselbe Frist. Gilt nur für eine Verbindung ohne anderes Team und
+  nur mit einem Ticket, das auch `ticket.renew` annähme (`ticket_age`: nicht bis zu einer
+  Entfernung des Mitglieds oder einer Rollenänderung ausgestellt); sonst `err forbidden` wie
+  bisher.
+
+Die App prüft das Log, verwirft ihre Teamidentität und meldet sich mit einer neuen Geräte-ID
+an.
 
 ## Claims
 
@@ -178,8 +204,9 @@ Herabstufung auf der Webseite wirkt sofort, auch wenn das Log sie noch nicht ken
   sendenden Geräts, Rechte je Art, Team, Index, `prev`, Gerätegrenzen). Eintrag 1 nur mit
   owner-Ticket. Rotation und Geräteentfernung über diesen Weg: `badRequest`. Nimmt der Eintrag
   Geräte heraus (Mitglied entfernt, `Admitted::removed`), werden sie in derselben Transaktion
-  gesperrt und ihre Pakete gelöscht, dann `device.removed` und Close 4403. Ablehnungen antworten
-  mit `LogError::code()`. `memberlog.get` antwortet mit `MemberLogEntries::page`.
+  gesperrt und ihre Pakete gelöscht, dann `device.removed` und die Frist der entfernten Geräte
+  (siehe `device.remove`). Ablehnungen antworten mit `LogError::code()`. `memberlog.get`
+  antwortet mit `MemberLogEntries::page`.
 - `key.rotate` `{epoch, log, wrapped}`: `e2e::check_rotate`, dann
   `LogVerifier::admit_rotation` (Eintrag gültig, seine Epoche gleich `epoch` und die nächste des
   Logs, jedes Paket an ein anderes Gerät des Logs). Eintrag, Epoche und alle Pakete in einer

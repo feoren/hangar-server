@@ -5,6 +5,7 @@
 mod common;
 
 use common::*;
+use hangar_team_crypto::memberlog::LogVerifier;
 use hangar_team_server::config::{Config, IdentityMode};
 use hangar_team_server::relay::team::close;
 use hangar_team_server::ticket::Role;
@@ -333,12 +334,13 @@ async fn gerät_entfernen_nur_mit_signiertem_eintrag() {
         .await;
     assert!(removed.seq.is_some());
     assert_eq!(p.close_code().await, Some(close::CLOSE_REMOVED));
-    // Danach kein hello mehr, und devices nennt es nicht.
+    // Danach nur noch die Frist (eigene Tests unten), und devices nennt es nicht.
     let mut again = Client::connect(s.addr).await;
-    let refused = again
+    let welcome = again
         .hello("t", ticket("bob", "t", Role::Member), "bob-phone", None)
         .await;
-    assert_eq!(code(&refused), Some(ErrorCode::Forbidden));
+    assert!(matches!(welcome.message, ServerMessage::Welcome(_)));
+    assert_eq!(again.close_code().await, Some(close::CLOSE_REMOVED));
     let ServerMessage::Devices(list) = a.request("t", ClientMessage::DevicesGet).await.message
     else {
         panic!()
@@ -350,6 +352,246 @@ async fn gerät_entfernen_nur_mit_signiertem_eintrag() {
             .all(|d| d.proof.to_base64url().len() == 86),
         "Besitznachweis gelistet"
     );
+}
+
+/// Team `t` mit alice, bob (bob-laptop) und bob-phone im Log; bob-phone hält eine
+/// Reservierung. Gibt auch die Verbindung von bob-phone zurück.
+async fn team_with_phone(s: &TestServer) -> (Log, Dev, Client, Dev, Client, Dev, Client) {
+    let (mut log, alice, a, bob, mut b) = team(s).await;
+    let phone = Dev::new("bob", "bob-phone");
+    let mut p = Client::join_device(s.addr, "t", &phone, Role::Member).await;
+    let add = log.add_device(&bob, &phone);
+    assert!(is_ack(&append(&mut b, "t", &add).await));
+    log.accept(&add, &bob.holder);
+    let reserve = ClientMessage::TaskReserve(TaskReserve {
+        task: KeyedHash::from_bytes([4; 32]),
+        epoch: Epoch(0),
+        prev: Vec::new(),
+        note: None,
+    });
+    assert!(is_ack(&p.request("t", reserve).await));
+    (log, alice, a, bob, b, phone, p)
+}
+
+fn reserve_task(byte: u8) -> ClientMessage {
+    ClientMessage::TaskReserve(TaskReserve {
+        task: KeyedHash::from_bytes([byte; 32]),
+        epoch: Epoch(0),
+        prev: Vec::new(),
+        note: None,
+    })
+}
+
+fn grace_config(ms: u64) -> Config {
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.removed_grace_ms = ms;
+    config
+}
+
+/// Eine Seite des Logs, wie die App sie mit einem frischen `LogVerifier` prüft.
+fn entries_of(frame: ServerFrame) -> MemberLogEntries {
+    match frame.message {
+        ServerMessage::MemberLogEntries(page) => page,
+        other => panic!("keine Einträge: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn entferntes_gerät_liest_das_log_bis_zur_entfernung_dann_4403() {
+    let s = start(grace_config(5_000)).await;
+    let (mut log, _alice, _a, bob, mut b, phone, mut p) = team_with_phone(&s).await;
+    let removal = log.remove_device(&bob, &phone.holder);
+    assert!(is_ack(
+        &b.request("t", ClientMessage::DeviceRemove(removal.clone()))
+            .await
+    ));
+    log.accept_removal(&removal, &bob.holder);
+    let removed_at = log.state().head().index;
+    // Das Gerät bekommt nur memberlog.appended und sein device.removed, keine Teamdaten (die
+    // Freigabe seiner Reservierung geht an die anderen), und beide ohne seq: mit seq sähe die
+    // App in der ausgelassenen Freigabe eine Lücke und bräche ab, bevor sie das Log prüft.
+    loop {
+        let frame = p.recv().await.expect("Rahmen vor der Frist");
+        assert!(
+            frame.seq.is_none(),
+            "Rahmen in der Frist mit seq: {frame:?}"
+        );
+        match &frame.message {
+            ServerMessage::MemberLogAppended(m) => assert_eq!(m.index, removed_at),
+            ServerMessage::DeviceRemoved(r) => {
+                assert_eq!(r.holder, phone.holder);
+                break;
+            }
+            other => panic!("entferntes Gerät bekam {other:?}"),
+        }
+    }
+    // In der Frist wird alles außer memberlog.get abgelehnt und schreibt nichts.
+    assert_eq!(
+        code(&p.request("t", reserve_task(9)).await),
+        Some(ErrorCode::Forbidden)
+    );
+    assert_eq!(
+        code(&p.request("t", ClientMessage::DevicesGet).await),
+        Some(ErrorCode::Forbidden)
+    );
+    assert_eq!(
+        code(
+            &p.request("t", ClientMessage::DeviceKeys(phone.keys("t")))
+                .await
+        ),
+        Some(ErrorCode::Forbidden)
+    );
+    assert!(
+        is_ack(&b.request("t", reserve_task(9)).await),
+        "nichts reserviert"
+    );
+    // memberlog.get: das Log bis zur Entfernung, prüfbar wie in der App; dann 4403.
+    let page = entries_of(
+        p.request("t", ClientMessage::MemberLogGet(MemberLogGet { after: 0 }))
+            .await,
+    );
+    assert!(!page.more);
+    assert_eq!(page.entries.last().map(|e| e.index), Some(removed_at));
+    let mut check = LogVerifier::new(team_id("t"));
+    check.apply_all(&page.entries).expect("Log prüfbar");
+    assert!(check.state().unwrap().device(&phone.holder).is_none());
+    let started = std::time::Instant::now();
+    assert_eq!(p.close_code().await, Some(close::CLOSE_REMOVED));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "4403 direkt nach der Antwort, nicht erst nach der Frist"
+    );
+}
+
+#[tokio::test]
+async fn frist_ohne_memberlog_get_endet_mit_4403() {
+    let s = start(grace_config(300)).await;
+    let (log, _alice, _a, bob, mut b, phone, mut p) = team_with_phone(&s).await;
+    let removal = log.remove_device(&bob, &phone.holder);
+    assert!(is_ack(
+        &b.request("t", ClientMessage::DeviceRemove(removal.clone()))
+            .await
+    ));
+    p.until(|f| matches!(f.message, ServerMessage::DeviceRemoved(_)))
+        .await;
+    let started = std::time::Instant::now();
+    assert_eq!(p.close_code().await, Some(close::CLOSE_REMOVED));
+    let waited = started.elapsed();
+    assert!(
+        waited >= std::time::Duration::from_millis(150),
+        "zu früh geschlossen: {waited:?}"
+    );
+}
+
+#[tokio::test]
+async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung() {
+    let s = start(grace_config(5_000)).await;
+    let (mut log, _alice, mut a, bob, mut b, phone, p) = team_with_phone(&s).await;
+    let removal = log.remove_device(&bob, &phone.holder);
+    assert!(is_ack(
+        &b.request("t", ClientMessage::DeviceRemove(removal.clone()))
+            .await
+    ));
+    log.accept_removal(&removal, &bob.holder);
+    let removed_at = log.state().head().index;
+    // Die Verbindung war schon weg (App beendet), bevor sie das Log lesen konnte.
+    p.close().await;
+    // Ein späterer Eintrag (neues Gerät) bleibt dem entfernten Gerät verborgen.
+    let tablet = Dev::new("bob", "bob-tablet");
+    let _t = Client::join_device(s.addr, "t", &tablet, Role::Member).await;
+    let add = log.add_device(&bob, &tablet);
+    assert!(is_ack(&append(&mut b, "t", &add).await));
+    log.accept(&add, &bob.holder);
+    // Alles bisher Gesendete bei alice abholen (darunter die frühere Präsenz von bob-phone).
+    a.request("t", ClientMessage::DevicesGet).await;
+    let mut again = Client::connect(s.addr).await;
+    let op = again.op();
+    again
+        .send(
+            &op,
+            Some("t"),
+            ClientMessage::Hello(Hello {
+                ticket: Ticket::new(ticket("bob", "t", Role::Member)).unwrap(),
+                device: device("bob-phone"),
+                proto: ProtoRange::CURRENT,
+                last_seq: None,
+            }),
+        )
+        .await;
+    // Nur welcome: kein Snapshot, keine Reservierungen, keine Präsenz.
+    let first = again.recv().await.expect("Antwort auf hello");
+    assert!(
+        matches!(first.message, ServerMessage::Welcome(_)),
+        "{:?}",
+        first.message
+    );
+    for message in [
+        ClientMessage::DeviceKeys(phone.keys("t")),
+        reserve_task(10),
+        ClientMessage::DevicesGet,
+        ClientMessage::PresenceSet(PresenceSet {
+            state: PresenceState::Active,
+            status: None,
+        }),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket("bob", "t", Role::Member)).unwrap(),
+            device: device("bob-phone"),
+            proto: ProtoRange::CURRENT,
+            last_seq: None,
+        }),
+    ] {
+        let op = again.op();
+        again.send(&op, Some("t"), message).await;
+        let answer = again.recv().await.expect("Antwort in der Frist");
+        assert_eq!(answer.id.as_ref().map(|i| i.as_str()), Some(op.as_str()));
+        assert_eq!(code(&answer), Some(ErrorCode::Forbidden));
+    }
+    let page = entries_of(
+        again
+            .request("t", ClientMessage::MemberLogGet(MemberLogGet { after: 0 }))
+            .await,
+    );
+    assert!(!page.more);
+    assert_eq!(page.entries.last().map(|e| e.index), Some(removed_at));
+    let mut check = LogVerifier::new(team_id("t"));
+    check.apply_all(&page.entries).expect("Log prüfbar");
+    assert!(check.state().unwrap().device(&phone.holder).is_none());
+    assert_eq!(again.close_code().await, Some(close::CLOSE_REMOVED));
+    // Nichts geschrieben: keine Schlüssel, keine Reservierung, nicht unter den Geräten.
+    assert!(is_ack(&b.request("t", reserve_task(10)).await));
+    // Bis zur Antwort auf devices.get kam bei alice nichts über das entfernte Gerät an
+    // (keine Präsenz, kein Beitritt): alles davor ging vor dem hello ein.
+    let op = a.op();
+    a.send(&op, Some("t"), ClientMessage::DevicesGet).await;
+    let list = loop {
+        let frame = a.recv().await.expect("Antwort auf devices.get");
+        match frame.message {
+            ServerMessage::Devices(list) if frame.id.as_ref().map(|i| i.as_str()) == Some(&op) => {
+                break list
+            }
+            ServerMessage::PresenceUpdate(u) => assert_ne!(u.holder, phone.holder),
+            ServerMessage::MemberJoined(_) => panic!("Beitritt gemeldet"),
+            _ => {}
+        }
+    };
+    assert!(list.devices.iter().all(|d| d.holder != phone.holder));
+
+    // Sperren von vor Migration 0010 (ohne log_index): der letzte Eintrag bis zur Sperre.
+    sqlx::query("UPDATE relay_removed_devices SET log_index = NULL")
+        .execute(&s.server.state.relay.db)
+        .await
+        .unwrap();
+    let mut old = Client::connect(s.addr).await;
+    let welcome = old
+        .hello("t", ticket("bob", "t", Role::Member), "bob-phone", None)
+        .await;
+    assert!(matches!(welcome.message, ServerMessage::Welcome(_)));
+    let page = entries_of(
+        old.request("t", ClientMessage::MemberLogGet(MemberLogGet { after: 0 }))
+            .await,
+    );
+    assert_eq!(page.entries.last().map(|e| e.index), Some(removed_at));
+    assert_eq!(old.close_code().await, Some(close::CLOSE_REMOVED));
 }
 
 #[tokio::test]

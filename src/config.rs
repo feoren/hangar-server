@@ -102,6 +102,9 @@ pub struct Config {
     pub identity: IdentityMode,
     /// Öffentlicher Ursprung dieses Servers ohne Pfad, z. B. `https://team.example.org`.
     pub public_url: String,
+    /// Ziel für Aufrufe der Startseite `/` im Browser (`ROOT_REDIRECT`), z. B. die Produktseite.
+    /// Leer = `/` antwortet mit 404. Nur `https://` (bzw. `http://` für localhost).
+    pub root_redirect: Option<String>,
     pub ticket_keys: KeySet,
     /// Pflichtwert für `aud` in jedem Ticket. Offiziell `hangar-relay` (so stellt die Webseite
     /// aus), im Selbstbetrieb der eigene Ursprung; `TICKET_AUDIENCE` überschreibt beides.
@@ -116,6 +119,9 @@ pub struct Config {
     pub connection_max_age_s: u64,
     /// Frist für das erste gültige `hello` einer neuen Verbindung (Millisekunden).
     pub hello_timeout_ms: u64,
+    /// Frist für ein entferntes Gerät nach `device.removed` (oder nach seinem `hello`), sein
+    /// `memberlog.get` noch zu stellen; danach Close 4403 (Millisekunden).
+    pub removed_grace_ms: u64,
     pub reservation_inactivity_s: u64,
     pub reservation_warn_s: u64,
     pub blob_quota_bytes: u64,
@@ -163,6 +169,10 @@ pub const DEFAULT_TICKET_AUDIENCE: &str = "hangar-relay";
 /// belegen Verbindungen ohne Ticket keine Plätze.
 pub const DEFAULT_HELLO_TIMEOUT_MS: u64 = hangar_team_protocol::close::HELLO_TIMEOUT_SECS * 1000;
 
+/// So lange darf ein entferntes Gerät noch das Mitgliedschafts-Log lesen, damit die App ihre
+/// Entfernung am signierten Eintrag prüfen kann.
+pub const DEFAULT_REMOVED_GRACE_MS: u64 = 5_000;
+
 fn var(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -184,6 +194,34 @@ fn flag(name: &'static str, default: bool) -> Result<bool, ConfigError> {
         Some("false" | "0" | "no") => Ok(false),
         Some(v) => Err(ConfigError::Invalid(name, v.to_owned())),
     }
+}
+
+/// Prüft das Ziel von `ROOT_REDIRECT`: absolute URL mit `https://` (oder `http://` nur für
+/// localhost bzw. 127.0.0.1), nur ASCII (Unicode-Hosts als Punycode), ohne Leer- und
+/// Steuerzeichen, höchstens 2048 Zeichen.
+pub fn parse_redirect(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.len() > 2048
+        || !raw.is_ascii()
+        || raw.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let rest = if let Some(rest) = raw.strip_prefix("https://") {
+        rest
+    } else {
+        let rest = raw.strip_prefix("http://")?;
+        let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
+        if host != "localhost" && host != "127.0.0.1" {
+            return None;
+        }
+        rest
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() || host.contains('@') {
+        return None;
+    }
+    Some(raw.to_owned())
 }
 
 /// Ursprung ohne Pfad und ohne Schrägstrich am Ende; nur http(s).
@@ -307,6 +345,12 @@ impl Config {
             database_url,
             identity,
             public_url,
+            root_redirect: match var("ROOT_REDIRECT") {
+                None => None,
+                Some(v) => Some(
+                    parse_redirect(&v).ok_or(ConfigError::Invalid("ROOT_REDIRECT", v.clone()))?,
+                ),
+            },
             ticket_keys,
             ticket_audience,
             revocation,
@@ -317,6 +361,7 @@ impl Config {
             max_connections_per_ip: number("MAX_CONNECTIONS_PER_IP", 20)?,
             connection_max_age_s: number("CONNECTION_MAX_AGE_SECS", 600)?,
             hello_timeout_ms: DEFAULT_HELLO_TIMEOUT_MS,
+            removed_grace_ms: DEFAULT_REMOVED_GRACE_MS,
             reservation_inactivity_s: number("RESERVATION_INACTIVITY_SECS", 1800)?,
             reservation_warn_s: number("RESERVATION_WARN_SECS", 300)?,
             blob_quota_bytes: number("BLOB_QUOTA_BYTES", 64 * 1024 * 1024)?,
@@ -355,6 +400,7 @@ impl Config {
             database_url,
             identity,
             public_url: "http://localhost:8080".into(),
+            root_redirect: None,
             ticket_keys,
             ticket_audience: match identity {
                 IdentityMode::Official => DEFAULT_TICKET_AUDIENCE.into(),
@@ -368,6 +414,8 @@ impl Config {
             max_connections_per_ip: 200,
             connection_max_age_s: 600,
             hello_timeout_ms: DEFAULT_HELLO_TIMEOUT_MS,
+            // Kürzer als im Betrieb, damit die Tests den Ablauf der Frist nicht lange abwarten.
+            removed_grace_ms: 1_000,
             reservation_inactivity_s: 1800,
             reservation_warn_s: 300,
             blob_quota_bytes: 1024 * 1024,
@@ -408,5 +456,33 @@ mod tests {
         assert_eq!(normalize_origin("https://a.org/pfad"), None);
         assert_eq!(normalize_origin("ftp://a.org"), None);
         assert_eq!(normalize_origin("https://user@a.org"), None);
+    }
+
+    #[test]
+    fn weiterleitung_der_startseite() {
+        assert_eq!(
+            parse_redirect("https://hangar.feoren.com/"),
+            Some("https://hangar.feoren.com/".into())
+        );
+        assert_eq!(
+            parse_redirect("http://localhost:8000/pfad"),
+            Some("http://localhost:8000/pfad".into())
+        );
+        assert_eq!(parse_redirect("http://example.org/"), None);
+        assert_eq!(parse_redirect("javascript:alert(1)"), None);
+        assert_eq!(parse_redirect("//evil.example"), None);
+        assert_eq!(parse_redirect("https://"), None);
+        assert_eq!(parse_redirect("https://user@evil.example/"), None);
+        assert_eq!(
+            parse_redirect(
+                "https://a.org/
+Set-Cookie: x"
+            ),
+            None
+        );
+        assert_eq!(parse_redirect("https://a.org/ x"), None);
+        assert_eq!(parse_redirect("https://bücher.example/"), None);
+        assert_eq!(parse_redirect(r"https://a.org\@evil.example/"), None);
+        assert_eq!(parse_redirect("http://localhost.evil.example/"), None);
     }
 }

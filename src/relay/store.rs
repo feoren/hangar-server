@@ -125,25 +125,27 @@ pub async fn clear_pending_notify(db: &Db, team: &str, member: &str) -> Result<(
 }
 
 /// Geräte, die ein Log-Eintrag aus dem Team genommen hat (`device.remove`, Mitglied entfernt):
-/// sperren und ihre Schlüsselpakete und -angaben im Team vergessen. Läuft in der Transaktion,
-/// die auch den Eintrag schreibt.
+/// sperren (mit dem Index des Eintrags, `log_index`) und ihre Schlüsselpakete und -angaben im
+/// Team vergessen. Läuft in der Transaktion, die auch den Eintrag schreibt.
 async fn drop_devices(
     tx: &mut Tx,
     team: &str,
     removed: &[Holder],
+    index: u64,
     by: &Holder,
     now: u64,
 ) -> Result<()> {
     for holder in removed {
         sqlx::query(
-            "INSERT INTO relay_removed_devices (team_id, member, device, removed_at, by_member) VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT DO NOTHING",
+            "INSERT INTO relay_removed_devices (team_id, member, device, removed_at, by_member, log_index) \
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
         )
         .bind(team)
         .bind(holder.member.as_str())
         .bind(holder.device.as_str())
         .bind(i64_of(now))
         .bind(by.member.as_str())
+        .bind(i64_of(index))
         .execute(&mut **tx)
         .await?;
         sqlx::query(
@@ -166,17 +168,27 @@ async fn drop_devices(
     Ok(())
 }
 
-/// Wurde dieses Gerät aus dem Team entfernt?
-pub async fn device_removed(db: &Db, team: &str, member: &str, device: &str) -> Result<bool> {
-    let found: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM relay_removed_devices WHERE team_id = ? AND member = ? AND device = ?",
+/// Wurde dieses Gerät aus dem Team entfernt? `Some(index)`: ja, durch den Log-Eintrag `index`
+/// (bei Zeilen vor Migration 0010 der letzte Eintrag bis zum Zeitpunkt der Sperre; beide
+/// schrieb dieselbe Transaktion mit demselben Zeitstempel; 0, wenn keiner zu finden ist). Bis
+/// zu diesem Eintrag darf das Gerät das Log noch lesen.
+pub async fn device_removed(
+    db: &Db,
+    team: &str,
+    member: &str,
+    device: &str,
+) -> Result<Option<u64>> {
+    let found: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT COALESCE(r.log_index, (SELECT MAX(l.idx) FROM relay_member_log l \
+             WHERE l.team_id = r.team_id AND l.created_at <= r.removed_at)) \
+         FROM relay_removed_devices r WHERE r.team_id = ? AND r.member = ? AND r.device = ?",
     )
     .bind(team)
     .bind(member)
     .bind(device)
     .fetch_optional(db)
     .await?;
-    Ok(found.is_some())
+    Ok(found.map(|index| index.map_or(0, u64_of)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -661,7 +673,7 @@ pub async fn log_append(
     if !insert_entry(&mut tx, team, append, hash, by, now).await? {
         return Ok(false);
     }
-    drop_devices(&mut tx, team, removed, by, now).await?;
+    drop_devices(&mut tx, team, removed, append.index, by, now).await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -674,12 +686,25 @@ pub async fn log_all(db: &Db, team: &str) -> Result<Vec<MemberLogEntry>> {
 /// Einträge nach `after`, höchstens `limit`; der Aufrufer fragt eins mehr ab, damit
 /// `MemberLogEntries::page` weiß, ob es weitere gibt.
 pub async fn log_get(db: &Db, team: &str, after: u64, limit: usize) -> Result<Vec<MemberLogEntry>> {
+    log_get_until(db, team, after, u64::MAX, limit).await
+}
+
+/// Wie `log_get`, aber nur Einträge bis einschließlich `until` (für ein entferntes Gerät: bis
+/// zu dem Eintrag, der es entfernte).
+pub async fn log_get_until(
+    db: &Db,
+    team: &str,
+    after: u64,
+    until: u64,
+    limit: usize,
+) -> Result<Vec<MemberLogEntry>> {
     let rows = sqlx::query(
         "SELECT idx, hash, entry, member, device, created_at FROM relay_member_log \
-         WHERE team_id = ? AND idx > ? ORDER BY idx LIMIT ?",
+         WHERE team_id = ? AND idx > ? AND idx <= ? ORDER BY idx LIMIT ?",
     )
     .bind(team)
     .bind(i64_of(after))
+    .bind(i64_of(until))
     .bind(i64_of(limit as u64))
     .fetch_all(db)
     .await?;

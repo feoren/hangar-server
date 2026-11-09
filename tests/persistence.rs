@@ -259,3 +259,80 @@ async fn client_am_gespeicherten_head_braucht_keinen_snapshot() {
     assert_eq!(w.stream, welcome.stream);
     assert_eq!(w.head, Seq(head));
 }
+
+/// Ein entferntes Gerät liest das Log nur bis zum entfernenden Eintrag, auch seitenweise, mit
+/// beliebigem `after` und für Sperren von vor Migration 0010 (`log_index` NULL).
+#[tokio::test]
+async fn log_eines_entfernten_geräts_endet_am_entfernenden_eintrag() {
+    use hangar_team_server::relay::store;
+    let s = start_official().await;
+    let db = &s.server.state.relay.db;
+    sqlx::query("INSERT INTO relay_teams (id, stream, created_at) VALUES ('z', 's', 0)")
+        .execute(db)
+        .await
+        .unwrap();
+    for idx in 1..=7i64 {
+        sqlx::query(
+            "INSERT INTO relay_member_log (team_id, idx, hash, entry, member, device, created_at) \
+             VALUES ('z', ?, ?, 'AAAA', 'm', 'd', ?)",
+        )
+        .bind(idx)
+        .bind("ab".repeat(32))
+        .bind(idx * 10)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+    for (device, removed_at, index) in [
+        ("neu", 40i64, Some(4i64)),
+        ("alt", 55, None),
+        ("früh", 5, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO relay_removed_devices (team_id, member, device, removed_at, by_member, log_index) \
+             VALUES ('z', 'm', ?, ?, 'm', ?)",
+        )
+        .bind(device)
+        .bind(removed_at)
+        .bind(index)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        store::device_removed(db, "z", "m", "neu").await.unwrap(),
+        Some(4)
+    );
+    // Ohne log_index: der letzte Eintrag bis zur Sperre, ohne einen solchen 0 (leeres Log).
+    assert_eq!(
+        store::device_removed(db, "z", "m", "alt").await.unwrap(),
+        Some(5)
+    );
+    assert_eq!(
+        store::device_removed(db, "z", "m", "früh").await.unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        store::device_removed(db, "z", "m", "da").await.unwrap(),
+        None
+    );
+    let indices =
+        |entries: Vec<MemberLogEntry>| entries.iter().map(|e| e.index).collect::<Vec<_>>();
+    // Seitenweise (limit 3) bis einschließlich 4, nie darüber.
+    let first = store::log_get_until(db, "z", 0, 4, 3).await.unwrap();
+    assert_eq!(indices(first), vec![1, 2, 3]);
+    let second = store::log_get_until(db, "z", 3, 4, 3).await.unwrap();
+    assert_eq!(indices(second), vec![4]);
+    assert!(store::log_get_until(db, "z", 4, 4, 3)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store::log_get_until(db, "z", 9, 4, 3)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store::log_get_until(db, "z", 0, 0, 3)
+        .await
+        .unwrap()
+        .is_empty());
+}

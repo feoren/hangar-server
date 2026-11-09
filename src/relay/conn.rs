@@ -1,6 +1,13 @@
 //! Eine WebSocket-Verbindung: der einzige Live-Kanal. Ping alle 25 s, Trennung nach 60 s ohne
 //! Lebenszeichen, `hello` binnen 15 s, Ratenbegrenzung je Verbindung, Grenzen je Mitglied und
 //! je Client-Adresse, Höchstalter (danach neues Ticket nötig).
+//!
+//! Ein entferntes Gerät (`device.removed`, oder sein `hello` nach der Sperre) bekommt eine kurze
+//! Frist (`Relay::removed_grace`, Vorgabe 5 s), in der die Verbindung nur noch `memberlog.get`
+//! beantwortet bekommt, mit Einträgen bis zu dem, der es entfernte; alles andere wird mit
+//! `err forbidden` abgelehnt und schreibt nichts. Nach der letzten Seite oder mit Ablauf der Frist
+//! Close 4403. So prüft die App ihre Entfernung am signierten Eintrag und kommt mit einer neuen
+//! Geräte-ID zurück.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,10 +17,10 @@ use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgr
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, Notify};
 
-use super::team::{close, Outgoing, Subscriber, Team};
+use super::team::{close, Joined as JoinOutcome, Outgoing, Subscriber, Team};
 use super::{Relay, RenewRefused};
 use crate::http::{AppState, ClientIp};
 use crate::util::now_ms;
@@ -127,6 +134,7 @@ async fn run(
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Outgoing>(QUEUE);
     let kick = Arc::new(Notify::new());
+    let removed = Arc::new(Notify::new());
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -159,6 +167,8 @@ async fn run(
         at: Instant::now(),
     };
     let mut bad = 0u32;
+    // Frist eines entfernten Geräts (siehe Moduldoku); `Some`: nur noch `memberlog.get`.
+    let mut departing: Option<Instant> = None;
     let close: Option<(u16, &'static str)> = loop {
         // Höchstalter je Team ab dem letzten geprüften Ticket; `ticket.renew` startet es neu.
         let oldest = joined
@@ -178,11 +188,22 @@ async fn run(
                 None => std::future::pending::<()>().await,
             }
         };
+        let grace_deadline = async move {
+            match departing {
+                Some(until) => tokio::time::sleep_until(until.into()).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let next = tokio::select! {
             next = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => next,
             _ = kick.notified() => break Some((1013, "slow consumer")),
             _ = tokio::time::sleep(age_left) => break Some((close::CLOSE_ROLE_CHANGED, "ticket renewal")),
             _ = hello_deadline => break Some((close::CLOSE_HELLO_TIMEOUT, "hello required")),
+            _ = grace_deadline => break Some((close::CLOSE_REMOVED, "device removed")),
+            _ = removed.notified(), if departing.is_none() => {
+                departing = Some(Instant::now() + relay.removed_grace);
+                continue;
+            }
             _ = shutdown.changed() => break Some((1012, "restart")),
         };
         let message = match next {
@@ -221,6 +242,41 @@ async fn run(
         };
         let op = frame.id;
         let team_id = frame.team;
+        // Kam die Entfernung zugleich mit diesem Rahmen, wählt `select!` nicht verlässlich
+        // zuerst sie: ein schon ausgelöstes `removed` gilt vor dem Rahmen.
+        if departing.is_none() && removed.notified().now_or_never().is_some() {
+            departing = Some(Instant::now() + relay.removed_grace);
+        }
+        if departing.is_some() {
+            // In der Frist: nur `memberlog.get` des Teams, das das Gerät entfernte.
+            let ClientMessage::MemberLogGet(get) = frame.message else {
+                send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
+                continue;
+            };
+            let entry = team_id
+                .as_ref()
+                .and_then(|t| joined.get(t.as_str()))
+                .map(|j| j.team.clone());
+            let Some(team) = entry else {
+                send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
+                continue;
+            };
+            let answered = team
+                .lock()
+                .await
+                .departing_log_get(&relay.db, conn, &op, get.after)
+                .await;
+            match answered {
+                Ok(Some(true)) => break Some((close::CLOSE_REMOVED, "device removed")),
+                Ok(Some(false)) => {}
+                Ok(None) => send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden))),
+                Err(failure) => {
+                    tracing::error!(error = %failure, "Log für entferntes Gerät nicht lesbar");
+                    send(&tx, err(Some(op), team_id, error(ErrorCode::BadRequest)));
+                }
+            }
+            continue;
+        }
         match frame.message {
             ClientMessage::Ping => send(&tx, text(Some(op), team_id, ServerMessage::Ack(ack()))),
             ClientMessage::Hello(hello) => {
@@ -285,6 +341,7 @@ async fn run(
                     role: claims.role,
                     tx: tx.clone(),
                     kick: kick.clone(),
+                    removed: removed.clone(),
                 };
                 let iat_ms = u64::try_from(claims.iat).unwrap_or(0).saturating_mul(1000);
                 let result = {
@@ -299,14 +356,21 @@ async fn run(
                             proto,
                             iat_ms,
                             now_ms(),
+                            // Nur eine Verbindung ohne anderes Team: ihr 4403 trifft kein
+                            // Team, aus dem das Gerät nicht entfernt wurde.
+                            joined.is_empty(),
                         )
                         .await;
                     relay.forward_attention(&mut guard);
                     result
                 };
                 match result {
-                    Ok(Ok(())) => {
-                        tracing::info!(conn, "Gerät angemeldet");
+                    Ok(Ok(outcome)) => {
+                        if outcome == JoinOutcome::Departing {
+                            departing = Some(Instant::now() + relay.removed_grace);
+                        } else {
+                            tracing::info!(conn, "Gerät angemeldet");
+                        }
                         joined.insert(
                             team_id.as_str().to_owned(),
                             Joined {

@@ -50,6 +50,8 @@ pub struct Relay {
     max_per_ip: usize,
     pub connection_max_age: Duration,
     pub hello_timeout: Duration,
+    /// Frist eines entfernten Geräts für sein `memberlog.get` (siehe `conn`).
+    pub removed_grace: Duration,
     transcript_retention_ms: u64,
     teams: Mutex<HashMap<String, Arc<Mutex<Team>>>>,
     connections: AtomicUsize,
@@ -89,6 +91,7 @@ impl Relay {
             max_per_ip: config.max_connections_per_ip,
             connection_max_age: Duration::from_secs(config.connection_max_age_s.max(60)),
             hello_timeout: Duration::from_millis(config.hello_timeout_ms.max(100)),
+            removed_grace: Duration::from_millis(config.removed_grace_ms.clamp(100, 30_000)),
             transcript_retention_ms: config.transcript_retention_days.saturating_mul(86_400_000),
             teams: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),

@@ -342,6 +342,13 @@ async fn freigabe_anfragen_übergeben_und_erzwingen() {
         .until(|f| matches!(&f.message, ServerMessage::TaskReserved(r) if r.holder.member == member("bob")))
         .await;
     assert!(held.seq.is_some());
+    let ServerMessage::TaskReserved(r) = held.message else {
+        unreachable!()
+    };
+    assert_eq!(
+        r.note, None,
+        "die Notiz des alten Halters reist nicht weiter"
+    );
 
     // Ein Mitglied darf fremde Reservierungen nicht beenden, der Eigentümer schon.
     assert!(is_ack(&b.request("t", reserve(h(6))).await));
@@ -557,4 +564,113 @@ async fn origin_wird_geprüft_und_health_hat_header() {
     assert!(lower.contains("x-content-type-options: nosniff"));
     assert!(lower.contains("content-security-policy:"));
     assert!(lower.contains("cache-control: no-store"));
+}
+
+/// Bei einer Übergabe trägt die neue Reservierung keine Notiz: die Notiz des Wunsches ist eine
+/// `ReleaseRequestNote` des Anfragenden, die App öffnet `task.reserved.note` aber als
+/// `ReservationNote` mit dem Halter als Absender. Auch der Snapshot trägt dann keine.
+#[tokio::test]
+async fn übergabe_ohne_notiz_auch_im_snapshot() {
+    let s = start_official().await;
+    let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
+    let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
+    let sealed = |data: &str| Sealed {
+        epoch: Epoch(0),
+        data: cipher(data),
+    };
+    let reserved = a
+        .request(
+            "t",
+            ClientMessage::TaskReserve(TaskReserve {
+                task: h(8),
+                epoch: Epoch(0),
+                prev: Vec::new(),
+                note: Some(sealed("aGFsdGVy")),
+            }),
+        )
+        .await;
+    assert!(is_ack(&reserved));
+    let asked = b
+        .request(
+            "t",
+            ClientMessage::TaskReleaseRequest(TaskReleaseRequest {
+                task: h(8),
+                note: Some(sealed("YW5mcmFnZQ")),
+            }),
+        )
+        .await;
+    assert!(is_ack(&asked));
+    a.until(|f| matches!(f.message, ServerMessage::TaskReleaseRequested(_)))
+        .await;
+    let answered = a
+        .request(
+            "t",
+            ClientMessage::TaskReleaseAnswer(TaskReleaseAnswer {
+                task: h(8),
+                requester: member("bob"),
+                accept: true,
+            }),
+        )
+        .await;
+    assert!(is_ack(&answered));
+    let handed = b
+        .until(|f| matches!(&f.message, ServerMessage::TaskReserved(r) if r.task == h(8) && r.holder.member == member("bob")))
+        .await;
+    let ServerMessage::TaskReserved(r) = handed.message else {
+        unreachable!()
+    };
+    assert_eq!(r.note, None);
+
+    // Snapshot für eine neue Verbindung ohne Cursor: Reservierung von bob, ohne Notiz.
+    let mut c = Client::connect(s.addr).await;
+    let op = c.op();
+    c.send(
+        &op,
+        Some("t"),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket("carol", "t", Role::Member)).unwrap(),
+            device: device("carol-device"),
+            proto: ProtoRange::CURRENT,
+            last_seq: None,
+        }),
+    )
+    .await;
+    let mut seen = false;
+    loop {
+        let f = c.recv().await.expect("Snapshot und welcome");
+        if let ServerMessage::TaskReserved(r) = &f.message {
+            if r.task == h(8) {
+                assert_eq!(r.holder.member, member("bob"));
+                assert_eq!(r.note, None, "Snapshot ohne Notiz");
+                seen = true;
+            }
+        }
+        if matches!(f.message, ServerMessage::Welcome(_)) {
+            break;
+        }
+    }
+    assert!(seen, "Reservierung im Snapshot");
+
+    // Seine eigene Notiz sendet der neue Halter per task.reserve.
+    let own = sealed("bmV1ZXIgaGFsdGVy");
+    let again = b
+        .request(
+            "t",
+            ClientMessage::TaskReserve(TaskReserve {
+                task: h(8),
+                epoch: Epoch(0),
+                prev: Vec::new(),
+                note: Some(own.clone()),
+            }),
+        )
+        .await;
+    assert!(is_ack(&again), "{:?}", again.message);
+    let renewed = a
+        .until(|f| matches!(&f.message, ServerMessage::TaskReserved(r) if r.task == h(8) && r.note.is_some()))
+        .await;
+    let ServerMessage::TaskReserved(r) = renewed.message else {
+        unreachable!()
+    };
+    assert_eq!(r.holder.member, member("bob"));
+    assert_eq!(r.note, Some(own));
 }

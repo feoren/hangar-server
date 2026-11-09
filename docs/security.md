@@ -89,6 +89,8 @@ sich ohne Schlüssel nicht umkehren, aber innerhalb der Epoche vergleichen.
   einzelnes Gerät kann die Plätze nicht belegen.
 - Restrisiko: Das Relay sieht Klartext der Log-Einträge (Mitglieder, Geräte, Rollen, öffentliche
   Schlüssel); das ist so vorgesehen (die Clients lesen das Log ebenfalls im Klartext).
+- Ein entferntes Gerät liest das Log nur bis zu seiner Entfernung (`relay_removed_devices.log_index`,
+  für ältere Sperren der letzte Eintrag bis zum Zeitpunkt der Sperre).
 
 ## Offene Punkte
 
@@ -101,9 +103,19 @@ sich ohne Schlüssel nicht umkehren, aber innerhalb der Epoche vergleichen.
   Verbindung je Team 10 min (`CONNECTION_MAX_AGE_SECS=600`), höchstens 20 Verbindungen je
   Client-Adresse (`MAX_CONNECTIONS_PER_IP=20`, IPv6 je /64).
 - Ein verlorenes Gerät entfernt ein Owner, Admin oder ein anderes Gerät desselben Mitglieds mit
-  `device.remove`: Reservierungen frei, Schlüsselpakete gelöscht, `hello` des Geräts danach
-  abgelehnt (Sperrliste je Team und Holder). Es kennt den aktuellen Teamschlüssel weiter; erst
-  `key.rotate` schließt es aus.
+  `device.remove`: Reservierungen frei, Schlüsselpakete gelöscht, Sperrliste je Team und Holder.
+  Es kennt den aktuellen Teamschlüssel weiter; erst `key.rotate` schließt es aus.
+- Frist des entfernten Geräts (docs/protocol.md, `device.remove`): höchstens 5 s je Verbindung
+  darf es nur noch `memberlog.get` stellen, auch nach einem neuen `hello`, damit die App die
+  Entfernung am signierten Eintrag prüft. Es bekommt dabei nur Einträge bis zu dem, der es
+  entfernte, also nichts, was es nicht schon vor der Entfernung lesen durfte: Mitglieder,
+  Geräte, Rollen, öffentliche Schlüssel, Epochen-Commitments und den Verlaufslink einer Rotation
+  (`HistoryLink`, verschlüsselt mit dem Geheimnis der neuen Epoche, die das Gerät nach seiner
+  Entfernung nicht mehr bekommt). Dazu im `welcome` Stream, head und Epochennummer. Keine
+  Reservierungen, Claims, Präsenz, Notizen, Ablage, Schlüsselpakete oder `devices`; es schreibt
+  nichts, zählt nicht als Mitglied und erscheint bei niemandem. Ein `hello` dieser Art braucht
+  ein frisches Ticket (`jti` einmalig, von der Webseite ratenbegrenzt) und belegt einen
+  Verbindungsplatz je Mitglied und Adresse; die Ratenbegrenzung je Verbindung gilt weiter.
 - `notify` trägt nie Klartext: höchstens die verschlüsselte Notiz eines Freigabewunsches.
 - Der Zustand für den Neustart (Reservierungen, Log-Position, Notizen) liegt in SQLite; er enthält
   nur Hashes, Holder und verschlüsselte Notizen.
