@@ -401,6 +401,16 @@ fn rotation_reaches_every_device_and_records_open_across_them() {
     assert_eq!(opened.plaintext.as_slice(), b"on it");
     assert_eq!(opened.counter, 1);
     assert_eq!(opened.head, *state.head());
+    // The header names the same head and counter without a key (and without checking them).
+    assert_eq!(
+        crate::record::sealed_header(&sealed),
+        Some((*state.head(), 1))
+    );
+    let garbage = Sealed {
+        epoch: sealed.epoch,
+        data: hangar_team_protocol::ids::Ciphertext::new("AAAA").expect("text"),
+    };
+    assert_eq!(crate::record::sealed_header(&garbage), None);
     assert_eq!(counter.last(), 1);
     let mut guard = ReplayGuard::new();
     guard.check(&opened).expect("first time");
@@ -2681,4 +2691,15 @@ fn xchacha20_poly1305_matches_the_cfrg_draft() {
             "c0875924c1c7987947deafd8780acf49"
         )
     );
+}
+
+#[test]
+fn a_task_note_is_named_by_the_hash_as_lowercase_hex_and_opens_only_under_it() {
+    use crate::record::task_record_id;
+    use hangar_team_protocol::hash::KeyedHash;
+    let task = KeyedHash::from_bytes([0xAB; 32]);
+    let id = task_record_id(&task);
+    assert_eq!(id, "ab".repeat(32));
+    assert_eq!(id, task.to_hex(), "the spelling the wire carries");
+    assert_ne!(task_record_id(&KeyedHash::from_bytes([0xAC; 32])), id);
 }
