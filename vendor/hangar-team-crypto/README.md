@@ -104,6 +104,19 @@ fn new_device() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Changelog
+
+- **Unreleased:** `EpochCipher::open_verified` checks the sender's keys and signature before the
+  log head's hash. A record with a known head index and a different hash now reports
+  `OpenError::Fork` only when its signature verifies; otherwise it fails with `Signature`,
+  `UnknownSender` or `SenderNotValid`. Behaviour change for callers that matched on `Fork`:
+  an unsigned or forged record can no longer make an opener stop trusting the team.
+  It also checks the epoch's start and decrypts before comparing the head's hash: `Fork` now
+  needs a record sealed with the current epoch's key, so the old signing key of a device id
+  removed and admitted again (whose key period ends before the epoch once the rotation the
+  removal made due has happened) fails with `HeadBeforeEpoch` instead of reporting a fork
+  against the honest device.
+
 ## Checks
 
 ```sh

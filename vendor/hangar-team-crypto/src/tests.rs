@@ -627,6 +627,66 @@ fn record_heads_detect_forks_and_newer_logs() {
         cipher.open_verified(team.state(), &context, &forked).err(),
         Some(OpenError::Fork { index: 4 })
     );
+    // The same wrong head without a valid signature is no fork: anyone can write a head, and
+    // only a listed device's signature over it may make the app stop trusting the team.
+    let unsigned = {
+        let mut data = crate::encoding::from_ciphertext(&forked.data).expect("data");
+        let last = data.len() - 1;
+        data[last] ^= 1;
+        Sealed {
+            epoch: forked.epoch,
+            data: crate::encoding::to_ciphertext(&data).expect("data"),
+        }
+    };
+    assert_eq!(
+        cipher
+            .open_verified(team.state(), &context, &unsigned)
+            .err(),
+        Some(OpenError::Signature)
+    );
+    // Signed by a device the log never listed, or by a listed device under another's name.
+    let stranger = Device::new("stranger", "d");
+    let as_stranger = RecordContext {
+        sender: &stranger.holder,
+        ..context
+    };
+    let foreign_fork = cipher
+        .seal(
+            &as_stranger,
+            &stranger.identity,
+            &forged_head,
+            1,
+            b"y",
+            &mut OsEntropy,
+        )
+        .expect("seal");
+    assert_eq!(
+        cipher
+            .open_verified(team.state(), &as_stranger, &foreign_fork)
+            .err(),
+        Some(OpenError::UnknownSender)
+    );
+    let member_holder = team.member.holder.clone();
+    let as_member = RecordContext {
+        sender: &member_holder,
+        ..context
+    };
+    let impersonated = cipher
+        .seal(
+            &as_member,
+            &team.admin.identity,
+            &forged_head,
+            3,
+            b"y",
+            &mut OsEntropy,
+        )
+        .expect("seal");
+    assert_eq!(
+        cipher
+            .open_verified(team.state(), &as_member, &impersonated)
+            .err(),
+        Some(OpenError::Signature)
+    );
     // A head from before the epoch began.
     let old_head = ChainHead {
         index: 3,
@@ -2071,6 +2131,9 @@ fn a_readmitted_member_shows_and_its_reused_device_id_starts_a_fresh_counter() {
     )
     .expect("remove");
     let removed_at = team.state().head().index;
+    // Before it is added again, the app can tell that confirming would re-admit it.
+    assert!(team.state().member(&member_id).is_none());
+    assert_eq!(team.state().departed_at(&member_id), Some(removed_at));
     let again = Device::new("member", "laptop");
     team.submit(
         Who::Owner,
@@ -2103,6 +2166,27 @@ fn a_readmitted_member_shows_and_its_reused_device_id_starts_a_fresh_counter() {
     // The old keys keep their own mark.
     assert_eq!(guard.check(&old), Err(OpenError::Replay));
     assert_eq!(guard.marks().len(), 2);
+
+    // Whoever holds the old signing key cannot make the honest device look forked: a head of
+    // the old key period with a wrong hash ends before the epoch, never as a fork.
+    let forged = ChainHead {
+        index: 3,
+        hash: LogHash::from_bytes([7; 32]),
+    };
+    let old_key = cipher
+        .seal(
+            &context,
+            &team.member.identity,
+            &forged,
+            u64::MAX - 1,
+            b"forked",
+            &mut OsEntropy,
+        )
+        .expect("seal");
+    assert_eq!(
+        cipher.open_verified(team.state(), &context, &old_key).err(),
+        Some(OpenError::HeadBeforeEpoch)
+    );
 }
 
 #[test]
