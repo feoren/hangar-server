@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
@@ -36,10 +36,21 @@ pub fn router(state: AppState) -> Router {
     if let Some(identity) = &state.identity {
         app = app.merge(crate::identity::routes(identity.clone()));
     }
+    if state.config.root_redirect.is_some() {
+        app = app.route("/", get(root_redirect));
+    }
     app.fallback(not_found)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
+}
+
+/// `GET /` mit `ROOT_REDIRECT`: Browseraufrufe der Startseite zur Produktseite schicken.
+async fn root_redirect(State(state): State<AppState>) -> Response {
+    match &state.config.root_redirect {
+        Some(target) => Redirect::permanent(target).into_response(),
+        None => not_found().await,
+    }
 }
 
 async fn not_found() -> Response {

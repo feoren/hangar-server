@@ -32,7 +32,8 @@ Sicherheit: [docs/security.md](docs/security.md), Konto-API der App im Selbstbet
 Cargo.toml, Cargo.lock      ein Crate, Versionen fest
 migrations/                 0001_relay.sql (Relay), 0002_identity.sql (Selbstbetrieb),
                             0003_magic_link_browser.sql (Anmeldelink an den Browser gebunden)
-                            bis 0009_app_platform.sql (Plattform der App je Gerät)
+                            bis 0010_removed_device_log_index.sql (Log-Index der
+                            Geräteentfernung, Frist des entfernten Geräts)
 src/
   main.rs                   Befehle: serve, healthcheck, login-link
   lib.rs                    Zusammenbau (auch für die Tests)
@@ -57,7 +58,7 @@ Dockerfile, docker-compose.yml, Caddyfile, .env.example
 
 Zwei Crates gehören der App (MIT) und liegen als **feste, unveränderte Kopien** unter `vendor/`,
 eingebunden als Pfadabhängigkeiten (Herkunft und Commit je Crate in `HERKUNFT.md`, derzeit
-`b13f4dc`). So baut das Image ohne Zugriff auf das App-Repository oder GitHub.
+`79c68ca`). So baut das Image ohne Zugriff auf das App-Repository oder GitHub.
 
 | Crate | Inhalt | Im Relay |
 | --- | --- | --- |
@@ -255,6 +256,7 @@ Alle Schlüssel mit Erklärung in [.env.example](.env.example). Die wichtigsten:
 | --- | --- |
 | `IDENTITY` | `official` oder `local` |
 | `PUBLIC_URL` | eigener Ursprung, Pflicht |
+| `ROOT_REDIRECT` | optional: Ziel für Browseraufrufe von `/` (308), z. B. `https://hangar.feoren.com/`; leer = 404 |
 | `TICKET_PUBLIC_KEYS` | `kid:base64url` der Ticket-Aussteller; Pflicht bei `official` |
 | `TICKET_AUDIENCE` | Pflichtwert für `aud`; leer = `hangar-relay` (official) bzw. `PUBLIC_URL` (local) |
 | `LICENSE_PUBLIC_KEYS` | Schlüssel der Webseite für Lizenzdokumente (Selbstbetrieb) |

@@ -977,3 +977,31 @@ async fn offizieller_betrieb_bietet_die_konto_api_nicht_an() {
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{method} {path}");
     }
 }
+
+#[tokio::test]
+async fn startseite_leitet_mit_root_redirect_weiter() {
+    // Ohne ROOT_REDIRECT bleibt `/` ein 404.
+    let s = start_official().await;
+    let r = call(&s.server.router, "GET", "/", &[], In::None).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+
+    let mut config = Config::for_tests(IdentityMode::Official, common::website_keys());
+    config.root_redirect = Some("https://hangar.feoren.com/".into());
+    let s = common::start(config).await;
+    let app = &s.server.router;
+    let r = call(app, "GET", "/", &[], In::None).await;
+    assert_eq!(r.status, StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        r.headers.get("location").and_then(|v| v.to_str().ok()),
+        Some("https://hangar.feoren.com/")
+    );
+    // Nur die Startseite: andere Pfade und der Zustand bleiben, wie sie sind.
+    assert_eq!(
+        call(app, "GET", "/health", &[], In::None).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(app, "GET", "/irgendwas", &[], In::None).await.status,
+        StatusCode::NOT_FOUND
+    );
+}
