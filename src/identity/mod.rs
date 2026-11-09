@@ -1,0 +1,243 @@
+//! Eigene Identität für den Selbstbetrieb (`IDENTITY=local`): Anmeldung per Magic Link und
+//! OAuth Device Flow, Teams, Rollen, Einladungen, Plätze gegen das Lizenzdokument der Webseite.
+//! Stellt Tickets im selben Format aus wie die Webseite; das Relay kennt so nur einen Weg.
+//!
+//! Aufteilung: `auth.rs` (Sitzungen, Tokens, Magic Link, Device Flow), `teams.rs` (Teams,
+//! Einladungen, Lizenz, Tickets), `pages.rs` (Browserseiten). Handler lesen nur die Anfrage
+//! und rufen die Dienstfunktionen; die Regeln stehen in den Dienstfunktionen.
+
+pub mod auth;
+pub mod pages;
+pub mod teams;
+
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, patch, post};
+use axum::{Json, Router};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde_json::json;
+use tokio::sync::{mpsc, watch};
+
+use crate::config::Config;
+use crate::db::Db;
+use crate::http::ratelimit::RateLimiter;
+use crate::http::AppState;
+use crate::mail::Mailer;
+use crate::relay::team::Attention;
+use crate::relay::Relay;
+use crate::util::{hex, random_bytes, sha256};
+
+pub struct Identity {
+    pub db: Db,
+    pub config: Arc<Config>,
+    pub mailer: Mailer,
+    pub limiter: RateLimiter,
+    key: SigningKey,
+    kid: String,
+    relay: OnceLock<Arc<Relay>>,
+}
+
+/// Fehler der Identitäts-API: Status und ein fester Code, nie interne Einzelheiten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: StatusCode,
+    pub code: &'static str,
+}
+
+impl ApiError {
+    pub const fn new(status: StatusCode, code: &'static str) -> Self {
+        Self { status, code }
+    }
+    pub const UNAUTHORIZED: ApiError = ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized");
+    pub const NOT_FOUND: ApiError = ApiError::new(StatusCode::NOT_FOUND, "not_found");
+    pub const FORBIDDEN: ApiError = ApiError::new(StatusCode::FORBIDDEN, "forbidden");
+    pub const INVALID: ApiError = ApiError::new(StatusCode::BAD_REQUEST, "invalid_request");
+    pub const RATE_LIMITED: ApiError = ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    pub const INTERNAL: ApiError = ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.code }))).into_response()
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> Self {
+        tracing::error!(%error, "Datenbankfehler");
+        ApiError::INTERNAL
+    }
+}
+
+pub type ApiResult<T> = Result<T, ApiError>;
+
+/// Der ticket-signierende Schlüssel des Selbstbetriebs liegt als Hex-Samen im Datenordner und
+/// wird beim ersten Start erzeugt (Dateirechte 0600 unter Unix). Er verlässt den Server nie.
+fn load_or_create_key(dir: &Path) -> Result<SigningKey, String> {
+    let path = dir.join("ticket-signing.key");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let text = text.trim();
+        let bytes: Vec<u8> = (0..text.len() / 2)
+            .filter_map(|i| u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok())
+            .collect();
+        let seed: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| format!("{} ist beschädigt", path.display()))?;
+        return Ok(SigningKey::from_bytes(&seed));
+    }
+    let seed = random_bytes::<32>();
+    let tmp = dir.join("ticket-signing.key.tmp");
+    std::fs::write(&tmp, hex(&seed)).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+impl Identity {
+    pub async fn start(
+        db: Db,
+        config: Arc<Config>,
+        attention: mpsc::Receiver<Attention>,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<Arc<Identity>, String> {
+        let key = load_or_create_key(&config.data_dir)?;
+        let kid = format!(
+            "local-{}",
+            &hex(&sha256(key.verifying_key().as_bytes()))[..12]
+        );
+        let mailer = Mailer::start(&config, shutdown.clone())?;
+        let identity = Arc::new(Identity {
+            limiter: RateLimiter::new(&config.server_secret),
+            db,
+            config,
+            mailer,
+            key,
+            kid,
+            relay: OnceLock::new(),
+        });
+        tokio::spawn(teams::attention_worker(
+            identity.clone(),
+            attention,
+            shutdown.clone(),
+        ));
+        let housekeeping = identity.clone();
+        let mut stop = shutdown;
+        tokio::spawn(async move {
+            let mut hourly = tokio::time::interval(Duration::from_secs(3600));
+            loop {
+                tokio::select! {
+                    _ = hourly.tick() => {
+                        if let Err(error) = auth::housekeeping(&housekeeping.db).await {
+                            tracing::error!(%error, "Aufräumen der Anmeldedaten fehlgeschlagen");
+                        }
+                    }
+                    _ = stop.changed() => break,
+                }
+            }
+        });
+        Ok(identity)
+    }
+
+    pub fn ticket_kid(&self) -> &str {
+        &self.kid
+    }
+
+    pub fn ticket_public_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.key
+    }
+
+    pub fn attach_relay(&self, relay: Arc<Relay>) {
+        let _ = self.relay.set(relay);
+    }
+
+    pub(crate) fn relay(&self) -> Option<&Arc<Relay>> {
+        self.relay.get()
+    }
+
+    /// Einladungs- und Anmeldelinks gehen an den Admin zurück, wenn der Server keine Mails
+    /// verschickt (Selbstbetrieb ohne SMTP).
+    pub fn links_to_admin(&self) -> bool {
+        !self.mailer.enabled()
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.public_url)
+    }
+}
+
+/// `Authorization: Bearer <token>` lesen.
+pub fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.len() <= 128)
+}
+
+pub fn routes(_identity: Arc<Identity>) -> Router<AppState> {
+    Router::new()
+        .route("/assets/style.css", get(pages::stylesheet))
+        .route(
+            "/oauth/device_authorization",
+            post(auth::device_authorization),
+        )
+        .route("/oauth/token", post(auth::token))
+        .route("/device", get(auth::device_page).post(auth::device_decide))
+        .route("/auth/email", post(auth::email_submit))
+        .route(
+            "/auth/magic/{token}",
+            get(auth::magic_page).post(auth::magic_consume),
+        )
+        .route("/auth/logout", post(auth::browser_logout))
+        .route(
+            "/invite/{token}",
+            get(teams::invite_page).post(teams::invite_accept_page),
+        )
+        .route("/v1/me", get(teams::me))
+        .route("/v1/sessions", get(auth::sessions))
+        .route("/v1/sessions/{id}", delete(auth::revoke_session))
+        .route("/v1/auth/logout", post(auth::app_logout))
+        .route("/v1/teams", post(teams::create_team))
+        .route(
+            "/v1/teams/{team}",
+            get(teams::team_detail).delete(teams::delete_team),
+        )
+        .route(
+            "/v1/teams/{team}/members/{user}",
+            patch(teams::set_role).delete(teams::remove_member),
+        )
+        .route("/v1/teams/{team}/invitations", post(teams::invite))
+        .route(
+            "/v1/teams/{team}/invitations/{invitation}/resend",
+            post(teams::resend),
+        )
+        .route(
+            "/v1/teams/{team}/invitations/{invitation}",
+            delete(teams::revoke),
+        )
+        .route("/v1/invitations/accept", post(teams::accept_api))
+        .route(
+            "/v1/license",
+            get(teams::license_get)
+                .put(teams::license_put)
+                .delete(teams::license_delete),
+        )
+        .route("/v1/tickets", post(teams::issue_ticket))
+}

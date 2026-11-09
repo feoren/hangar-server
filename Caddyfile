@@ -1,0 +1,18 @@
+# Caddy vor dem Teamserver: TLS (Let's Encrypt/ZeroSSL automatisch, TLS 1.2+), WebSocket wird
+# ohne Zusatz durchgereicht. Sicherheitsheader setzt der Teamserver selbst (inkl. HSTS bei
+# https-PUBLIC_URL); Caddy entfernt nur seine eigene Kennung.
+{
+	# E-Mail für ACME-Hinweise (optional): email admin@example.org
+}
+
+{$TEAM_DOMAIN} {
+	encode zstd gzip
+	header -Server
+	# Zugriffsprotokolle bleiben aus: Pfade wie /invite/<token> und /auth/magic/<token> tragen
+	# Geheimnisse. Wer sie braucht, muss diese Pfade maskieren.
+	reverse_proxy teamserver:8080 {
+		# Lange offene WebSocket-Verbindungen; der Server pingt alle 25 s.
+		stream_timeout 24h
+		stream_close_delay 5s
+	}
+}

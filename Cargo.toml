@@ -1,0 +1,48 @@
+[package]
+name = "hangar-team-server"
+version = "0.1.0"
+description = "Relay und Selbstbetrieb-Identität des Hangar-Teamdienstes"
+edition = "2021"
+rust-version = "1.88"
+license = "Elastic-2.0"
+publish = false
+
+# Begründung, Lizenz und Pflegezustand jeder Abhängigkeit: docs/dependencies.md.
+[dependencies]
+# Wire-Format, Keyed Hashes und Zustandsautomaten (Schritt C) sowie die Regeln der Ende-zu-Ende-
+# Verschlüsselung (Schritt E, Prüfung des Mitgliedschafts-Logs und der Schlüsselpakete). Beide
+# gehören der App (MIT) und liegen als unveränderte Kopien aus Commit b30b9d5 unter `vendor/`
+# (Herkunft je Crate in HERKUNFT.md); neue Fassung: README, Abschnitt "Protokoll-Crate der App".
+hangar-team-protocol = { path = "vendor/hangar-team-protocol" }
+hangar-team-crypto = { path = "vendor/hangar-team-crypto" }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json", "form", "query", "matched-path"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ed25519-dalek = "2.2"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2.6"
+base64 = "0.22"
+getrandom = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "std"] }
+dotenvy = "0.15"
+# Abruf der Widerrufsliste der Webseite (nur offizieller Betrieb). rustls mit ring wie lettre,
+# Wurzelzertifikate des Systems; keine Weiterleitungen, Zeit- und Größenlimit im Code.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,104 @@
+{
+  "context": "hangar-ticket-v1",
+  "description": "Testvektoren ticket (docs/ticket-format.md). Schlüssel aus RFC 8032 7.1, nur für Tests.",
+  "key": {
+    "kid": "test-2026-1",
+    "public_key_base64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+  },
+  "now": 1794225600,
+  "other_key_seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+  "vectors": [
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjU2NTAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.5AH6ouGwrjrq5GddXyu54dm62DqX9a16u3gY-b6I2kUAvgG2IEPjTGNaUlmGfXpWjFHkxgIgJ301mumv2ewpBQ",
+      "expect": "ok",
+      "name": "valid",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NDAwLCJleHAiOjE3OTQyMjU0NjAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.qC9rfTPSIY9SOIltrUo8evRQ3Zde6Xconk5DNpyCr1JKQcqD9sK-mPQRt0E7IlWe-mDM-fqtrGLQVNfzhjXDCg",
+      "expect": "expired",
+      "name": "expired",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225400,\"exp\":1794225460,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NzIwLCJleHAiOjE3OTQyMjU3ODAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.MsxQCw6EQQYtv5RisFr17zInz302bo0VAY_2w4dBm62PZ2_Is_d9DCGVXsQXU4Y_Xq5meJp8xLscfE1Z6I0VDg",
+      "expect": "not_yet_valid",
+      "name": "not_yet_valid",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225720,\"exp\":1794225780,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjkyMDAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.MAkOrbqXyoyQqNjdj1d8mxnTKz6NcgPlF7tPZTFc4JP7IeTREfDDXenviUu1oXwPFEjWQF9dUz5aYH1FmEylCg",
+      "expect": "lifetime",
+      "name": "lifetime_too_long",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794229200,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjU2NTAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.IfVr0uUyjRQb6Fz-KP7uDZeFzvE8v69aJioXQrDgZ-QHpJeeS315TiWQo5pedAA-ccUXhAvbI6p4OEx355HABg",
+      "expect": "bad_signature",
+      "name": "foreign_signature",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "other_key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwOTktOSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjU2NTAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.bVO6Z0JZmxxdRiqdoYccfmMWr3mREgG6TSKoiDmWBQnsvPjxAJRpP3nHVJwrCMbYPFlB11CpWh9MmLeTrthpBw",
+      "expect": "unknown_key",
+      "name": "unknown_kid",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2099-9\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoib3duZXIiLCJzZWF0X29rIjp0cnVlLCJpYXQiOjE3OTQyMjU1OTAsImV4cCI6MTc5NDIyNTY1MCwianRpIjoiWng4cVcydTBUdDZtMWQ5S2NQcTN2QSIsImF1ZCI6Imhhbmdhci1yZWxheSJ9.5AH6ouGwrjrq5GddXyu54dm62DqX9a16u3gY-b6I2kUAvgG2IEPjTGNaUlmGfXpWjFHkxgIgJ301mumv2ewpBQ",
+      "expect": "bad_signature",
+      "name": "tampered_payload",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": true
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjU2NTAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEiLCJhdWQiOiJoYW5nYXItcmVsYXkifQ.6u2jxddOi8JI9c0Pw6Nr-tFYIn7ETuSdScfFVu91ZBDeg5VTmvxkD9xFUvy4vorz52M9hEtIq9PhhBYelUvZDQ",
+      "expect": "bad_signature",
+      "name": "license_context",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-license-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjU2NTAsImp0aSI6ImFiYyIsImF1ZCI6Imhhbmdhci1yZWxheSJ9.4uFfK_izUANkSZz_Nw_QL5NkiuP3F1NCEhVC79Pohua5yvQ27v1jp8_Tvd-wB9rJrO5k9o2PmV8zjG7BiTg7DA",
+      "expect": "payload",
+      "name": "short_jti",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"abc\",\"aud\":\"hangar-relay\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsInN1YiI6IjEwNDIiLCJwcmoiOiIzMTciLCJyb2xlIjoibWVtYmVyIiwic2VhdF9vayI6dHJ1ZSwiaWF0IjoxNzk0MjI1NTkwLCJleHAiOjE3OTQyMjU2NTAsImp0aSI6Ilp4OHFXMnUwVHQ2bTFkOUtjUHEzdkEifQ.DaX2WEcL6DFRgNLKnEsY945sqKDLug1OOgDhPt60qdIh7Tm5VydoPEbtJkdA_Cn5VPwQf2Dwd_Txn4RZnaLzDQ",
+      "expect": "audience",
+      "name": "missing_aud",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"sub\":\"1042\",\"prj\":\"317\",\"role\":\"member\",\"seat_ok\":true,\"iat\":1794225590,\"exp\":1794225650,\"jti\":\"Zx8qW2u0Tt6m1d9KcPq3vA\"}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    }
+  ]
+}

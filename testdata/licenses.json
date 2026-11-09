@@ -1,0 +1,77 @@
+{
+  "context": "hangar-license-v1",
+  "description": "Testvektoren license (docs/license-format.md). Schlüssel aus RFC 8032 7.1, nur für Tests.",
+  "key": {
+    "kid": "test-2026-1",
+    "public_key_base64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+  },
+  "now": 1794225600,
+  "other_key_seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+  "vectors": [
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTgyNTUwMjQwMH0.pnbaTN9YuVKd3tc4Gb1L09lkfVIN0irR6lUHpAjPQB99rCGQ8WipWrUvypQVnnRGrHnS4NKG0UPQGNqageCEBg",
+      "expect": "ok:10",
+      "name": "valid",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1825502400}",
+      "signed_with": "key",
+      "signing_context": "hangar-license-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJmZWF0dXJlcyI6WyJzc28iXSwiaWF0IjoxNzkzOTAwMDAwLCJleHAiOjE4MjU1MDI0MDB9.dtyeAzMqpvtxwqjbaW66d2O08OViFIwGQekbRDUHTGIRIG18y_jnq2e1BSNUIFZdsgdKcj3H8eO-jmNiLP-0BQ",
+      "expect": "ok:10",
+      "name": "valid_with_features",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"features\":[\"sso\"],\"iat\":1793900000,\"exp\":1825502400}",
+      "signed_with": "key",
+      "signing_context": "hangar-license-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTc5NDIyNTU5OX0.iT8YdF12UEEILsF6YlHSba6jYj0lnl-m_AJ34qIhdBhAjdMInTXs1KCQfqO4fjIGIggQlfWeHYi7SWfPSLPbAg",
+      "expect": "ok:3",
+      "name": "expired",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1794225599}",
+      "signed_with": "key",
+      "signing_context": "hangar-license-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTgyNTUwMjQwMH0.1H_7CyuafH9Giz803Lko7Nlh20eLf-yI65U9BxinUqkYgerDKMipn0c248azxZdJpQmX-Zaef4Zd4GwBBy5-DA",
+      "expect": "bad_signature",
+      "name": "foreign_signature",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1825502400}",
+      "signed_with": "other_key",
+      "signing_context": "hangar-license-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwMDAsImlhdCI6MTc5MzkwMDAwMCwiZXhwIjoxODI1NTAyNDAwfQ.pnbaTN9YuVKd3tc4Gb1L09lkfVIN0irR6lUHpAjPQB99rCGQ8WipWrUvypQVnnRGrHnS4NKG0UPQGNqageCEBg",
+      "expect": "bad_signature",
+      "name": "tampered_payload",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1825502400}",
+      "signed_with": "key",
+      "signing_context": "hangar-license-v1",
+      "tampered": true
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTgyNTUwMjQwMH0.jAq6m680eXfNlXgxhiWF1wyr4vkhCuN7NJK3_N4P-VWpFpwNzoEQvK7OlHNn1KtWBMcclczyqdiIoNUal2BkDA",
+      "expect": "bad_signature",
+      "name": "ticket_context",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1825502400}",
+      "signed_with": "key",
+      "signing_context": "hangar-ticket-v1",
+      "tampered": false
+    },
+    {
+      "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJPd25lckBFeGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTgyNTUwMjQwMH0.tiQrcob1ZNqdx-34_aFUbYRa43xc5GWy1SGeCUGd5lnIg0PoZLMFDWFC0X1L-dsTCJe4eAvNjHFj9PGg9dRvBg",
+      "expect": "payload",
+      "name": "email_not_normalized",
+      "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"Owner@Example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1825502400}",
+      "signed_with": "key",
+      "signing_context": "hangar-license-v1",
+      "tampered": false
+    }
+  ]
+}

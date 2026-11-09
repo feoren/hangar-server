@@ -1,0 +1,62 @@
+{
+    "context": "hangar-revoke-v1",
+    "description": "Testvektoren der Widerrufsliste (wiki/Team-Schnittstelle.md der Webseite, GET /api/v1/team/revocations). Schlüssel aus RFC 8032 7.1, nur für Tests.",
+    "key": {
+        "kid": "test-2026-1",
+        "public_key_base64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+        "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+    },
+    "other_key_seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+    "audience": "hangar-relay",
+    "now": 1794225600,
+    "response_example": {
+        "status": 200,
+        "content_type": "text/plain; charset=US-ASCII",
+        "body": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTYwMCwiZXhwIjoxNzk0MjI1NzIwLCJhZnRlciI6IjQwIiwibGFzdCI6IjQ0IiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbeyJyaWQiOiI0MSIsInByaiI6IjMxNyIsInN1YiI6IjEwNDIiLCJraW5kIjoibWVtYmVyX3JlbW92ZWQiLCJhdCI6MTc5NDIyNTUwMH0seyJyaWQiOiI0MiIsInByaiI6IjMxNyIsInN1YiI6IjEwNDMiLCJraW5kIjoicm9sZV9jaGFuZ2VkIiwicm9sZSI6Im1lbWJlciIsImF0IjoxNzk0MjI1NTEwfSx7InJpZCI6IjQzIiwicHJqIjoiMzE4Iiwic3ViIjpudWxsLCJraW5kIjoicHJvamVjdF9kZWxldGVkIiwiYXQiOjE3OTQyMjU1MjB9LHsicmlkIjoiNDQiLCJwcmoiOiIzMTciLCJzdWIiOiIxMDQ0Iiwia2luZCI6InNlYXRfbG9zdCIsImF0IjoxNzk0MjI1NTMwfV19.enagHNUQCp0CaUsV878WGyxaq8gaHCMryXvYKGjc58KzuGtYxhLggShXr_ymT3a2lIbblev4M2SaxIChM9rBCA"
+    },
+    "vectors": [
+        {
+            "name": "valid",
+            "expect": "ok",
+            "note": "after=40, vier Einträge, more=false",
+            "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"aud\":\"hangar-relay\",\"iat\":1794225600,\"exp\":1794225720,\"after\":\"40\",\"last\":\"44\",\"more\":false,\"items\":[{\"rid\":\"41\",\"prj\":\"317\",\"sub\":\"1042\",\"kind\":\"member_removed\",\"at\":1794225500},{\"rid\":\"42\",\"prj\":\"317\",\"sub\":\"1043\",\"kind\":\"role_changed\",\"role\":\"member\",\"at\":1794225510},{\"rid\":\"43\",\"prj\":\"318\",\"sub\":null,\"kind\":\"project_deleted\",\"at\":1794225520},{\"rid\":\"44\",\"prj\":\"317\",\"sub\":\"1044\",\"kind\":\"seat_lost\",\"at\":1794225530}]}",
+            "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTYwMCwiZXhwIjoxNzk0MjI1NzIwLCJhZnRlciI6IjQwIiwibGFzdCI6IjQ0IiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbeyJyaWQiOiI0MSIsInByaiI6IjMxNyIsInN1YiI6IjEwNDIiLCJraW5kIjoibWVtYmVyX3JlbW92ZWQiLCJhdCI6MTc5NDIyNTUwMH0seyJyaWQiOiI0MiIsInByaiI6IjMxNyIsInN1YiI6IjEwNDMiLCJraW5kIjoicm9sZV9jaGFuZ2VkIiwicm9sZSI6Im1lbWJlciIsImF0IjoxNzk0MjI1NTEwfSx7InJpZCI6IjQzIiwicHJqIjoiMzE4Iiwic3ViIjpudWxsLCJraW5kIjoicHJvamVjdF9kZWxldGVkIiwiYXQiOjE3OTQyMjU1MjB9LHsicmlkIjoiNDQiLCJwcmoiOiIzMTciLCJzdWIiOiIxMDQ0Iiwia2luZCI6InNlYXRfbG9zdCIsImF0IjoxNzk0MjI1NTMwfV19.enagHNUQCp0CaUsV878WGyxaq8gaHCMryXvYKGjc58KzuGtYxhLggShXr_ymT3a2lIbblev4M2SaxIChM9rBCA"
+        },
+        {
+            "name": "empty",
+            "expect": "ok",
+            "note": "after=44, keine Einträge, last bleibt 44",
+            "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"aud\":\"hangar-relay\",\"iat\":1794225600,\"exp\":1794225720,\"after\":\"44\",\"last\":\"44\",\"more\":false,\"items\":[]}",
+            "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTYwMCwiZXhwIjoxNzk0MjI1NzIwLCJhZnRlciI6IjQ0IiwibGFzdCI6IjQ0IiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbXX0._XD0Yq4vz0hhqklDWkqE9Azhp8xPwQ90GHVHolKs-6M0AFLEC0M_rdsRPF2SNOxIq5U3gM_HCjQn_7MoJYu0Ag"
+        },
+        {
+            "name": "expired",
+            "expect": "expired",
+            "note": "iat = now - 300, exp = iat + 120 < now",
+            "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"aud\":\"hangar-relay\",\"iat\":1794225300,\"exp\":1794225420,\"after\":\"40\",\"last\":\"40\",\"more\":false,\"items\":[{\"rid\":\"41\",\"prj\":\"317\",\"sub\":\"1042\",\"kind\":\"member_removed\",\"at\":1794225500},{\"rid\":\"42\",\"prj\":\"317\",\"sub\":\"1043\",\"kind\":\"role_changed\",\"role\":\"member\",\"at\":1794225510},{\"rid\":\"43\",\"prj\":\"318\",\"sub\":null,\"kind\":\"project_deleted\",\"at\":1794225520},{\"rid\":\"44\",\"prj\":\"317\",\"sub\":\"1044\",\"kind\":\"seat_lost\",\"at\":1794225530}]}",
+            "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTMwMCwiZXhwIjoxNzk0MjI1NDIwLCJhZnRlciI6IjQwIiwibGFzdCI6IjQwIiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbeyJyaWQiOiI0MSIsInByaiI6IjMxNyIsInN1YiI6IjEwNDIiLCJraW5kIjoibWVtYmVyX3JlbW92ZWQiLCJhdCI6MTc5NDIyNTUwMH0seyJyaWQiOiI0MiIsInByaiI6IjMxNyIsInN1YiI6IjEwNDMiLCJraW5kIjoicm9sZV9jaGFuZ2VkIiwicm9sZSI6Im1lbWJlciIsImF0IjoxNzk0MjI1NTEwfSx7InJpZCI6IjQzIiwicHJqIjoiMzE4Iiwic3ViIjpudWxsLCJraW5kIjoicHJvamVjdF9kZWxldGVkIiwiYXQiOjE3OTQyMjU1MjB9LHsicmlkIjoiNDQiLCJwcmoiOiIzMTciLCJzdWIiOiIxMDQ0Iiwia2luZCI6InNlYXRfbG9zdCIsImF0IjoxNzk0MjI1NTMwfV19.sGeijry7lfhRJoI3tC4yzEcXHe5mxmnSdM35rQY5NLVQ_dpPTRVZ2q0D661S9oizX7wUuXb99ouyamrRTSEfAQ"
+        },
+        {
+            "name": "ticket_context",
+            "expect": "bad_signature",
+            "note": "gleiche Bytes, als Ticket (hangar-ticket-v1) signiert",
+            "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"aud\":\"hangar-relay\",\"iat\":1794225600,\"exp\":1794225720,\"after\":\"40\",\"last\":\"44\",\"more\":false,\"items\":[{\"rid\":\"41\",\"prj\":\"317\",\"sub\":\"1042\",\"kind\":\"member_removed\",\"at\":1794225500},{\"rid\":\"42\",\"prj\":\"317\",\"sub\":\"1043\",\"kind\":\"role_changed\",\"role\":\"member\",\"at\":1794225510},{\"rid\":\"43\",\"prj\":\"318\",\"sub\":null,\"kind\":\"project_deleted\",\"at\":1794225520},{\"rid\":\"44\",\"prj\":\"317\",\"sub\":\"1044\",\"kind\":\"seat_lost\",\"at\":1794225530}]}",
+            "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTYwMCwiZXhwIjoxNzk0MjI1NzIwLCJhZnRlciI6IjQwIiwibGFzdCI6IjQ0IiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbeyJyaWQiOiI0MSIsInByaiI6IjMxNyIsInN1YiI6IjEwNDIiLCJraW5kIjoibWVtYmVyX3JlbW92ZWQiLCJhdCI6MTc5NDIyNTUwMH0seyJyaWQiOiI0MiIsInByaiI6IjMxNyIsInN1YiI6IjEwNDMiLCJraW5kIjoicm9sZV9jaGFuZ2VkIiwicm9sZSI6Im1lbWJlciIsImF0IjoxNzk0MjI1NTEwfSx7InJpZCI6IjQzIiwicHJqIjoiMzE4Iiwic3ViIjpudWxsLCJraW5kIjoicHJvamVjdF9kZWxldGVkIiwiYXQiOjE3OTQyMjU1MjB9LHsicmlkIjoiNDQiLCJwcmoiOiIzMTciLCJzdWIiOiIxMDQ0Iiwia2luZCI6InNlYXRfbG9zdCIsImF0IjoxNzk0MjI1NTMwfV19.CHWGL3TAu6PCGck0E36rrpXmhZ04xtFMs46e2erx-ovsKv5k6FMzHKMrdOjTvSIT3me2bM-KBQfShsoM7l8RCw"
+        },
+        {
+            "name": "other_key",
+            "expect": "bad_signature",
+            "note": "gleicher kid, anderer Schlüssel",
+            "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"aud\":\"hangar-relay\",\"iat\":1794225600,\"exp\":1794225720,\"after\":\"40\",\"last\":\"44\",\"more\":false,\"items\":[{\"rid\":\"41\",\"prj\":\"317\",\"sub\":\"1042\",\"kind\":\"member_removed\",\"at\":1794225500},{\"rid\":\"42\",\"prj\":\"317\",\"sub\":\"1043\",\"kind\":\"role_changed\",\"role\":\"member\",\"at\":1794225510},{\"rid\":\"43\",\"prj\":\"318\",\"sub\":null,\"kind\":\"project_deleted\",\"at\":1794225520},{\"rid\":\"44\",\"prj\":\"317\",\"sub\":\"1044\",\"kind\":\"seat_lost\",\"at\":1794225530}]}",
+            "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTYwMCwiZXhwIjoxNzk0MjI1NzIwLCJhZnRlciI6IjQwIiwibGFzdCI6IjQ0IiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbeyJyaWQiOiI0MSIsInByaiI6IjMxNyIsInN1YiI6IjEwNDIiLCJraW5kIjoibWVtYmVyX3JlbW92ZWQiLCJhdCI6MTc5NDIyNTUwMH0seyJyaWQiOiI0MiIsInByaiI6IjMxNyIsInN1YiI6IjEwNDMiLCJraW5kIjoicm9sZV9jaGFuZ2VkIiwicm9sZSI6Im1lbWJlciIsImF0IjoxNzk0MjI1NTEwfSx7InJpZCI6IjQzIiwicHJqIjoiMzE4Iiwic3ViIjpudWxsLCJraW5kIjoicHJvamVjdF9kZWxldGVkIiwiYXQiOjE3OTQyMjU1MjB9LHsicmlkIjoiNDQiLCJwcmoiOiIzMTciLCJzdWIiOiIxMDQ0Iiwia2luZCI6InNlYXRfbG9zdCIsImF0IjoxNzk0MjI1NTMwfV19.rcuV30djc-21r6cxBndgltGGYE771UexiZhUPJuZm9xStLzC8JQzcvGay_1fJJCPyXy0avpMyl8SCYgwjgPlDw"
+        },
+        {
+            "name": "tampered",
+            "expect": "bad_signature",
+            "note": "Payload nach dem Signieren geändert (seat_lost -> role_changed)",
+            "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"aud\":\"hangar-relay\",\"iat\":1794225600,\"exp\":1794225720,\"after\":\"40\",\"last\":\"44\",\"more\":false,\"items\":[{\"rid\":\"41\",\"prj\":\"317\",\"sub\":\"1042\",\"kind\":\"member_removed\",\"at\":1794225500},{\"rid\":\"42\",\"prj\":\"317\",\"sub\":\"1043\",\"kind\":\"role_changed\",\"role\":\"member\",\"at\":1794225510},{\"rid\":\"43\",\"prj\":\"318\",\"sub\":null,\"kind\":\"project_deleted\",\"at\":1794225520},{\"rid\":\"44\",\"prj\":\"317\",\"sub\":\"1044\",\"kind\":\"role_changed\",\"at\":1794225530}]}",
+            "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImF1ZCI6Imhhbmdhci1yZWxheSIsImlhdCI6MTc5NDIyNTYwMCwiZXhwIjoxNzk0MjI1NzIwLCJhZnRlciI6IjQwIiwibGFzdCI6IjQ0IiwibW9yZSI6ZmFsc2UsIml0ZW1zIjpbeyJyaWQiOiI0MSIsInByaiI6IjMxNyIsInN1YiI6IjEwNDIiLCJraW5kIjoibWVtYmVyX3JlbW92ZWQiLCJhdCI6MTc5NDIyNTUwMH0seyJyaWQiOiI0MiIsInByaiI6IjMxNyIsInN1YiI6IjEwNDMiLCJraW5kIjoicm9sZV9jaGFuZ2VkIiwicm9sZSI6Im1lbWJlciIsImF0IjoxNzk0MjI1NTEwfSx7InJpZCI6IjQzIiwicHJqIjoiMzE4Iiwic3ViIjpudWxsLCJraW5kIjoicHJvamVjdF9kZWxldGVkIiwiYXQiOjE3OTQyMjU1MjB9LHsicmlkIjoiNDQiLCJwcmoiOiIzMTciLCJzdWIiOiIxMDQ0Iiwia2luZCI6InJvbGVfY2hhbmdlZCIsImF0IjoxNzk0MjI1NTMwfV19.enagHNUQCp0CaUsV878WGyxaq8gaHCMryXvYKGjc58KzuGtYxhLggShXr_ymT3a2lIbblev4M2SaxIChM9rBCA"
+        }
+    ]
+}
