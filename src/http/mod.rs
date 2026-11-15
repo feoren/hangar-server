@@ -1,4 +1,4 @@
-//! HTTP-Oberfläche: Router, Sicherheitsheader, Gesundheitsprüfung, Client-Adresse.
+//! HTTP surface: router, security headers, health check, client address.
 
 pub mod ratelimit;
 
@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::identity::Identity;
 use crate::relay::Relay;
 
-/// Größter Anfragekörper außerhalb des WebSockets.
+/// Largest request body outside the WebSocket.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -45,7 +45,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// `GET /` mit `ROOT_REDIRECT`: Browseraufrufe der Startseite zur Produktseite schicken.
+/// `GET /` with `ROOT_REDIRECT`: send browser requests for the start page to the product page.
 async fn root_redirect(State(state): State<AppState>) -> Response {
     match &state.config.root_redirect {
         Some(target) => Redirect::permanent(target).into_response(),
@@ -57,7 +57,7 @@ async fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
 }
 
-/// `GET /health`: Prozess lebt und die Datenbank antwortet. Verrät keine Zahlen.
+/// `GET /health`: the process is alive and the database responds. Reveals no numbers.
 async fn health(State(state): State<AppState>) -> Response {
     match sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&state.relay.db)
@@ -69,7 +69,7 @@ async fn health(State(state): State<AppState>) -> Response {
         )
             .into_response(),
         Err(error) => {
-            tracing::error!(%error, "Gesundheitsprüfung: Datenbank antwortet nicht");
+            tracing::error!(%error, "health check: database not responding");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "status": "error" })),
@@ -79,8 +79,8 @@ async fn health(State(state): State<AppState>) -> Response {
     }
 }
 
-/// Vor jeder Anfrage: Origin-Prüfung schreibender Anfragen; nach jeder: Sicherheitsheader und
-/// ein Protokolleintrag mit dem Routenmuster (nie dem Pfad: der kann Tokens tragen).
+/// Before each request: origin check for writing requests; after each: security headers and
+/// a log entry with the route pattern (never the path: it may carry tokens).
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let route = request
@@ -96,8 +96,8 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
             .and_then(|o| o.to_str().ok())
         {
             if !state.config.origin_allowed(origin) {
-                tracing::info!(route, "fremder Origin abgewiesen");
-                // Unter /api/v1 gilt das Fehlerformat der Konto-API (RFC 9457).
+                tracing::info!(route, "foreign origin rejected");
+                // Under /api/v1 the error format of the account API applies (RFC 9457).
                 let refused = if crate::identity::api::is_api_path(request.uri().path()) {
                     crate::identity::api::Problem::new(
                         StatusCode::FORBIDDEN,
@@ -116,7 +116,7 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
     let response = next.run(request).await;
     let status = response.status().as_u16();
     if route != "/health" {
-        tracing::info!(method = %method, route, status, ms = started.elapsed().as_millis() as u64, "Anfrage");
+        tracing::info!(method = %method, route, status, ms = started.elapsed().as_millis() as u64, "request");
     }
     with_headers(&state.config, response)
 }
@@ -154,7 +154,7 @@ fn with_headers(config: &Config, mut response: Response) -> Response {
     response
 }
 
-/// Extraktor für die Client-Adresse (für Ratenbegrenzung), nie für Entscheidungen über Rechte.
+/// Extractor for the client address (for rate limiting), never for authorization decisions.
 pub struct ClientIp(pub Option<IpAddr>);
 
 impl axum::extract::FromRequestParts<AppState> for ClientIp {
@@ -174,8 +174,8 @@ impl axum::extract::FromRequestParts<AppState> for ClientIp {
 }
 
 impl ClientIp {
-    /// Schlüssel für die Ratenbegrenzung. IPv6 zählt je /64: ein Anschluss bekommt meist ein
-    /// ganzes /64, einzelne Adressen daraus kosten nichts.
+    /// Key for rate limiting. IPv6 counts per /64: a connection usually gets a whole /64,
+    /// so individual addresses from it cost nothing.
     pub fn key(&self) -> String {
         match self.0 {
             Some(IpAddr::V4(ip)) => ip.to_string(),
@@ -191,8 +191,8 @@ impl ClientIp {
     }
 }
 
-/// Adresse des Clients: direkt, oder hinter dem eigenen Proxy (Caddy) der letzte Eintrag von
-/// `X-Forwarded-For`, den der Proxy selbst angehängt hat.
+/// Client address: direct, or behind our own proxy (Caddy) the last entry of
+/// `X-Forwarded-For`, which the proxy itself appended.
 pub fn client_ip(
     headers: &HeaderMap,
     peer: Option<&ConnectInfo<SocketAddr>>,
@@ -216,7 +216,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ratenschlüssel_fasst_ipv6_je_64_zusammen() {
+    fn rate_key_groups_ipv6_per_64() {
         let key = |ip: &str| ClientIp(Some(ip.parse().unwrap())).key();
         assert_eq!(key("203.0.113.7"), "203.0.113.7");
         assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:bbbb::9"));

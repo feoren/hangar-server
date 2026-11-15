@@ -1,9 +1,9 @@
-//! Lizenzdokumente der Webseite für den Selbstbetrieb (Format: `docs/license-format.md`).
+//! License documents of the website for self-hosting (format: `docs/license-format.md`).
 //!
-//! Modell: Plätze je Konto. Der Eigentümer kauft `seats` Plätze; sie gelten für alle Teams, die
-//! ihm auf diesem Server gehören. Gezählt werden verschiedene Personen über alle seine Teams,
-//! der Eigentümer eingeschlossen. Ohne gültige Lizenz gilt Free mit [`FREE_SEATS`]. Läuft eine
-//! Lizenz ab, wird nichts gelöscht; nur Beitritte über die Free-Grenze werden abgelehnt.
+//! Model: seats per account. The owner buys `seats` seats; they apply to all teams the owner
+//! has on this server. Distinct people are counted across all of the owner's teams, the owner
+//! included. Without a valid license, Free with [`FREE_SEATS`] applies. When a license expires,
+//! nothing is deleted; only joins beyond the Free limit are rejected.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -11,29 +11,29 @@ use thiserror::Error;
 use crate::signed::{self, KeySet, SignedError, LICENSE_CONTEXT};
 use crate::util::{is_id, is_opaque, normalize_email};
 
-/// Plätze ohne Lizenz (Free): drei Personen.
+/// Seats without a license (Free): three people.
 pub const FREE_SEATS: u32 = 3;
-/// Längstes Lizenzdokument.
+/// Longest license document.
 pub const MAX_LICENSE_LEN: usize = 4096;
-/// Höchste Platzzahl, die ein Dokument tragen darf (Schutz vor Überläufen in Zählungen).
+/// Highest seat count a document may carry (guards against overflows in counts).
 pub const MAX_SEATS: u32 = 100_000;
-/// Erlaubte Uhrenabweichung für `iat`, in Sekunden.
+/// Allowed clock skew for `iat`, in seconds.
 const CLOCK_SKEW_S: i64 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LicenseClaims {
     pub v: u32,
     pub kid: String,
-    /// Lizenz-ID der Webseite; dieselbe Lizenz kann auf einem Server nur ein Konto hinterlegen.
+    /// License ID of the website; on a server, the same license can be stored by one account only.
     pub lid: String,
-    /// Konto-ID der Webseite (opak).
+    /// Account ID of the website (opaque).
     pub sub: String,
-    /// E-Mail-Adresse des Kontos; muss zur Adresse des hinterlegenden Kontos passen.
+    /// Email address of the account; must match the address of the account storing it.
     pub email: String,
-    /// Tarif, z. B. `team`. Für spätere Staffelungen offen.
+    /// Plan, e.g. `team`. Open for later tiers.
     pub plan: String,
     pub seats: u32,
-    /// Optionale Zusatzfunktionen; der Server kennt in Version 1 keine und ignoriert sie.
+    /// Optional extra features; in version 1 the server knows none and ignores them.
     #[serde(default)]
     pub features: Vec<String>,
     pub iat: i64,
@@ -44,20 +44,20 @@ pub struct LicenseClaims {
 pub enum LicenseError {
     #[error(transparent)]
     Signed(#[from] SignedError),
-    #[error("der Inhalt passt nicht zum Lizenzformat")]
+    #[error("the payload does not match the license format")]
     Payload,
-    #[error("Version {0} wird nicht unterstützt")]
+    #[error("version {0} is not supported")]
     Version(u32),
-    #[error("die Lizenz wurde widerrufen")]
+    #[error("the license has been revoked")]
     Revoked,
-    #[error("die Lizenz ist abgelaufen")]
+    #[error("the license has expired")]
     Expired,
-    #[error("die Lizenz ist auf eine andere E-Mail-Adresse ausgestellt")]
+    #[error("the license is issued to a different email address")]
     EmailMismatch,
 }
 
-/// Prüft Signatur, kid und Form. Die Zeit prüft [`LicenseClaims::active`], damit eine
-/// abgelaufene Lizenz weiter angezeigt werden kann.
+/// Checks signature, kid and shape. Time is checked by [`LicenseClaims::active`], so that an
+/// expired license can still be displayed.
 pub fn verify(
     document: &str,
     keys: &KeySet,
@@ -95,12 +95,12 @@ pub fn verify(
 }
 
 impl LicenseClaims {
-    /// Gültig zum Zeitpunkt `now_s`.
+    /// Valid at time `now_s`.
     pub fn active(&self, now_s: i64) -> bool {
         self.iat <= now_s + CLOCK_SKEW_S && now_s < self.exp
     }
 
-    /// Plätze, die zum Zeitpunkt `now_s` gelten.
+    /// Seats that apply at time `now_s`.
     pub fn effective_seats(&self, now_s: i64) -> u32 {
         if self.active(now_s) {
             self.seats.max(FREE_SEATS)
@@ -110,7 +110,7 @@ impl LicenseClaims {
     }
 }
 
-/// Plätze eines Kontos mit oder ohne Lizenz.
+/// Seats of an account with or without a license.
 pub fn seats_for(license: Option<&LicenseClaims>, now_s: i64) -> u32 {
     license.map_or(FREE_SEATS, |l| l.effective_seats(now_s))
 }
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn plätze_nach_zeit() {
+    fn seats_over_time() {
         let k = SigningKey::from_bytes(&[9; 32]);
         let c = verify(&doc(&k, &claims()), &keys(&k), &[]).unwrap();
         assert_eq!(c.effective_seats(1500), 10);
@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn widerruf_und_form() {
+    fn revocation_and_shape() {
         let k = SigningKey::from_bytes(&[9; 32]);
         assert_eq!(
             verify(&doc(&k, &claims()), &keys(&k), &["lic_1".into()]),

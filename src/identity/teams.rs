@@ -1,15 +1,15 @@
-//! Teams, Rollen, Einladungen, Plätze und Tickets im Selbstbetrieb.
+//! Teams, roles, invitations, seats and tickets for self-hosting.
 //!
-//! Regeln:
-//! - Rang owner > admin > member. Über eine Person bestimmt nur, wer höher steht; vergeben wird
-//!   nur eine Rolle unter der eigenen; owner ist nie vergebbar. Austreten darf jede Person außer
-//!   dem Eigentümer.
-//! - Einladungen nur an eine E-Mail-Adresse: einmalig, 7 Tage gültig, je Team und Adresse eine
-//!   offene; erneutes Einladen erneuert Token und Frist. Die Platzprüfung passiert beim
-//!   Annehmen in derselben Schreibtransaktion wie der Beitritt (BEGIN IMMEDIATE: Annahmen
-//!   laufen nacheinander, der letzte Platz geht genau einmal weg).
-//! - Plätze je Konto: verschiedene Personen über alle Teams des Eigentümers, er selbst
-//!   eingeschlossen; Grenze aus seinem Lizenzdokument, sonst Free (3).
+//! Rules:
+//! - Rank owner > admin > member. Only someone ranked higher decides about a person; only a
+//!   role below one's own can be granted; owner can never be granted. Anyone except the owner
+//!   may leave.
+//! - Invitations only to an email address: single use, valid for 7 days, one open invitation
+//!   per team and address; inviting again renews token and deadline. The seat check happens on
+//!   acceptance in the same write transaction as the join (BEGIN IMMEDIATE: acceptances
+//!   run one after another, the last seat is taken exactly once).
+//! - Seats per account: distinct people across all of the owner's teams, the owner
+//!   included; limit from the owner's license document, otherwise Free (3).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub const INVITATION_TTL_S: i64 = 7 * 86_400;
 pub const MAX_INVITES_PER_REQUEST: usize = 20;
 pub const TICKET_TTL_S: i64 = 60;
 const ATTENTION_INTERVAL_S: i64 = 3600;
-/// Einladungsmails je Konto und Stunde, jede Adresse und jedes erneute Senden einzeln.
+/// Invitation mails per account and hour, counting each address and each resend separately.
 const INVITE_RULE: Rule = Rule {
     limit: 50,
     window_s: 3600,
@@ -73,7 +73,7 @@ async fn role_of(
     Ok(role.and_then(|r| Role::parse(&r)))
 }
 
-/// Rolle der Person im Team; fremde Teams sind "nicht gefunden" (IDs lassen sich nicht abtasten).
+/// The person's role in the team; foreign teams are "not found" (IDs cannot be probed).
 pub(crate) async fn require_member(
     identity: &Identity,
     team: &str,
@@ -85,7 +85,7 @@ pub(crate) async fn require_member(
         .ok_or(ApiError::NOT_FOUND)
 }
 
-/// Lizenz des Kontos, falls hinterlegt und noch mit den konfigurierten Schlüsseln gültig.
+/// The account's license, if stored and still valid with the configured keys.
 async fn license_of(
     conn: &mut SqliteConnection,
     identity: &Identity,
@@ -135,7 +135,7 @@ async fn seats(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Dienste
+// Services
 
 pub async fn create(identity: &Identity, user: &User, name: &str) -> ApiResult<String> {
     let name = clean_name(name).ok_or(ApiError::INVALID)?;
@@ -151,11 +151,11 @@ pub async fn create(identity: &Identity, user: &User, name: &str) -> ApiResult<S
         return Err(ApiError::RATE_LIMITED);
     }
     let id = insert_team(&identity.db, &user.id, &name).await?;
-    tracing::info!("Team angelegt");
+    tracing::info!("team created");
     Ok(id)
 }
 
-/// Team mit Eigentümer anlegen (API und Befehl `create-team`); `name` ist schon geprüft.
+/// Creates a team with owner (API and command `create-team`); `name` is already validated.
 async fn insert_team(db: &Db, owner_id: &str, name: &str) -> Result<String, sqlx::Error> {
     let id = format!("t_{}", random_id());
     let now = now_s();
@@ -199,7 +199,7 @@ type InvitationRow = (
     String,
 );
 
-/// Einladung annehmen: Adresse muss passen, Platzprüfung und Beitritt in einer Transaktion.
+/// Accepts an invitation: the address must match, seat check and join in one transaction.
 pub async fn accept(
     identity: &Identity,
     token: &str,
@@ -235,7 +235,7 @@ pub async fn accept(
         if counted.is_none() {
             let (seats, _) = seats(&mut tx, identity, &owner).await?;
             if seats.used >= seats.limit {
-                tracing::info!(limit = seats.limit, "Beitritt abgelehnt: kein Platz frei");
+                tracing::info!(limit = seats.limit, "join refused: no seat available");
                 return Ok(Accept::SeatsFull);
             }
         }
@@ -276,12 +276,12 @@ pub async fn accept(
             );
         }
     }
-    tracing::info!("Einladung angenommen");
+    tracing::info!("invitation accepted");
     Ok(Accept::Joined { team, name })
 }
 
-/// Erneuert Token und Frist einer offenen Einladung oder legt sie an; schickt die Mail oder
-/// gibt den Link zurück (ohne Mailversand).
+/// Renews token and deadline of an open invitation or creates it; sends the mail or
+/// returns the link (without mail delivery).
 async fn send_invitation(
     identity: &Identity,
     inviter: &User,
@@ -312,8 +312,8 @@ async fn send_invitation(
     Ok(out)
 }
 
-/// Offene Einladung erneuern oder anlegen: (id, Status, Token, Ablauf). Der Token steht nur im
-/// Link, gespeichert wird sein Hash.
+/// Renews or creates an open invitation: (id, status, token, expiry). The token appears only in
+/// the link; its hash is what gets stored.
 async fn upsert_invitation(
     db: &Db,
     inviter_id: &str,
@@ -368,13 +368,13 @@ async fn upsert_invitation(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Verwaltung auf dem Host (Befehle create-team, invite, teams; nur IDENTITY=local)
+// Administration on the host (commands create-team, invite, teams; IDENTITY=local only)
 //
-// Wer die Befehle aufruft, hat Zugriff auf den Server und seine Datenbank; deshalb ohne
-// Anmeldung und ohne Ratenbegrenzung. Die Regeln bleiben dieselben wie in der API: Name höchstens
-// 80 Zeichen, Einladung nur als admin oder member, Platzprüfung erst beim Annehmen.
+// Whoever runs the commands has access to the server and its database; hence no
+// authentication and no rate limiting. The rules stay the same as in the API: name at most
+// 80 characters, invitation only as admin or member, seat check only on acceptance.
 
-/// Ein Team, wie der Befehl `teams` es zeigt.
+/// A team as the `teams` command shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamLine {
     pub id: String,
@@ -384,16 +384,16 @@ pub struct TeamLine {
     pub open_invitations: i64,
 }
 
-/// `create-team <eigentümer-email> <name>`: legt das Konto des Eigentümers bei Bedarf an und gibt
-/// die Team-ID zurück.
+/// `create-team <owner-email> <name>`: creates the owner's account if needed and returns
+/// the team ID.
 pub async fn cli_create_team(
     db: &Db,
     default_lang: &str,
     owner_email: &str,
     name: &str,
 ) -> Result<String, String> {
-    let email = normalize_email(owner_email).ok_or("ungültige E-Mail-Adresse")?;
-    let name = clean_name(name).ok_or("Teamname fehlt oder ist länger als 80 Zeichen")?;
+    let email = normalize_email(owner_email).ok_or("invalid email address")?;
+    let name = clean_name(name).ok_or("team name missing or longer than 80 characters")?;
     let owner = async {
         let mut tx = begin_write(db).await?;
         let id = find_or_create_user(&mut tx, &email, default_lang, now_s()).await?;
@@ -405,11 +405,11 @@ pub async fn cli_create_team(
     let id = insert_team(db, &owner, &name)
         .await
         .map_err(|e| e.to_string())?;
-    tracing::info!("Team angelegt (Befehl)");
+    tracing::info!("team created (command)");
     Ok(id)
 }
 
-/// Team über seine ID oder seinen genauen Namen finden: (id, name, owner_id).
+/// Finds a team by its ID or its exact name: (id, name, owner_id).
 async fn cli_find_team(db: &Db, team: &str) -> Result<(String, String, String), String> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT id, name, owner_id FROM teams WHERE id = ? OR name = ? ORDER BY created_at",
@@ -424,7 +424,7 @@ async fn cli_find_team(db: &Db, team: &str) -> Result<(String, String, String), 
     }
     let mut rows = rows.into_iter();
     match (rows.next(), rows.next()) {
-        (None, _) => Err(format!("kein Team {team:?} (Liste: teams)")),
+        (None, _) => Err(format!("no team {team:?} (list: teams)")),
         (Some(row), None) => Ok(row),
         (Some(first), Some(second)) => {
             let ids: Vec<String> = [first, second]
@@ -433,16 +433,16 @@ async fn cli_find_team(db: &Db, team: &str) -> Result<(String, String, String), 
                 .map(|r| r.0)
                 .collect();
             Err(format!(
-                "mehrere Teams heißen {team:?}, bitte die ID nehmen: {}",
+                "several teams are named {team:?}, please use the ID: {}",
                 ids.join(", ")
             ))
         }
     }
 }
 
-/// `invite <team> <email> [member|admin]`: Einladung im Namen des Eigentümers, gibt den Link
-/// zurück (einmal, 7 Tage, nur für diese Adresse). Die Einladungsseite meldet die Person mit dem
-/// Link selbst an; eine Mail geht nicht hinaus.
+/// `invite <team> <email> [member|admin]`: invitation on behalf of the owner, returns the link
+/// (single use, 7 days, only for this address). The invitation page signs the person in with the
+/// link itself; no mail is sent.
 pub async fn cli_invite(
     db: &Db,
     public_url: &str,
@@ -453,8 +453,8 @@ pub async fn cli_invite(
 ) -> Result<String, String> {
     let role = Role::parse(role)
         .filter(|r| *r != Role::Owner)
-        .ok_or("Rolle nur member oder admin")?;
-    let email = normalize_email(email).ok_or("ungültige E-Mail-Adresse")?;
+        .ok_or("role must be member or admin")?;
+    let email = normalize_email(email).ok_or("invalid email address")?;
     let (team, _, owner) = cli_find_team(db, team).await?;
     let member: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = ? AND u.email = ?",
@@ -465,16 +465,16 @@ pub async fn cli_invite(
     .await
     .map_err(|e| e.to_string())?;
     if member.is_some() {
-        return Err(format!("{email} ist schon Mitglied"));
+        return Err(format!("{email} is already a member"));
     }
     let (_, _, token, _) = upsert_invitation(db, &owner, &team, &email, role, default_lang)
         .await
         .map_err(|e| e.to_string())?;
-    tracing::info!("Einladung angelegt (Befehl)");
+    tracing::info!("invitation created (command)");
     Ok(format!("{public_url}/invite/{token}"))
 }
 
-/// `teams`: alle Teams mit Eigentümer, Mitgliedern und offenen Einladungen.
+/// `teams`: all teams with owner, members and open invitations.
 pub async fn cli_teams(db: &Db) -> Result<Vec<TeamLine>, String> {
     let rows: Vec<(String, String, String, i64, i64)> = sqlx::query_as(
         "SELECT t.id, t.name, u.email, \
@@ -503,7 +503,7 @@ fn can_manage(actor: Role, target: Role) -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Handler (App, Bearer)
+// Handlers (app, bearer)
 
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let identity = identity(&state)?;
@@ -601,7 +601,7 @@ pub async fn delete_team(
     if let Some(relay) = identity.relay() {
         relay.close_team(&team).await?;
     }
-    tracing::info!("Team gelöscht");
+    tracing::info!("team deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -673,7 +673,7 @@ pub async fn remove_member(
     if let Some(relay) = identity.relay() {
         relay.remove_member(&team, &target).await?;
     }
-    tracing::info!(leaving, "Mitglied entfernt");
+    tracing::info!(leaving, "member removed");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -709,7 +709,7 @@ pub async fn invite(
             emails.push(email);
         }
     }
-    // Jede Adresse zählt einzeln (sonst 20 Mails je Anfrage bei einem Treffer).
+    // Each address counts separately (otherwise 20 mails per request for a single hit).
     let now = now_s();
     for _ in &emails {
         if !identity.limiter.hit("invite", &user.id, INVITE_RULE, now) {
@@ -829,7 +829,7 @@ pub async fn accept_api(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Einladungsseite (Browser)
+// Invitation page (browser)
 
 async fn invitation_preview(
     identity: &Identity,
@@ -885,8 +885,8 @@ pub struct InviteForm {
     csrf: Option<String>,
 }
 
-/// POST: annehmen. Ohne Browsersitzung belegt der Link aus der Mail das Postfach der
-/// eingeladenen Adresse (wie ein Anmeldelink) und meldet diese Adresse an.
+/// POST: accept. Without a browser session, the link from the mail proves control of the
+/// invited address's mailbox (like a magic link) and signs that address in.
 pub async fn invite_accept_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -992,7 +992,7 @@ pub async fn invite_accept_page(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Lizenz
+// License
 
 fn license_json(lic: Option<&LicenseClaims>) -> Value {
     let now = now_s();
@@ -1053,7 +1053,7 @@ pub async fn license_put(
         &identity.config.license_revoked,
     )
     .map_err(|error| {
-        tracing::info!(reason = %error, "Lizenz abgelehnt");
+        tracing::info!(reason = %error, "license rejected");
         ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_license")
     })?;
     if claims.email != user.email {
@@ -1084,7 +1084,7 @@ pub async fn license_put(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    tracing::info!(seats = claims.seats, "Lizenz hinterlegt");
+    tracing::info!(seats = claims.seats, "license stored");
     Ok(Json(license_json(Some(&claims))))
 }
 
@@ -1102,15 +1102,15 @@ pub async fn license_delete(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Konto und Projekte für die App (`/api/v1/me`, `/api/v1/projects`)
+// Account and projects for the app (`/api/v1/me`, `/api/v1/projects`)
 
-/// Plätze des eigenen Kontos (Grenze aus der eigenen Lizenz, belegt über alle eigenen Teams).
+/// Seats of the own account (limit from the own license, used across all own teams).
 pub async fn account_seats(identity: &Identity, user: &User) -> ApiResult<Seats> {
     let mut conn = identity.db.acquire().await?;
     Ok(seats(&mut conn, identity, &user.id).await?.0)
 }
 
-/// Ein Projekt der Liste, wie die Webseite es ausgibt (`wiki/Team-Schnittstelle.md`).
+/// A project of the list, as the website returns it (`wiki/Team-Schnittstelle.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
     pub id: String,
@@ -1119,14 +1119,14 @@ pub struct ProjectView {
     pub owner_id: String,
     pub plan: String,
     pub seats: Seats,
-    /// Nur für owner und admin (wer Einladungen verwalten darf).
+    /// Only for owner and admin (those allowed to manage invitations).
     pub pending_invitations: Option<u32>,
 }
 
-/// Alle Teams der Person mit Plätzen des jeweiligen Eigentümerkontos. Vier Abfragen
-/// unabhängig von der Zahl der Teams (keine Abfrage je Team oder je Eigentümer): Teams,
-/// belegte Plätze je Eigentümer, Lizenzen der Eigentümer, offene Einladungen. Indizes:
-/// `team_members_user`, `teams_owner`, `invitations_open`, Primärschlüssel von `licenses`.
+/// All of the person's teams with the seats of the respective owner account. Four queries
+/// regardless of the number of teams (no query per team or per owner): teams,
+/// used seats per owner, the owners' licenses, open invitations. Indexes:
+/// `team_members_user`, `teams_owner`, `invitations_open`, primary key of `licenses`.
 pub async fn projects_of(identity: &Identity, user: &User) -> ApiResult<Vec<ProjectView>> {
     let now = now_s();
     let mut conn = identity.db.acquire().await?;
@@ -1211,13 +1211,13 @@ pub async fn projects_of(identity: &Identity, user: &User) -> ApiResult<Vec<Proj
 // ---------------------------------------------------------------------------------------------
 // Tickets
 
-/// Tickets je Konto und Stunde (alte und neue Route teilen sich den Zähler).
+/// Tickets per account and hour (old and new route share the counter).
 const TICKET_RULE: Rule = Rule {
     limit: 600,
     window_s: 3600,
 };
 
-/// Adresse des Live-Kanals aus `PUBLIC_URL`: `http` wird `ws`, `https` wird `wss`.
+/// Address of the live channel from `PUBLIC_URL`: `http` becomes `ws`, `https` becomes `wss`.
 pub fn live_url(public_url: &str) -> String {
     if let Some(rest) = public_url.strip_prefix("https://") {
         format!("wss://{rest}/v1/live")
@@ -1228,9 +1228,9 @@ pub fn live_url(public_url: &str) -> String {
     }
 }
 
-/// Dienst: kurzlebiges Ticket für `hello`, im Format der Webseite (`docs/ticket-format.md`).
-/// Nur für Mitglieder; fremde und unbekannte Teams sind gleichermaßen "nicht gefunden".
-/// Gibt Ticket und Ablauf (Unix-Sekunden) zurück.
+/// Service: short-lived ticket for `hello`, in the website's format (`docs/ticket-format.md`).
+/// Members only; foreign and unknown teams are equally "not found".
+/// Returns ticket and expiry (Unix seconds).
 pub async fn issue(identity: &Identity, user: &User, team: &str) -> ApiResult<(String, i64)> {
     if !identity
         .limiter
@@ -1262,7 +1262,7 @@ pub struct TicketRequest {
     team: String,
 }
 
-/// `POST /v1/tickets` (alte Form). Die App nutzt `POST /api/v1/relay-ticket`.
+/// `POST /v1/tickets` (old form). The app uses `POST /api/v1/relay-ticket`.
 pub async fn issue_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1277,10 +1277,10 @@ pub async fn issue_ticket(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Hinweismails
+// Attention mails
 
-/// "Etwas braucht deine Aufmerksamkeit": höchstens eine Mail je Person, Team und Stunde, ohne
-/// jeden Inhalt.
+/// "Something needs your attention": at most one mail per person, team and hour, without
+/// any content.
 pub async fn attention_worker(
     identity: Arc<Identity>,
     mut rx: mpsc::Receiver<Attention>,
@@ -1292,7 +1292,7 @@ pub async fn attention_worker(
             _ = shutdown.changed() => break,
         };
         if let Err(error) = notify(&identity, &item).await {
-            tracing::error!(%error, "Hinweismail nicht vorbereitet");
+            tracing::error!(%error, "attention mail not prepared");
         }
     }
 }

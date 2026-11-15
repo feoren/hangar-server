@@ -1,11 +1,11 @@
-//! Eigene Identität für den Selbstbetrieb (`IDENTITY=local`): Anmeldung per Magic Link und
-//! OAuth Device Flow, Teams, Rollen, Einladungen, Plätze gegen das Lizenzdokument der Webseite.
-//! Stellt Tickets im selben Format aus wie die Webseite; das Relay kennt so nur einen Weg.
+//! Built-in identity for self-hosting (`IDENTITY=local`): sign-in via magic link and
+//! OAuth device flow, teams, roles, invitations, seats checked against the website's license document.
+//! Issues tickets in the same format as the website, so the relay knows only one path.
 //!
-//! Aufteilung: `auth.rs` (Sitzungen, Tokens, Magic Link, Device Flow), `teams.rs` (Teams,
-//! Einladungen, Lizenz, Tickets), `pages.rs` (Browserseiten), `api.rs` (Konto-API der App
-//! unter `/api/v1`, gleich der Webseite), `account.rs` (Browserseite `/account/devices`). Handler lesen nur die Anfrage
-//! und rufen die Dienstfunktionen; die Regeln stehen in den Dienstfunktionen.
+//! Layout: `auth.rs` (sessions, tokens, magic link, device flow), `teams.rs` (teams,
+//! invitations, license, tickets), `pages.rs` (browser pages), `api.rs` (the app's account API
+//! under `/api/v1`, same as the website), `account.rs` (browser page `/account/devices`). Handlers
+//! only read the request and call the service functions; the rules live in the service functions.
 
 pub mod account;
 pub mod api;
@@ -44,7 +44,7 @@ pub struct Identity {
     relay: OnceLock<Arc<Relay>>,
 }
 
-/// Fehler der Identitäts-API: Status und ein fester Code, nie interne Einzelheiten.
+/// Error of the identity API: status and a fixed code, never internal details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiError {
     pub status: StatusCode,
@@ -71,15 +71,15 @@ impl IntoResponse for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
-        tracing::error!(%error, "Datenbankfehler");
+        tracing::error!(%error, "database error");
         ApiError::INTERNAL
     }
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
-/// Der ticket-signierende Schlüssel des Selbstbetriebs liegt als Hex-Samen im Datenordner und
-/// wird beim ersten Start erzeugt (Dateirechte 0600 unter Unix). Er verlässt den Server nie.
+/// The self-hosting ticket signing key is stored as a hex seed in the data directory and
+/// is generated on first start (file mode 0600 on Unix). It never leaves the server.
 fn load_or_create_key(dir: &Path) -> Result<SigningKey, String> {
     let path = dir.join("ticket-signing.key");
     if let Ok(text) = std::fs::read_to_string(&path) {
@@ -89,7 +89,7 @@ fn load_or_create_key(dir: &Path) -> Result<SigningKey, String> {
             .collect();
         let seed: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| format!("{} ist beschädigt", path.display()))?;
+            .map_err(|_| format!("{} is corrupted", path.display()))?;
         return Ok(SigningKey::from_bytes(&seed));
     }
     let seed = random_bytes::<32>();
@@ -140,7 +140,7 @@ impl Identity {
                 tokio::select! {
                     _ = hourly.tick() => {
                         if let Err(error) = auth::housekeeping(&housekeeping.db).await {
-                            tracing::error!(%error, "Aufräumen der Anmeldedaten fehlgeschlagen");
+                            tracing::error!(%error, "cleanup of sign-in data failed");
                         }
                     }
                     _ = stop.changed() => break,
@@ -170,8 +170,8 @@ impl Identity {
         self.relay.get()
     }
 
-    /// Einladungs- und Anmeldelinks gehen an den Admin zurück, wenn der Server keine Mails
-    /// verschickt (Selbstbetrieb ohne SMTP).
+    /// Invitation links and magic links are returned to the admin when the server sends no
+    /// mails (self-hosting without SMTP).
     pub fn links_to_admin(&self) -> bool {
         !self.mailer.enabled()
     }
@@ -181,7 +181,7 @@ impl Identity {
     }
 }
 
-/// `Authorization: Bearer <token>` lesen.
+/// Reads `Authorization: Bearer <token>`.
 pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("authorization")

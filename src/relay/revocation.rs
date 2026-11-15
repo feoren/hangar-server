@@ -1,22 +1,22 @@
-//! Widerrufsliste der Webseite (offizieller Betrieb, Format: `docs/revocation-format.md`).
+//! Revocation list of the website (official mode, format: `docs/revocation-format.md`).
 //!
-//! Das Relay holt alle `REVOCATION_INTERVAL_SECS` (Vorgabe 15 s)
-//! `GET <REVOCATION_URL>?after=<cursor>` mit `Authorization: Bearer <RELAY_REVOCATION_TOKEN>`.
-//! Die Antwort ist ein kompaktes, Ed25519-signiertes Dokument wie ein Ticket, Kontext
-//! `hangar-revoke-v1`, geprüft mit den Schlüsseln der Tickets (`TICKET_PUBLIC_KEYS`). Ausgehend
-//! nur an genau diese Adresse, ohne Weiterleitungen, mit Zeit- und Größenlimit.
+//! Every `REVOCATION_INTERVAL_SECS` (default 15 s) the relay fetches
+//! `GET <REVOCATION_URL>?after=<cursor>` with `Authorization: Bearer <RELAY_REVOCATION_TOKEN>`.
+//! The response is a compact, Ed25519-signed document like a ticket, context
+//! `hangar-revoke-v1`, verified with the ticket keys (`TICKET_PUBLIC_KEYS`). Outgoing requests
+//! go only to exactly this address, without redirects, with time and size limits.
 //!
-//! Wirkung je Eintrag (idempotent je `rid`):
-//! - `member_removed`, `seat_lost`: Mitglied entfernt (Reservierungen frei, Close 4403); ein
-//!   Ticket, das nach dem Eintrag ausgestellt wurde, lässt es wieder zu.
-//! - `role_changed`: neue Rolle still auf den laufenden Verbindungen anwenden; ohne bekannte
-//!   Rolle die Verbindungen schließen (4401), die App kommt mit neuem Ticket. In beiden Fällen
-//!   gelten Tickets mit `iat` bis `at` nicht mehr (`hello` und `ticket.renew`), sonst holte
-//!   sich ein herabgestuftes Mitglied mit einem gehorteten Ticket die alte Rolle zurück.
-//! - `project_deleted`: Team schließen (4404), Relay-Daten löschen.
+//! Effect per entry (idempotent per `rid`):
+//! - `member_removed`, `seat_lost`: member removed (reservations released, close 4403); a
+//!   ticket issued after the entry lets the member in again.
+//! - `role_changed`: apply the new role silently to the running connections; without a known
+//!   role, close the connections (4401), the app comes back with a new ticket. In both cases,
+//!   tickets with `iat` up to `at` are no longer valid (`hello` and `ticket.renew`), otherwise a
+//!   demoted member could regain the old role with a hoarded ticket.
+//! - `project_deleted`: close the team (4404), delete relay data.
 //!
-//! Fehler und Unerreichbarkeit halten nichts an: das Relay versucht es weiter, mit wachsendem
-//! Abstand (bis 5 min), und schreibt es ins Protokoll.
+//! Errors and unreachability stop nothing: the relay keeps trying, with increasing interval
+//! (up to 5 min), and logs it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,18 +31,18 @@ use crate::signed::{self, KeySet, SignedError, REVOKE_CONTEXT};
 use crate::ticket::{Role, CLOCK_SKEW_S};
 use crate::util::{is_opaque, now_ms, now_s};
 
-/// Größte Antwort in Bytes.
+/// Largest response in bytes.
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-/// Einträge je Antwort.
+/// Entries per response.
 pub const MAX_ITEMS: usize = 1000;
-/// Längste Gültigkeit einer Liste (die Webseite stellt 120 s aus).
+/// Longest validity of a list (the website issues 120 s).
 pub const MAX_LIFETIME_S: i64 = 300;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
-/// Höchstens so viele Seiten hintereinander (`more`), dann bis zum nächsten Abruf warten.
+/// At most this many pages in a row (`more`), then wait until the next fetch.
 const MAX_PAGES_PER_ROUND: usize = 50;
 
-/// Kennungen der Webseite kommen als Zahl oder Text; das Relay vergleicht Text.
+/// Identifiers of the website come as number or text; the relay compares text.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 enum Id {
@@ -84,7 +84,7 @@ struct List {
     items: Vec<Item>,
 }
 
-/// Ein geprüfter Eintrag.
+/// A verified entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Revocation {
     MemberRemoved {
@@ -97,7 +97,7 @@ pub enum Revocation {
         sub: String,
         at_ms: u64,
     },
-    /// `role`: die neue Rolle; fehlt sie (oder ist sie unbekannt), muss die App neu verbinden.
+    /// `role`: the new role; if it is missing (or unknown), the app has to reconnect.
     RoleChanged {
         prj: String,
         sub: String,
@@ -109,12 +109,12 @@ pub enum Revocation {
     },
 }
 
-/// Eine geprüfte Seite der Liste.
+/// A verified page of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub last: String,
     pub more: bool,
-    /// Je Eintrag die `rid` und, wenn er ins Format passt, seine Wirkung.
+    /// Per entry the `rid` and, if it fits the format, its effect.
     pub items: Vec<(String, Option<Revocation>)>,
 }
 
@@ -122,17 +122,17 @@ pub struct Page {
 pub enum RevocationError {
     #[error(transparent)]
     Signed(#[from] SignedError),
-    #[error("der Inhalt passt nicht zum Format")]
+    #[error("the payload does not match the format")]
     Payload,
-    #[error("Version {0} wird nicht unterstützt")]
+    #[error("version {0} is not supported")]
     Version(u32),
-    #[error("die Liste gilt für ein anderes Relay")]
+    #[error("the list is for a different relay")]
     Audience,
-    #[error("die Liste ist abgelaufen oder noch nicht gültig")]
+    #[error("the list has expired or is not yet valid")]
     Time,
-    #[error("die Liste antwortet auf einen anderen Cursor")]
+    #[error("the list answers a different cursor")]
     Cursor,
-    #[error("die Liste ist zu lang")]
+    #[error("the list is too long")]
     TooMany,
 }
 
@@ -141,9 +141,9 @@ fn opaque(id: &Id) -> Option<String> {
     is_opaque(&text, 128).then_some(text)
 }
 
-/// Prüft ein Dokument: Signatur, Kontext, kid, `aud`, Zeitfenster und dass es auf `after`
-/// antwortet. Einträge, die nicht ins Format passen, kommen als `None` mit ihrer `rid` zurück
-/// (sie werden übersprungen, aber gemerkt).
+/// Verifies a document: signature, context, kid, `aud`, time window and that it answers
+/// `after`. Entries that do not fit the format come back as `None` with their `rid` (they are
+/// skipped, but remembered).
 pub fn verify(
     document: &str,
     keys: &KeySet,
@@ -205,7 +205,7 @@ pub fn verify(
     })
 }
 
-/// Wendet einen Eintrag an.
+/// Applies an entry.
 pub async fn apply(relay: &Relay, revocation: &Revocation) -> Result<(), sqlx::Error> {
     match revocation {
         Revocation::MemberRemoved { prj, sub, at_ms }
@@ -226,7 +226,7 @@ pub async fn apply(relay: &Relay, revocation: &Revocation) -> Result<(), sqlx::E
     }
 }
 
-/// Prozentkodierung für den Cursor in der Abfrage (alles außer unreservierten Zeichen).
+/// Percent-encoding for the cursor in the query (everything except unreserved characters).
 fn percent_encode(text: &str) -> String {
     text.bytes()
         .map(|b| {
@@ -241,19 +241,19 @@ fn percent_encode(text: &str) -> String {
 
 #[derive(Debug, Error)]
 pub enum PollError {
-    #[error("Abruf: {0}")]
+    #[error("fetch: {0}")]
     Http(String),
-    #[error("Antwort mit Status {0}")]
+    #[error("response with status {0}")]
     Status(u16),
-    #[error("Antwort zu groß")]
+    #[error("response too large")]
     TooLarge,
-    #[error("Prüfung: {0}")]
+    #[error("verification: {0}")]
     Invalid(#[from] RevocationError),
-    #[error("Datenbank: {0}")]
+    #[error("database: {0}")]
     Db(#[from] sqlx::Error),
 }
 
-/// Holt und verarbeitet die Liste.
+/// Fetches and processes the list.
 pub struct Poller {
     relay: Arc<Relay>,
     source: RevocationSource,
@@ -277,7 +277,7 @@ impl Poller {
             .connect_timeout(Duration::from_secs(5))
             .user_agent(concat!("hangar-team-server/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|e| format!("HTTP-Client: {e}"))?;
+            .map_err(|e| format!("HTTP client: {e}"))?;
         Ok(Poller {
             relay,
             source,
@@ -329,8 +329,8 @@ impl Poller {
         String::from_utf8(body).map_err(|_| PollError::Invalid(RevocationError::Payload))
     }
 
-    /// Eine Runde: abholen, prüfen, anwenden, Cursor speichern; bei `more` sofort weiter
-    /// (höchstens [`MAX_PAGES_PER_ROUND`] Seiten). Gibt die Zahl neu angewendeter Einträge zurück.
+    /// One round: fetch, verify, apply, store the cursor; with `more` continue right away
+    /// (at most [`MAX_PAGES_PER_ROUND`] pages). Returns the number of newly applied entries.
     pub async fn poll_once(&self) -> Result<usize, PollError> {
         let mut applied = 0;
         for _ in 0..MAX_PAGES_PER_ROUND {
@@ -348,7 +348,7 @@ impl Poller {
                         apply(&self.relay, revocation).await?;
                         applied += 1;
                     }
-                    None => tracing::warn!(rid, "Widerruf unbekannter Art oder Form übersprungen"),
+                    None => tracing::warn!(rid, "skipped revocation of unknown kind or shape"),
                 }
                 store::mark_revocation(&self.relay.db, rid, now_ms()).await?;
             }
@@ -358,12 +358,12 @@ impl Poller {
             }
         }
         if applied > 0 {
-            tracing::info!(applied, "Widerrufe angewendet");
+            tracing::info!(applied, "revocations applied");
         }
         Ok(applied)
     }
 
-    /// Läuft bis `shutdown`; Fehler verlängern den Abstand bis höchstens 5 min.
+    /// Runs until `shutdown`; errors extend the interval up to at most 5 min.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let interval = Duration::from_secs(self.source.interval_s);
         let mut wait = Duration::ZERO;
@@ -376,7 +376,7 @@ impl Poller {
                 Ok(_) => interval,
                 Err(error) => {
                     let next = (wait.max(interval) * 2).min(MAX_BACKOFF);
-                    tracing::warn!(%error, next_s = next.as_secs(), "Widerrufsliste nicht verarbeitet");
+                    tracing::warn!(%error, next_s = next.as_secs(), "revocation list not processed");
                     next
                 }
             };
@@ -402,10 +402,10 @@ mod tests {
         {"rid":5,"prj":317,"sub":1042,"kind":"member_removed","at":990},
         {"rid":6,"prj":"317","sub":"1043","kind":"role_changed","role":"admin","at":995},
         {"rid":7,"prj":318,"sub":null,"kind":"project_deleted","at":999},
-        {"rid":8,"prj":318,"sub":null,"kind":"unbekannt","at":999}]}"#;
+        {"rid":8,"prj":318,"sub":null,"kind":"unknown","at":999}]}"#;
 
     #[test]
-    fn gültige_liste() {
+    fn valid_list() {
         let k = SigningKey::from_bytes(&[5; 32]);
         let page = verify(
             &doc(&k, LIST, REVOKE_CONTEXT),
@@ -444,11 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn abgelehnte_listen() {
+    fn rejected_lists() {
         let k = SigningKey::from_bytes(&[5; 32]);
         let good = doc(&k, LIST, REVOKE_CONTEXT);
         assert_eq!(
-            verify(&good, &keys(&k), "anderes", "0", 1010),
+            verify(&good, &keys(&k), "other", "0", 1010),
             Err(RevocationError::Audience)
         );
         assert_eq!(

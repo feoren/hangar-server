@@ -1,7 +1,7 @@
-# Schlägt Updates für die gepinnten Actions, die Rust-Abhängigkeiten aus Cargo.lock und die
-# Basis-Images im Dockerfile vor. Wöchentlich und mit wenigen offenen Pull Requests, damit jedes
-# Update prüfbar bleibt. Die Crates der App unter vendor/ sind Pfadabhängigkeiten und werden von
-# Hand übernommen (docs/entwicklung.md, "Crates aktualisieren").
+# Proposes updates for the pinned actions, the Rust dependencies from Cargo.lock and the base
+# images in the Dockerfile. Weekly and with few open pull requests so that every update stays
+# reviewable. The app's crates under vendor/ are path dependencies and are updated by hand
+# (docs/development.md, "Updating the crates").
 version: 2
 updates:
   - package-ecosystem: github-actions

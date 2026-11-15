@@ -1,13 +1,13 @@
-//! Ratenbegrenzung im Speicher (ein Knoten): feste Fenster je Schlüssel. Schlüssel werden mit
-//! dem Server-Geheimnis gehasht, damit keine Adressen im Klartext im Speicher liegen.
-//! Ein Neustart setzt die Zähler zurück; das ist für einen einzelnen Prozess hinnehmbar.
+//! In-memory rate limiting (single node): fixed windows per key. Keys are hashed with the
+//! server secret so that no addresses are held in memory in plain text.
+//! A restart resets the counters; that is acceptable for a single process.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::util::hmac_hex;
 
-/// Höchstzahl gemerkter Schlüssel; darüber wird zuerst aufgeräumt, dann im Zweifel abgelehnt.
+/// Maximum number of remembered keys; beyond that, stale entries are pruned first, then requests are refused if still full.
 const MAX_KEYS: usize = 100_000;
 
 #[derive(Debug, Clone, Copy)]
@@ -29,7 +29,7 @@ impl RateLimiter {
         }
     }
 
-    /// Zählt einen Versuch. `false`: Grenze erreicht.
+    /// Counts one attempt. `false`: limit reached.
     pub fn hit(&self, scope: &str, key: &str, rule: Rule, now_s: i64) -> bool {
         let id = hmac_hex(&self.secret, &[scope.as_bytes(), key.as_bytes()]);
         let Ok(mut buckets) = self.buckets.lock() else {
@@ -58,7 +58,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fenster() {
+    fn window() {
         let rl = RateLimiter::new(b"s");
         let rule = Rule {
             limit: 2,

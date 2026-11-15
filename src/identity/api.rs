@@ -1,17 +1,17 @@
-//! Konto-API der App unter `/api/v1`, nur im Selbstbetrieb (`IDENTITY=local`). Dieselben Pfade,
-//! Eingaben und Antworten wie auf hangar.feoren.com (`wiki/Team-Schnittstelle.md` der Webseite),
-//! damit die App mit einer einzigen Basis-URL (`<PUBLIC_URL>/api/v1`) arbeitet. Im offiziellen
-//! Betrieb gibt es diese Routen nicht (404); dort spricht die App mit der Webseite.
+//! The app's account API under `/api/v1`, self-hosting only (`IDENTITY=local`). Same paths,
+//! inputs and responses as on hangar.feoren.com (`wiki/Team-Schnittstelle.md` of the website),
+//! so the app works with a single base URL (`<PUBLIC_URL>/api/v1`). In official mode these
+//! routes do not exist (404); there the app talks to the website.
 //!
-//! - Eingaben: `application/x-www-form-urlencoded` oder `application/json` (flaches Objekt),
-//!   sonst 415; Körper über [`MAX_INPUT_BYTES`] 413. Werte kommen als Zeichenketten heraus
-//!   (ganze Zahlen werden Text, verschachtelte Werte zählen als fehlend).
-//! - Fehler: RFC 9457 `application/problem+json` mit `type`, `title`, `status`, `detail`,
-//!   `code`; die OAuth-Endpunkte zusätzlich `error` und `error_description` (RFC 6749 5.2).
-//!   401 trägt `WWW-Authenticate: Bearer` (RFC 6750). Nie interne Einzelheiten, nie Tokens.
-//! - Keine Cookies, kein CSRF (Bearer oder gar keine Anmeldung), keine CORS-Freigabe.
+//! - Input: `application/x-www-form-urlencoded` or `application/json` (flat object),
+//!   otherwise 415; bodies above [`MAX_INPUT_BYTES`] 413. Values come out as strings
+//!   (integers become text, nested values count as missing).
+//! - Errors: RFC 9457 `application/problem+json` with `type`, `title`, `status`, `detail`,
+//!   `code`; the OAuth endpoints additionally `error` and `error_description` (RFC 6749 5.2).
+//!   401 carries `WWW-Authenticate: Bearer` (RFC 6750). Never internal details, never tokens.
+//! - No cookies, no CSRF (bearer or no authentication at all), no CORS allowance.
 //!
-//! Die Handler lesen nur die Anfrage und rufen die Dienste in `auth.rs` und `teams.rs`.
+//! The handlers only read the request and call the services in `auth.rs` and `teams.rs`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -31,24 +31,24 @@ use super::{ApiError, Identity};
 use crate::http::{AppState, ClientIp};
 use crate::util::{b64, is_id};
 
-/// Größter Anfragekörper der Konto-API (wie die Webseite).
+/// Largest request body of the account API (same as the website).
 pub const MAX_INPUT_BYTES: usize = 16 * 1024;
-/// Höchstzahl gelesener Felder und Länge eines Feldnamens (wie die Webseite).
+/// Maximum number of fields read and length of a field name (same as the website).
 const MAX_FIELDS: usize = 32;
 const MAX_KEY_LEN: usize = 64;
-/// Präfix der Problemtypen (URN, nicht auflösbar; RFC 9457 3.1.1), gleich der Webseite.
+/// Prefix of the problem types (URN, not resolvable; RFC 9457 3.1.1), same as the website.
 const PROBLEM_TYPE: &str = "urn:hangar:api:problem:";
 const BEARER_CHALLENGE: &str = r#"Bearer realm="hangar", error="invalid_token""#;
 
 // ---------------------------------------------------------------------------------------------
-// Fehler (RFC 9457)
+// Errors (RFC 9457)
 
 #[derive(Debug)]
 pub struct Problem {
     status: StatusCode,
     code: &'static str,
     detail: Cow<'static, str>,
-    /// OAuth-Endpunkt: zusätzlich `error` und `error_description`.
+    /// OAuth endpoint: additionally `error` and `error_description`.
     oauth: bool,
     headers: Vec<(HeaderName, HeaderValue)>,
 }
@@ -69,7 +69,7 @@ impl Problem {
         self
     }
 
-    /// Fehler eines OAuth-Endpunkts aus dem Code der Dienste in `auth.rs`.
+    /// Error of an OAuth endpoint from the code of the services in `auth.rs`.
     pub fn oauth(code: &'static str) -> Self {
         let (status, code, detail) = match code {
             "authorization_pending" => (
@@ -101,7 +101,7 @@ impl Problem {
                 code,
                 "A required parameter is missing or invalid.",
             ),
-            // Wie die Webseite: 429 mit dem OAuth-Code slow_down (die App vergrößert den Abstand).
+            // Like the website: 429 with the OAuth code slow_down (the app increases the interval).
             "rate_limited" => {
                 let mut problem = Self::new(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -212,7 +212,7 @@ fn no_store(headers: &mut HeaderMap) {
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
 }
 
-/// Erfolgreiche Antwort: JSON, nie gecacht.
+/// Successful response: JSON, never cached.
 fn ok<T: Serialize>(value: T) -> Response {
     let mut response = Json(value).into_response();
     no_store(response.headers_mut());
@@ -228,9 +228,9 @@ fn local(state: &AppState) -> Result<&Identity, Problem> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Eingaben
+// Input
 
-/// Felder des Körpers als Zeichenketten. Gleiche Felder mehrfach: der letzte Wert gilt.
+/// Body fields as strings. Repeated fields: the last value wins.
 pub type Input = HashMap<String, String>;
 
 async fn read_input(headers: &HeaderMap, body: Body) -> Result<Input, Problem> {
@@ -286,8 +286,8 @@ fn keep(input: &mut Input, key: String, value: String) {
     }
 }
 
-/// `application/x-www-form-urlencoded` (WHATWG): `+` ist ein Leerzeichen, `%XX` ein Byte,
-/// ein `%` ohne zwei Hexziffern bleibt stehen. `None`: kein gültiges UTF-8.
+/// `application/x-www-form-urlencoded` (WHATWG): `+` is a space, `%XX` a byte,
+/// a `%` without two hex digits is kept as is. `None`: not valid UTF-8.
 pub fn parse_form(body: &[u8]) -> Option<Input> {
     fn decode(raw: &[u8]) -> Option<String> {
         let hex = |b: u8| char::from(b).to_digit(16);
@@ -321,7 +321,7 @@ pub fn parse_form(body: &[u8]) -> Option<Input> {
     Some(input)
 }
 
-/// Flaches JSON-Objekt; ein leeres Array gilt als leeres Objekt (wie die Webseite).
+/// Flat JSON object; an empty array counts as an empty object (same as the website).
 pub fn parse_json(body: &[u8]) -> Option<Input> {
     let mut input = Input::new();
     match serde_json::from_slice::<Value>(body).ok()? {
@@ -349,7 +349,7 @@ fn field<'a>(input: &'a Input, key: &str) -> Option<&'a str> {
 // OAuth
 
 /// `POST /api/v1/oauth/device` (RFC 8628 3.1): `client_id`, optional `scope`, `device_name`
-/// (100 Zeichen), `platform` (40 Zeichen).
+/// (100 characters), `platform` (40 characters).
 async fn device(State(state): State<AppState>, ip: ClientIp, request: Request) -> ApiOut {
     let identity = local(&state)?;
     let (parts, body) = request.into_parts();
@@ -369,8 +369,8 @@ async fn device(State(state): State<AppState>, ip: ClientIp, request: Request) -
     Ok(ok(started))
 }
 
-/// `POST /api/v1/oauth/token`: Gerätecode einlösen (RFC 8628 3.4) oder Erneuerungstoken
-/// rotieren (RFC 6749 6, mit Erkennung der Wiederverwendung).
+/// `POST /api/v1/oauth/token`: redeem a device code (RFC 8628 3.4) or rotate a refresh token
+/// (RFC 6749 6, with reuse detection).
 async fn token(State(state): State<AppState>, ip: ClientIp, request: Request) -> ApiOut {
     let identity = local(&state)?;
     let (parts, body) = request.into_parts();
@@ -388,7 +388,7 @@ async fn token(State(state): State<AppState>, ip: ClientIp, request: Request) ->
     Ok(ok(tokens))
 }
 
-/// `POST /api/v1/oauth/revoke` (RFC 7009): immer 200 ohne Körper, auch für unbekannte Tokens.
+/// `POST /api/v1/oauth/revoke` (RFC 7009): always 200 without body, even for unknown tokens.
 async fn revoke(State(state): State<AppState>, ip: ClientIp, request: Request) -> ApiOut {
     let identity = local(&state)?;
     let (parts, body) = request.into_parts();
@@ -408,7 +408,7 @@ async fn revoke(State(state): State<AppState>, ip: ClientIp, request: Request) -
 }
 
 // ---------------------------------------------------------------------------------------------
-// Konto, Projekte, Tickets (Bearer)
+// Account, projects, tickets (bearer)
 
 async fn signed_in(identity: &Identity, headers: &HeaderMap) -> Result<auth::User, Problem> {
     auth::authenticate(identity, headers)
@@ -416,8 +416,8 @@ async fn signed_in(identity: &Identity, headers: &HeaderMap) -> Result<auth::Use
         .map_err(Problem::from)
 }
 
-/// `GET /api/v1/me`: eigenes Konto und Plätze des eigenen Kontos. Namen kennt der
-/// Selbstbetrieb nicht; `name` fehlt deshalb.
+/// `GET /api/v1/me`: own account and the own account's seats. Self-hosting knows no
+/// names, so `name` is absent.
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiOut {
     let identity = local(&state)?;
     let user = signed_in(identity, &headers).await?;
@@ -431,8 +431,8 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiOut {
     })))
 }
 
-/// `GET /api/v1/projects`: Teams der Person. `invite_url` fehlt: der Selbstbetrieb hat keine
-/// Browserseite zum Einladen (eingeladen wird über `POST /v1/teams/{team}/invitations`).
+/// `GET /api/v1/projects`: the person's teams. `invite_url` is absent: self-hosting has no
+/// browser page for inviting (invitations go through `POST /v1/teams/{team}/invitations`).
 async fn projects(State(state): State<AppState>, headers: HeaderMap) -> ApiOut {
     let identity = local(&state)?;
     let user = signed_in(identity, &headers).await?;
@@ -458,8 +458,8 @@ async fn projects(State(state): State<AppState>, headers: HeaderMap) -> ApiOut {
     Ok(ok(json!({ "projects": list })))
 }
 
-/// `POST /api/v1/relay-ticket` `{"project_id"}`: Ticket (60 s) für `hello`; nur Mitglieder,
-/// sonst 404 (auch für unbekannte Teams).
+/// `POST /api/v1/relay-ticket` `{"project_id"}`: ticket (60 s) for `hello`; members only,
+/// otherwise 404 (also for unknown teams).
 async fn relay_ticket(State(state): State<AppState>, request: Request) -> ApiOut {
     let identity = local(&state)?;
     let (parts, body) = request.into_parts();
@@ -488,8 +488,8 @@ async fn relay_ticket(State(state): State<AppState>, request: Request) -> ApiOut
     })))
 }
 
-/// `GET /api/v1/keys`: öffentlicher Ticketschlüssel dieses Servers, JWKS-ähnlich (RFC 8037).
-/// Lizenzschlüssel stehen hier nicht: die signiert die Webseite, nicht dieser Server.
+/// `GET /api/v1/keys`: this server's public ticket key, JWKS-like (RFC 8037).
+/// License keys are not listed here: the website signs those, not this server.
 async fn keys(State(state): State<AppState>) -> ApiOut {
     let identity = local(&state)?;
     let mut response = Json(json!({
@@ -510,8 +510,8 @@ async fn keys(State(state): State<AppState>) -> ApiOut {
     Ok(response)
 }
 
-/// Pfad der Konto-API (`/api/v1` oder darunter); dort antworten auch vorgelagerte Prüfungen
-/// als problem+json.
+/// Path of the account API (`/api/v1` or below); there, upstream checks also respond
+/// as problem+json.
 pub fn is_api_path(path: &str) -> bool {
     path == "/api/v1" || path.starts_with("/api/v1/")
 }
@@ -520,7 +520,7 @@ async fn not_found() -> Problem {
     Problem::not_found()
 }
 
-/// Andere Methoden (auch `OPTIONS`): 405 problem+json mit `Allow`.
+/// Other methods (including `OPTIONS`): 405 problem+json with `Allow`.
 fn only(router: MethodRouter<AppState>, allow: &'static str) -> MethodRouter<AppState> {
     router.fallback(move || async move {
         Problem::new(
@@ -550,18 +550,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formular_wird_dekodiert() {
+    fn form_is_decoded() {
         let input = parse_form(b"a=1&b=x+y%20z&c=%C3%A4&d&e=%zz&a=2").unwrap();
         assert_eq!(input["a"], "2");
         assert_eq!(input["b"], "x y z");
         assert_eq!(input["c"], "\u{e4}");
         assert_eq!(input["d"], "");
         assert_eq!(input["e"], "%zz");
-        assert!(parse_form(b"a=%FF").is_none(), "kein UTF-8");
+        assert!(parse_form(b"a=%FF").is_none(), "not UTF-8");
     }
 
     #[test]
-    fn json_nur_als_flaches_objekt() {
+    fn json_only_as_flat_object() {
         let input = parse_json(br#"{"a":"x","n":7,"f":1.5,"o":{"x":1},"l":[1]}"#).unwrap();
         assert_eq!(input["a"], "x");
         assert_eq!(input["n"], "7");
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn höchstens_32_felder_mit_kurzen_namen() {
+    fn at_most_32_fields_with_short_names() {
         let body: String = (0..40).map(|i| format!("k{i}=v&")).collect();
         assert_eq!(parse_form(body.as_bytes()).unwrap().len(), MAX_FIELDS);
         let long = format!("{}=v", "k".repeat(MAX_KEY_LEN + 1));

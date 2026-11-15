@@ -1,5 +1,5 @@
-//! Selbstbetrieb: Magic Link, Device Flow mit Token-Rotation, Teams, Einladungen mit
-//! Platzgrenze (auch nebenläufig), Lizenzprüfung, Tickets bis zur Live-Verbindung.
+//! Self-hosting: magic link, device flow with token rotation, teams, invitations with seat
+//! limit (also concurrent), license check, tickets through to the live connection.
 
 mod common;
 
@@ -111,8 +111,8 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     &rest[..rest.find(end).unwrap()]
 }
 
-/// Ganzer Anmeldeweg: Admin-Link, Browsersitzung, Device Flow. Gibt das Zugriffstoken zurück
-/// und dazu das Erneuerungstoken.
+/// Full sign-in path: admin link, browser session, device flow. Returns the access token
+/// together with the refresh token.
 async fn login(s: &TestServer, email: &str) -> (String, String) {
     let app = &s.server.router;
     let config = &s.server.state.config;
@@ -153,15 +153,15 @@ async fn login(s: &TestServer, email: &str) -> (String, String) {
         call(app, "GET", path, &[], None).await.status,
         StatusCode::OK
     );
-    // Ohne Origin: kein Login (Schutz vor Login-CSRF), der Link bleibt gültig.
+    // Without Origin: no sign-in (login CSRF protection), the link stays valid.
     assert_eq!(
         call(app, "POST", path, &[], None).await.status,
         StatusCode::FORBIDDEN
     );
     let signed_in = call(app, "POST", path, &[("origin", ORIGIN)], None).await;
     assert_eq!(signed_in.status, StatusCode::SEE_OTHER);
-    let cookie = signed_in.cookie.expect("Sitzungscookie");
-    // Ein zweites Mal geht der Link nicht.
+    let cookie = signed_in.cookie.expect("session cookie");
+    // The link does not work a second time.
     assert_eq!(
         call(app, "POST", path, &[("origin", ORIGIN)], None)
             .await
@@ -177,7 +177,7 @@ async fn login(s: &TestServer, email: &str) -> (String, String) {
         None,
     )
     .await;
-    assert!(page.body.contains("Test"), "Gerätename steht auf der Seite");
+    assert!(page.body.contains("Test"), "device name shown on the page");
     let unknown = call(
         app,
         "GET",
@@ -189,7 +189,7 @@ async fn login(s: &TestServer, email: &str) -> (String, String) {
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     assert!(
         !unknown.body.contains("csrf"),
-        "kein Zulassen für fremde Codes"
+        "no approval for unknown codes"
     );
     let csrf = between(&page.body, r#"name="csrf" value=""#, "\"").to_owned();
     let wrong = call(
@@ -198,7 +198,7 @@ async fn login(s: &TestServer, email: &str) -> (String, String) {
         "/device",
         &[("cookie", &cookie), ("origin", ORIGIN)],
         Some(form(&[
-            ("csrf", "falsch"),
+            ("csrf", "wrong"),
             ("user_code", &user_code),
             ("decision", "approve"),
         ])),
@@ -234,10 +234,10 @@ async fn login(s: &TestServer, email: &str) -> (String, String) {
     .json();
     let access = tokens["access_token"]
         .as_str()
-        .expect("Zugriffstoken")
+        .expect("access token")
         .to_owned();
     let refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
-    // Der Gerätecode gilt nur einmal.
+    // The device code is valid only once.
     let again = call(
         app,
         "POST",
@@ -259,7 +259,7 @@ fn bearer(token: &str) -> String {
 }
 
 #[tokio::test]
-async fn anmeldung_rotation_und_widerruf() {
+async fn sign_in_rotation_and_revocation() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (access, refresh) = login(&s, "owner@example.org").await;
@@ -273,7 +273,7 @@ async fn anmeldung_rotation_und_widerruf() {
     .await;
     assert_eq!(me.json()["email"], "owner@example.org");
 
-    // Zu schnelles Abfragen: slow_down.
+    // Polling too fast: slow_down.
     let device = call(
         app,
         "POST",
@@ -302,14 +302,14 @@ async fn anmeldung_rotation_und_widerruf() {
             "POST",
             "/oauth/device_authorization",
             &[],
-            Some(form(&[("client_id", "fremd")]))
+            Some(form(&[("client_id", "foreign")]))
         )
         .await
         .json()["error"],
         "invalid_client"
     );
 
-    // Rotation: neues Paar, altes Zugriffstoken endet.
+    // Rotation: new pair, the old access token ends.
     let rotated = call(
         app,
         "POST",
@@ -348,7 +348,7 @@ async fn anmeldung_rotation_und_widerruf() {
         .status,
         StatusCode::OK
     );
-    // Wiederverwendung des alten Erneuerungstokens: die ganze Sitzung endet.
+    // Reusing the old refresh token ends the whole session.
     let reuse = call(
         app,
         "POST",
@@ -375,7 +375,7 @@ async fn anmeldung_rotation_und_widerruf() {
         StatusCode::UNAUTHORIZED
     );
 
-    // Sitzungen auflisten und widerrufen.
+    // List and revoke sessions.
     let (access3, _) = login(&s, "owner@example.org").await;
     let list = call(
         app,
@@ -457,7 +457,7 @@ async fn invite_links(
         .map(|i| {
             i["link"]
                 .as_str()
-                .expect("Link für den Admin")
+                .expect("link for the admin")
                 .trim_start_matches(ORIGIN)
                 .trim_start_matches("/invite/")
                 .to_owned()
@@ -493,11 +493,11 @@ fn license(seats: u32, email: &str, exp: i64, key: &SigningKey) -> String {
 }
 
 #[tokio::test]
-async fn einladungen_plätze_und_lizenz() {
+async fn invitations_seats_and_license() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
-    let team = create_team(app, &owner, "Kern").await;
+    let team = create_team(app, &owner, "Core").await;
     let links = invite_links(
         app,
         &owner,
@@ -515,24 +515,24 @@ async fn einladungen_plätze_und_lizenz() {
     let (b, _) = login(&s, "b@example.org").await;
     let (c, _) = login(&s, "c@example.org").await;
 
-    // Falsches Konto: d's Einladung gilt nicht für a.
+    // Wrong account: d's invitation is not valid for a.
     assert_eq!(
         accept(app, &a, &links[3]).await.json()["error"],
         "wrong_account"
     );
     assert_eq!(accept(app, &a, &links[0]).await.status, StatusCode::OK);
     assert_eq!(accept(app, &b, &links[1]).await.status, StatusCode::OK);
-    // Eigentümer + 2 = Free voll.
+    // Owner + 2 = Free plan full.
     let full = accept(app, &c, &links[2]).await;
     assert_eq!(full.status, StatusCode::CONFLICT);
     assert_eq!(full.json()["error"], "seats_full");
-    // Einladung gilt nur einmal.
+    // An invitation is valid only once.
     assert_eq!(
         accept(app, &a, &links[0]).await.status,
         StatusCode::NOT_FOUND
     );
 
-    // Rollen: ein Mitglied darf nicht einladen.
+    // Roles: a member may not invite.
     let member_invite = call(
         app,
         "POST",
@@ -543,7 +543,7 @@ async fn einladungen_plätze_und_lizenz() {
     .await;
     assert_eq!(member_invite.status, StatusCode::FORBIDDEN);
 
-    // Lizenz: fremde Signatur, abgelaufen, andere Adresse, dann gültig mit 5 Plätzen.
+    // License: foreign signature, expired, other address, then valid with 5 seats.
     let put = |doc: String| json_body(json!({ "document": doc }));
     let foreign = call(
         app,
@@ -597,7 +597,7 @@ async fn einladungen_plätze_und_lizenz() {
     .await;
     assert_eq!(ok.json()["effectiveSeats"], 5, "{}", ok.body);
 
-    // Jetzt ist Platz: c tritt bei. Eine erneute Einladung erneuert den Link.
+    // Now there is a seat: c joins. Inviting again renews the link.
     let fresh = invite_links(app, &owner, &team, &["c@example.org"], "member").await;
     assert_eq!(accept(app, &c, &fresh[0]).await.status, StatusCode::OK);
     let detail = call(
@@ -613,7 +613,7 @@ async fn einladungen_plätze_und_lizenz() {
     assert_eq!(detail["seats"]["limit"], 5);
     assert_eq!(detail["seats"]["plan"], "team");
 
-    // Fremde Teams sind nicht sichtbar.
+    // Other teams are not visible.
     let (stranger, _) = login(&s, "x@example.org").await;
     assert_eq!(
         call(
@@ -630,11 +630,11 @@ async fn einladungen_plätze_und_lizenz() {
 }
 
 #[tokio::test]
-async fn letzter_platz_geht_genau_einmal_weg() {
+async fn last_seat_is_taken_exactly_once() {
     let s = start(local_config()).await;
     let app = s.server.router.clone();
     let (owner, _) = login(&s, "boss@example.org").await;
-    let team = create_team(&app, &owner, "Rennen").await;
+    let team = create_team(&app, &owner, "Race").await;
     let emails: Vec<String> = (0..6).map(|i| format!("p{i}@example.org")).collect();
     let refs: Vec<&str> = emails.iter().map(String::as_str).collect();
     let links = invite_links(&app, &owner, &team, &refs, "member").await;
@@ -658,26 +658,22 @@ async fn letzter_platz_geht_genau_einmal_weg() {
             other => panic!("{other}"),
         }
     }
-    assert_eq!(
-        (joined, full),
-        (2, 4),
-        "Free: Eigentümer und genau zwei weitere"
-    );
+    assert_eq!((joined, full), (2, 4), "Free: owner and exactly two more");
 }
 
 #[tokio::test]
-async fn einladung_im_browser_und_ticket_bis_zur_live_verbindung() {
+async fn browser_invitation_and_ticket_through_to_live_connection() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
     let team = create_team(app, &owner, "Live <b>").await;
-    let link = invite_links(app, &owner, &team, &["neu@example.org"], "member")
+    let link = invite_links(app, &owner, &team, &["new@example.org"], "member")
         .await
         .remove(0);
     let page = call(app, "GET", &format!("/invite/{link}"), &[], None).await;
-    assert!(page.body.contains("Live &lt;b&gt;"), "Teamname maskiert");
-    assert!(page.body.contains("neu@example.org"));
-    // Ohne Origin nichts; mit Origin: Link belegt das Postfach, Konto entsteht, Beitritt.
+    assert!(page.body.contains("Live &lt;b&gt;"), "team name escaped");
+    assert!(page.body.contains("new@example.org"));
+    // Without Origin nothing; with Origin: the link proves the mailbox, account created, joined.
     assert_eq!(
         call(
             app,
@@ -701,7 +697,7 @@ async fn einladung_im_browser_und_ticket_bis_zur_live_verbindung() {
     assert_eq!(joined.status, StatusCode::OK, "{}", joined.body);
     assert!(joined.cookie.is_some());
 
-    // Ticket des Selbstbetriebs öffnet die Live-Verbindung (gleicher Relay-Weg wie offiziell).
+    // A self-hosting ticket opens the live connection (same relay path as official).
     let ticket = call(
         app,
         "POST",
@@ -718,14 +714,14 @@ async fn einladung_im_browser_und_ticket_bis_zur_live_verbindung() {
         matches!(welcome.message, ServerMessage::Welcome(_)),
         "{welcome:?}"
     );
-    // Dasselbe Ticket ein zweites Mal: abgelehnt.
+    // The same ticket a second time: rejected.
     let mut ws2 = Client::connect(s.addr).await;
     assert!(matches!(
         ws2.hello(&team, ticket, "owner-laptop", None).await.message,
         ServerMessage::Err(_)
     ));
-    // Kein Ticket für fremde Teams.
-    let (stranger, _) = login(&s, "fremd@example.org").await;
+    // No ticket for other teams.
+    let (stranger, _) = login(&s, "stranger@example.org").await;
     assert_eq!(
         call(
             app,
@@ -741,7 +737,7 @@ async fn einladung_im_browser_und_ticket_bis_zur_live_verbindung() {
 }
 
 #[tokio::test]
-async fn anmeldelink_ohne_mail_nicht_anforderbar_und_ohne_auskunft() {
+async fn magic_link_cannot_be_requested_without_mail_and_reveals_nothing() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let r = call(
@@ -749,31 +745,31 @@ async fn anmeldelink_ohne_mail_nicht_anforderbar_und_ohne_auskunft() {
         "POST",
         "/auth/email",
         &[("origin", ORIGIN)],
-        Some(form(&[("email", "jemand@example.org")])),
+        Some(form(&[("email", "someone@example.org")])),
     )
     .await;
     assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body.contains("sends no mail") || r.body.contains("keine Mails"));
+    assert!(r.body.contains("sends no mail"));
     let cross = call(
         app,
         "POST",
         "/auth/email",
         &[("origin", "https://evil.example")],
-        Some(form(&[("email", "jemand@example.org")])),
+        Some(form(&[("email", "someone@example.org")])),
     )
     .await;
     assert_eq!(cross.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
-async fn einladungsmail_über_log_transport() {
+async fn invitation_mail_via_log_transport() {
     let mut config = local_config();
     config.mail_transport = hangar_team_server::config::MailTransport::Log;
     let dir = config.data_dir.join("mail");
     let s = start(config).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
-    let team = create_team(app, &owner, "Post").await;
+    let team = create_team(app, &owner, "Mailroom").await;
     let r = call(
         app,
         "POST",
@@ -782,12 +778,12 @@ async fn einladungsmail_über_log_transport() {
             ("authorization", &bearer(&owner)),
             ("accept-language", "de-DE"),
         ],
-        json_body(json!({ "emails": ["gast@example.org"], "role": "member" })),
+        json_body(json!({ "emails": ["guest@example.org"], "role": "member" })),
     )
     .await;
     assert!(
         r.json()["invitations"][0].get("link").is_none(),
-        "mit Mailversand kein Link an den Admin"
+        "with mail delivery no link for the admin"
     );
     let mut mail = None;
     for _ in 0..50 {
@@ -797,14 +793,14 @@ async fn einladungsmail_über_log_transport() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    let mail = mail.expect("Mail geschrieben");
+    let mail = mail.expect("mail written");
     assert!(mail.contains("multipart/alternative"));
     assert!(mail.contains("text/plain") && mail.contains("text/html"));
-    assert!(mail.contains("To: gast@example.org"));
+    assert!(mail.contains("To: guest@example.org"));
 }
 
-/// Wartet auf die nächste neue Mail im Log-Ordner und gibt ihren Text zurück (Quoted-Printable
-/// mit weichen Umbrüchen zusammengefügt).
+/// Waits for the next new mail in the log folder and returns its text (quoted-printable soft
+/// line breaks joined).
 async fn next_mail(dir: &std::path::Path, seen: usize) -> String {
     for _ in 0..100 {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -817,17 +813,17 @@ async fn next_mail(dir: &std::path::Path, seen: usize) -> String {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("keine Mail geschrieben");
+    panic!("no mail written");
 }
 
 #[tokio::test]
-async fn gerätecode_im_anmeldelink_gilt_nur_im_anfragenden_browser() {
+async fn device_code_in_magic_link_only_applies_in_requesting_browser() {
     let mut config = local_config();
     config.mail_transport = hangar_team_server::config::MailTransport::Log;
     let dir = config.data_dir.join("mail");
     let s = start(config).await;
     let app = &s.server.router;
-    login(&s, "opfer@example.org").await;
+    login(&s, "victim@example.org").await;
     let request = |cookie_jar: bool| {
         let app = app.clone();
         async move {
@@ -837,24 +833,24 @@ async fn gerätecode_im_anmeldelink_gilt_nur_im_anfragenden_browser() {
                 "/auth/email",
                 &[("origin", ORIGIN), ("accept-language", "en")],
                 Some(form(&[
-                    ("email", "opfer@example.org"),
+                    ("email", "victim@example.org"),
                     ("return_to", "/device?code=BCDF-GHJK"),
                 ])),
             )
             .await;
             assert_eq!(r.status, StatusCode::OK);
-            let cookie = r.cookie.expect("Browser-Cookie gesetzt");
+            let cookie = r.cookie.expect("browser cookie set");
             assert!(cookie.starts_with("hangar_login="));
             cookie_jar.then_some(cookie)
         }
     };
     let token_of = |mail: &str| {
-        let from = mail.find("/auth/magic/").expect("Link in der Mail") + "/auth/magic/".len();
+        let from = mail.find("/auth/magic/").expect("link in the mail") + "/auth/magic/".len();
         mail[from..from + 43].to_owned()
     };
 
-    // Ein anderer Browser (oder eine Person, die eine fremd angeforderte Mail öffnet): der
-    // Code fällt weg, die Person landet auf /device und müsste ihn selbst eingeben.
+    // A different browser (or someone opening a mail requested by somebody else): the code is
+    // dropped, the person lands on /device and would have to enter it themselves.
     request(false).await;
     let token = token_of(&next_mail(&dir, 0).await);
     let post = |token: String, cookie: Option<String>| {
@@ -875,10 +871,10 @@ async fn gerätecode_im_anmeldelink_gilt_nur_im_anfragenden_browser() {
     let foreign = post(token.clone(), None).await;
     assert_eq!(foreign.status(), StatusCode::SEE_OTHER);
     assert_eq!(foreign.headers()["location"].to_str().unwrap(), "/device");
-    // Einmalig.
+    // Single use.
     assert_eq!(post(token, None).await.status(), StatusCode::NOT_FOUND);
 
-    // Derselbe Browser: der Rücksprung behält den Code.
+    // Same browser: the return path keeps the code.
     let cookie = request(true).await.unwrap();
     let token = token_of(&next_mail(&dir, 1).await);
     let same = post(token, Some(cookie)).await;
@@ -888,10 +884,10 @@ async fn gerätecode_im_anmeldelink_gilt_nur_im_anfragenden_browser() {
         "/device?code=BCDF-GHJK"
     );
 
-    // Fremder Browser mit frischem Link: nur /device.
+    // Foreign browser with a fresh link: only /device.
     request(false).await;
     let token = token_of(&next_mail(&dir, 2).await);
-    let other = post(token, Some("hangar_login=fremd".into())).await;
+    let other = post(token, Some("hangar_login=foreign".into())).await;
     assert_eq!(other.headers()["location"].to_str().unwrap(), "/device");
 }
 
@@ -909,16 +905,16 @@ async fn ticket_for(app: &Router, token: &str, team: &str) -> String {
 }
 
 #[tokio::test]
-async fn rollenwechsel_und_entfernen_wirken_sofort_im_relay() {
+async fn role_change_and_removal_take_effect_in_relay_immediately() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
-    let team = create_team(app, &owner, "Sofort").await;
+    let team = create_team(app, &owner, "Instant").await;
     let links = invite_links(app, &owner, &team, &["admin@example.org"], "admin").await;
     let (admin, _) = login(&s, "admin@example.org").await;
     assert_eq!(accept(app, &admin, &links[0]).await.status, StatusCode::OK);
-    let links = invite_links(app, &owner, &team, &["neu@example.org"], "member").await;
-    let (member, _) = login(&s, "neu@example.org").await;
+    let links = invite_links(app, &owner, &team, &["new@example.org"], "member").await;
+    let (member, _) = login(&s, "new@example.org").await;
     assert_eq!(accept(app, &member, &links[0]).await.status, StatusCode::OK);
     let id_of = |token: String| {
         let app = app.clone();
@@ -940,8 +936,8 @@ async fn rollenwechsel_und_entfernen_wirken_sofort_im_relay() {
     let admin_id = id_of(admin.clone()).await;
     let member_id = id_of(member.clone()).await;
 
-    // Herabstufung: still auf der offenen Verbindung angewendet, keine Trennung; die nächste
-    // Admin-Absicht (key.rotate) wird abgelehnt.
+    // Demotion: applied silently on the open connection, no disconnect; the next admin
+    // intent (key.rotate) is rejected.
     let mut ws = Client::connect(s.addr).await;
     let welcome = ws
         .hello(
@@ -977,16 +973,15 @@ async fn rollenwechsel_und_entfernen_wirken_sofort_im_relay() {
         "{refused:?}"
     );
     ws.send_raw(&format!(
-        r#"{{"v":1,"id":"noch-da","team":"{team}","type":"ping"}}"#
+        r#"{{"v":1,"id":"still-there","team":"{team}","type":"ping"}}"#
     ))
     .await;
     assert!(matches!(
-        ws.answer("noch-da").await.message,
+        ws.answer("still-there").await.message,
         ServerMessage::Ack(_)
     ));
 
-    // Entfernen, bevor das Mitglied je verbunden war: ein vorher ausgestelltes Ticket hilft
-    // nicht mehr.
+    // Removal before the member ever connected: a ticket issued earlier no longer helps.
     let early = ticket_for(app, &member, &team).await;
     let r = call(
         app,
@@ -999,20 +994,20 @@ async fn rollenwechsel_und_entfernen_wirken_sofort_im_relay() {
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
     let mut late = Client::connect(s.addr).await;
     assert!(matches!(
-        late.hello(&team, early, "neu-pc", None).await.message,
+        late.hello(&team, early, "new-pc", None).await.message,
         ServerMessage::Err(_)
     ));
 }
 
 #[tokio::test]
-async fn einladungen_zählen_je_adresse_für_die_ratenbegrenzung() {
+async fn invitations_count_per_address_for_rate_limit() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
-    let team = create_team(app, &owner, "Viele").await;
+    let team = create_team(app, &owner, "Many").await;
     let batch = |n: usize| {
         (0..20)
-            .map(|i| format!("gast{n}-{i}@example.org"))
+            .map(|i| format!("guest{n}-{i}@example.org"))
             .collect::<Vec<_>>()
     };
     let send = |emails: Vec<String>| {
@@ -1031,12 +1026,12 @@ async fn einladungen_zählen_je_adresse_für_die_ratenbegrenzung() {
     };
     assert_eq!(send(batch(1)).await, StatusCode::OK);
     assert_eq!(send(batch(2)).await, StatusCode::OK);
-    // 40 Adressen verbraucht; 20 weitere überschreiten die 50 je Stunde.
+    // 40 addresses used; 20 more exceed the 50 per hour.
     assert_eq!(send(batch(3)).await, StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn befehle_create_team_invite_und_teams_auf_dem_host() {
+async fn host_commands_create_team_invite_and_teams() {
     use hangar_team_server::identity::teams::{cli_create_team, cli_invite, cli_teams};
     let s = start(local_config()).await;
     let app = &s.server.router;
@@ -1044,12 +1039,12 @@ async fn befehle_create_team_invite_und_teams_auf_dem_host() {
     let public = &s.server.state.config.public_url;
 
     assert!(cli_teams(db).await.unwrap().is_empty());
-    // Eigentümer ohne Konto: das Konto entsteht mit dem Team.
-    let team = cli_create_team(db, "de", " Chef@Example.org ", "Entwicklung")
+    // Owner without an account: the account is created with the team.
+    let team = cli_create_team(db, "de", " Chef@Example.org ", "Engineering")
         .await
         .unwrap();
     assert!(team.starts_with("t_"));
-    assert!(cli_create_team(db, "de", "keine-adresse", "X")
+    assert!(cli_create_team(db, "de", "not-an-address", "X")
         .await
         .is_err());
     assert!(cli_create_team(db, "de", "chef@example.org", "  ")
@@ -1061,25 +1056,32 @@ async fn befehle_create_team_invite_und_teams_auf_dem_host() {
             .is_err()
     );
 
-    // Rolle owner und Unsinn abgelehnt, unbekanntes Team mit Hinweis.
+    // Role owner and nonsense rejected, unknown team with a hint.
     for role in ["owner", "root", ""] {
         assert!(
-            cli_invite(db, public, "de", &team, "neu@example.org", role)
+            cli_invite(db, public, "de", &team, "new@example.org", role)
                 .await
                 .is_err(),
             "{role}"
         );
     }
-    let unknown = cli_invite(db, public, "de", "Gibtsnicht", "neu@example.org", "member")
-        .await
-        .unwrap_err();
+    let unknown = cli_invite(
+        db,
+        public,
+        "de",
+        "DoesNotExist",
+        "new@example.org",
+        "member",
+    )
+    .await
+    .unwrap_err();
     assert!(unknown.contains("teams"), "{unknown}");
 
-    // Team per Name; ein zweiter Aufruf erneuert die Einladung, der alte Link gilt nicht mehr.
-    let first = cli_invite(db, public, "de", "Entwicklung", "neu@example.org", "member")
+    // Team by name; a second call renews the invitation, the old link is no longer valid.
+    let first = cli_invite(db, public, "de", "Engineering", "new@example.org", "member")
         .await
         .unwrap();
-    let link = cli_invite(db, public, "de", &team, "Neu@example.org", "admin")
+    let link = cli_invite(db, public, "de", &team, "New@example.org", "admin")
         .await
         .unwrap();
     assert!(link.starts_with(&format!("{public}/invite/")), "{link}");
@@ -1093,22 +1095,22 @@ async fn befehle_create_team_invite_und_teams_auf_dem_host() {
     assert_eq!(lines[0].owner, "chef@example.org");
     assert_eq!((lines[0].members, lines[0].open_invitations), (1, 1));
 
-    // Der Link meldet die Person an und lässt sie beitreten, wie eine Einladung aus der API.
+    // The link signs the person in and lets them join, like an invitation from the API.
     let path = link.trim_start_matches(public.as_str()).to_owned();
     let page = call(app, "GET", &path, &[], None).await;
-    assert!(page.body.contains("Entwicklung") && page.body.contains("neu@example.org"));
+    assert!(page.body.contains("Engineering") && page.body.contains("new@example.org"));
     let joined = call(app, "POST", &path, &[("origin", ORIGIN)], Some(form(&[]))).await;
     assert_eq!(joined.status, StatusCode::OK, "{}", joined.body);
-    assert!(joined.cookie.is_some(), "Browsersitzung für /device");
+    assert!(joined.cookie.is_some(), "browser session for /device");
     let lines = cli_teams(db).await.unwrap();
     assert_eq!((lines[0].members, lines[0].open_invitations), (2, 0));
-    let again = cli_invite(db, public, "de", &team, "neu@example.org", "member")
+    let again = cli_invite(db, public, "de", &team, "new@example.org", "member")
         .await
         .unwrap_err();
-    assert!(again.contains("schon Mitglied"), "{again}");
+    assert!(again.contains("is already a member"), "{again}");
 
-    // Die eingeladene Person sieht das Team als admin in der Konto-API der App.
-    let (token, _) = login(&s, "neu@example.org").await;
+    // The invited person sees the team as admin in the app's account API.
+    let (token, _) = login(&s, "new@example.org").await;
     let me = call(
         app,
         "GET",
@@ -1121,11 +1123,11 @@ async fn befehle_create_team_invite_und_teams_auf_dem_host() {
     assert_eq!(me["teams"][0]["id"], team.as_str(), "{me}");
     assert_eq!(me["teams"][0]["role"], "admin", "{me}");
 
-    // Zwei Teams gleichen Namens: Name reicht nicht mehr, die ID schon.
-    let second = cli_create_team(db, "de", "chef@example.org", "Entwicklung")
+    // Two teams with the same name: the name no longer suffices, the ID does.
+    let second = cli_create_team(db, "de", "chef@example.org", "Engineering")
         .await
         .unwrap();
-    let ambiguous = cli_invite(db, public, "de", "Entwicklung", "b@example.org", "member")
+    let ambiguous = cli_invite(db, public, "de", "Engineering", "b@example.org", "member")
         .await
         .unwrap_err();
     assert!(

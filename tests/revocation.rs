@@ -1,5 +1,5 @@
-//! Widerrufsliste der Webseite gegen einen lokalen Nachbau der Webseite: Signatur, Cursor,
-//! Seiten mit `more`, Idempotenz je `rid`, Wirkung auf laufende Verbindungen, Wiederzulassung.
+//! The website's revocation list against a local mock of the website: signature, cursor,
+//! pages with `more`, idempotency per `rid`, effect on live connections, readmission.
 
 mod common;
 
@@ -26,7 +26,7 @@ const TOKEN: &str = "relay-token-relay-token-relay-token-1234";
 
 #[derive(Default)]
 struct Mock {
-    /// Antworten nach `after`.
+    /// Responses keyed by `after`.
     pages: Vec<(String, String)>,
     seen_after: Vec<String>,
 }
@@ -85,7 +85,7 @@ fn poller(s: &TestServer, url: &str, token: &str) -> Poller {
 }
 
 #[tokio::test]
-async fn widerrufe_wirken_auf_laufende_verbindungen() {
+async fn revocations_affect_live_connections() {
     let mock: Shared = Arc::default();
     let url = website(mock.clone()).await;
     let s = start(Config::for_tests(IdentityMode::Official, website_keys())).await;
@@ -119,14 +119,14 @@ async fn widerrufe_wirken_auf_laufende_verbindungen() {
     assert_eq!(
         p.poll_once().await.unwrap(),
         3,
-        "beide Seiten in einer Runde (more)"
+        "both pages in one round (more)"
     );
     assert_eq!(mock.lock().unwrap().seen_after, vec!["0", "2"]);
 
-    // Entfernt und Platz verloren: Close 4403.
+    // Removed and seat lost: close 4403.
     assert_eq!(bob.close_code().await, Some(close::CLOSE_REMOVED));
     assert_eq!(carol.close_code().await, Some(close::CLOSE_REMOVED));
-    // Rolle mit bekanntem Wert: still angewendet, keine Trennung, Admin-Absicht scheitert.
+    // Role with a known value: applied silently, no disconnect, admin intent fails.
     alice
         .until(|f| matches!(f.message, ServerMessage::MemberRoleChanged(_)))
         .await;
@@ -141,7 +141,7 @@ async fn widerrufe_wirken_auf_laufende_verbindungen() {
     let refused = alice.request("317", rotate).await;
     assert!(matches!(&refused.message, ServerMessage::Err(e) if e.code == ErrorCode::Forbidden));
 
-    // Ein Ticket von vor dem Widerruf öffnet das Team nicht mehr, ein späteres schon.
+    // A ticket issued before the revocation no longer opens the team, a later one does.
     let mut before = claims("1043", "317", Role::Member);
     before.iat = at - 30;
     before.exp = now_s() + 20;
@@ -169,7 +169,7 @@ async fn widerrufe_wirken_auf_laufende_verbindungen() {
         "{welcome:?}"
     );
 
-    // Nächste Seite: rid 3 noch einmal (übersprungen) und das Projekt gelöscht.
+    // Next page: rid 3 again (skipped) and the project deleted.
     mock.lock().unwrap().pages.push((
         "3".into(),
         list(
@@ -183,12 +183,16 @@ async fn widerrufe_wirken_auf_laufende_verbindungen() {
             &website_key(),
         ),
     ));
-    assert_eq!(p.poll_once().await.unwrap(), 1, "rid 3 wirkt nur einmal");
+    assert_eq!(
+        p.poll_once().await.unwrap(),
+        1,
+        "rid 3 takes effect only once"
+    );
     assert_eq!(alice.close_code().await, Some(close::CLOSE_TEAM_DELETED));
 }
 
 #[tokio::test]
-async fn ungültige_listen_ändern_nichts() {
+async fn invalid_lists_change_nothing() {
     let mock: Shared = Arc::default();
     let url = website(mock.clone()).await;
     let s = start(Config::for_tests(IdentityMode::Official, website_keys())).await;
@@ -207,17 +211,17 @@ async fn ungültige_listen_ändern_nichts() {
     ));
     let p = poller(&s, &url, TOKEN);
     assert!(matches!(p.poll_once().await, Err(PollError::Invalid(_))));
-    // Falsches Token: die Webseite antwortet 401.
+    // Wrong token: the website answers 401.
     assert!(matches!(
-        poller(&s, &url, "falsch-falsch-falsch-falsch-falsch-1")
+        poller(&s, &url, "wrong-token-wrong-token-wrong-token1")
             .poll_once()
             .await,
         Err(PollError::Status(401))
     ));
-    // Die Verbindung blieb, der Cursor auch (nächster Abruf wieder mit after=0).
-    bob.send_raw(r#"{"v":1,"id":"da","type":"ping"}"#).await;
+    // The connection stayed, and so did the cursor (next poll again with after=0).
+    bob.send_raw(r#"{"v":1,"id":"p1","type":"ping"}"#).await;
     assert!(matches!(
-        bob.answer("da").await.message,
+        bob.answer("p1").await.message,
         ServerMessage::Ack(_)
     ));
     mock.lock().unwrap().pages.clear();
@@ -230,7 +234,7 @@ async fn ungültige_listen_ändern_nichts() {
 }
 
 #[tokio::test]
-async fn rollenwechsel_ohne_rolle_verlangt_neues_ticket() {
+async fn role_change_without_role_requires_new_ticket() {
     let mock: Shared = Arc::default();
     let url = website(mock.clone()).await;
     let s = start(Config::for_tests(IdentityMode::Official, website_keys())).await;
@@ -251,11 +255,11 @@ async fn rollenwechsel_ohne_rolle_verlangt_neues_ticket() {
     assert_eq!(alice.close_code().await, Some(close::CLOSE_ROLE_CHANGED));
 }
 
-/// Sicherheitsprüfung 2026-11-09: ein herabgestuftes Mitglied hortet vor der Herabstufung
-/// gültige Admin-Tickets. Weder `ticket.renew` noch ein neues `hello` mit so einem Ticket darf
-/// ihm die alte Rolle zurückgeben (vorher: bis zu `CONNECTION_MAX_AGE_SECS` lang Admin).
+/// Security review 2026-11-09: a demoted member hoards valid admin tickets before the demotion.
+/// Neither `ticket.renew` nor a new `hello` with such a ticket may restore the old role
+/// (previously: admin for up to `CONNECTION_MAX_AGE_SECS`).
 #[tokio::test]
-async fn gehortetes_ticket_bringt_die_alte_rolle_nicht_zurück() {
+async fn hoarded_ticket_does_not_restore_the_old_role() {
     use hangar_team_server::wire::{Ticket, TicketRenew};
 
     let mock: Shared = Arc::default();
@@ -286,7 +290,7 @@ async fn gehortetes_ticket_bringt_die_alte_rolle_nicht_zurück() {
         .until(|f| matches!(f.message, ServerMessage::MemberRoleChanged(_)))
         .await;
 
-    // ticket.renew mit dem alten Admin-Ticket: abgewiesen, Close 4401 (neues Ticket holen).
+    // ticket.renew with the old admin ticket: rejected, close 4401 (fetch a new ticket).
     let op = alice.op();
     alice
         .send(
@@ -299,7 +303,7 @@ async fn gehortetes_ticket_bringt_die_alte_rolle_nicht_zurück() {
         .await;
     assert_eq!(alice.close_code().await, Some(close::CLOSE_ROLE_CHANGED));
 
-    // hello mit einem zweiten gehorteten Admin-Ticket: abgewiesen.
+    // hello with a second hoarded admin ticket: rejected.
     let mut again = Client::connect(s.addr).await;
     let refused = again
         .hello("317", hoarded(Role::Admin), "1042-device", None)
@@ -309,7 +313,7 @@ async fn gehortetes_ticket_bringt_die_alte_rolle_nicht_zurück() {
         "{refused:?}"
     );
 
-    // Ein Ticket nach der Änderung (neue Rolle) öffnet das Team.
+    // A ticket issued after the change (new role) opens the team.
     let mut fresh = Client::connect(s.addr).await;
     let welcome = fresh
         .hello(

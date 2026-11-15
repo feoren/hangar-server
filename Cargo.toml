@@ -1,18 +1,18 @@
 [package]
 name = "hangar-team-server"
 version = "0.3.0"
-description = "Relay und Selbstbetrieb-Identität des Hangar-Teamdienstes"
+description = "Relay and self-hosting identity of the Hangar team service"
 edition = "2021"
 rust-version = "1.88"
 license = "Elastic-2.0"
 publish = false
 
-# Begründung, Lizenz und Pflegezustand jeder Abhängigkeit: docs/dependencies.md.
+# Rationale, license and maintenance status of every dependency: docs/dependencies.md.
 [dependencies]
-# Wire-Format, Keyed Hashes und Zustandsautomaten (Schritt C) sowie die Regeln der Ende-zu-Ende-
-# Verschlüsselung (Schritt E, Prüfung des Mitgliedschafts-Logs und der Schlüsselpakete). Beide
-# gehören der App (MIT) und liegen als unveränderte Kopien aus Commit 79c68ca unter `vendor/`
-# (Herkunft je Crate in HERKUNFT.md); neue Fassung: docs/entwicklung.md, "Crates aktualisieren".
+# Wire format, keyed hashes and state machines (step C) plus the rules of the end-to-end
+# encryption (step E, checking the membership log and the key packages). Both belong to the app
+# (MIT) and are kept as unmodified copies from commit 79c68ca under `vendor/` (origin per crate
+# in ORIGIN.md); new version: docs/development.md, "Updating the crates".
 hangar-team-protocol = { path = "vendor/hangar-team-protocol" }
 hangar-team-crypto = { path = "vendor/hangar-team-crypto" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json", "form", "query", "matched-path"] }
@@ -31,8 +31,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "std"] }
 dotenvy = "0.15"
-# Abruf der Widerrufsliste der Webseite (nur offizieller Betrieb). rustls mit ring wie lettre,
-# Wurzelzertifikate des Systems; keine Weiterleitungen, Zeit- und Größenlimit im Code.
+# Fetching the website's revocation list (official mode only). rustls with ring like lettre,
+# system root certificates; no redirects, time and size limits in the code.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"] }

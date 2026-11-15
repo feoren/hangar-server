@@ -1,8 +1,8 @@
-//! Mailversand: SMTP über lettre mit TLS (STARTTLS Pflicht oder SMTPS), `log` schreibt `.eml`
-//! nach `DATA_DIR/mail/`, `none` verschickt nichts. Versand außerhalb der Anfrage über eine
-//! Warteschlange im Speicher mit begrenzten Wiederholungen; die Antwortzeit verrät so nicht, ob
-//! eine Mail entstand. Ein Neustart verliert ungesendete Mails (Links lassen sich neu anfordern,
-//! Einladungen erneut senden).
+//! Mail delivery: SMTP via lettre with TLS (mandatory STARTTLS or SMTPS), `log` writes `.eml`
+//! to `DATA_DIR/mail/`, `none` sends nothing. Delivery happens outside the request via an
+//! in-memory queue with limited retries, so the response time does not reveal whether a mail
+//! was produced. A restart loses unsent mails (links can be requested again, invitations
+//! resent).
 
 pub mod i18n;
 pub mod templates;
@@ -38,7 +38,7 @@ enum Transport {
 }
 
 impl Mailer {
-    /// Startet den Versand. Ohne Mail (`none`) bleibt der Mailer stumm.
+    /// Starts delivery. Without mail (`none`) the mailer stays silent.
     pub fn start(config: &Config, mut shutdown: watch::Receiver<bool>) -> Result<Mailer, String> {
         let server_host = config
             .public_url
@@ -55,11 +55,11 @@ impl Mailer {
             }
             MailTransport::Log => {
                 let dir = config.data_dir.join("mail");
-                std::fs::create_dir_all(&dir).map_err(|e| format!("Mailordner: {e}"))?;
+                std::fs::create_dir_all(&dir).map_err(|e| format!("mail directory: {e}"))?;
                 Transport::Log(dir)
             }
             MailTransport::Smtp => {
-                let smtp = config.smtp.as_ref().ok_or("SMTP_HOST fehlt")?;
+                let smtp = config.smtp.as_ref().ok_or("SMTP_HOST is missing")?;
                 let builder = match smtp.tls {
                     SmtpTls::Smtps => AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp.host),
                     SmtpTls::Starttls => {
@@ -103,11 +103,11 @@ impl Mailer {
         self.tx.is_some()
     }
 
-    /// Reiht eine Mail ein. `false`: kein Versand eingerichtet oder Warteschlange voll.
+    /// Enqueues a mail. `false`: no delivery configured or queue full.
     pub fn send(&self, to: &str, lang: &str, kind: MailKind) -> bool {
         let Some(tx) = &self.tx else { return false };
         let Ok(to) = to.parse::<Mailbox>() else {
-            tracing::warn!("Empfängeradresse nicht verwendbar");
+            tracing::warn!("recipient address not usable");
             return false;
         };
         let message = render(&kind, lang, &self.server_host);
@@ -130,7 +130,7 @@ async fn deliver(transport: &Transport, from: &Mailbox, job: Job) {
     let message = match build(from, &job) {
         Ok(message) => message,
         Err(error) => {
-            tracing::error!(%error, "Mail nicht baubar");
+            tracing::error!(%error, "mail could not be built");
             return;
         }
     };
@@ -150,14 +150,14 @@ async fn deliver(transport: &Transport, from: &Mailbox, job: Job) {
         };
         match result {
             Ok(()) => {
-                tracing::info!("Mail versendet");
+                tracing::info!("mail sent");
                 return;
             }
             Err(error) => {
-                tracing::warn!(attempt, %error, "Mailversand fehlgeschlagen");
+                tracing::warn!(attempt, %error, "mail delivery failed");
                 tokio::time::sleep(Duration::from_secs(5 * u64::from(attempt * attempt))).await;
             }
         }
     }
-    tracing::error!("Mail nach {ATTEMPTS} Versuchen verworfen");
+    tracing::error!("mail discarded after {ATTEMPTS} attempts");
 }

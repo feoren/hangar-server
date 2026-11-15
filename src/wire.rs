@@ -1,6 +1,6 @@
-//! Das Wire-Format des Teamprotokolls kommt aus dem Crate `hangar-team-protocol` der App
-//! (Schritt C). Dieses Modul bündelt nur die Namen, die der Relay-Kern braucht, damit er an
-//! einer Stelle vom Crate abhängt. Was dem Crate für das Relay fehlt: `docs/protocol-wishes.md`.
+//! The wire format of the team protocol comes from the app's `hangar-team-protocol` crate
+//! (step C). This module only bundles the names the relay core needs, so that it depends on the
+//! crate in a single place. What the crate still lacks for the relay: `docs/protocol-wishes.md`.
 
 pub use hangar_team_protocol::e2e::{
     check_append, check_rotate, ChainError, ChainHead, KeyProof, LogHash, PublicKey,
@@ -14,7 +14,7 @@ pub use hangar_team_protocol::wire::*;
 pub use hangar_team_protocol::PROTOCOL_VERSION;
 pub use hangar_team_protocol::{close, limits};
 
-/// Rolle aus dem Ticket in die Rolle des Protokolls.
+/// Maps the role from the ticket to the protocol role.
 pub fn role(role: crate::ticket::Role) -> Role {
     match role {
         crate::ticket::Role::Owner => Role::Owner,
@@ -23,7 +23,7 @@ pub fn role(role: crate::ticket::Role) -> Role {
     }
 }
 
-/// `err` mit nur einem Code.
+/// `err` with only a code.
 pub fn error(code: ErrorCode) -> ErrorBody {
     ErrorBody {
         code,
@@ -32,7 +32,7 @@ pub fn error(code: ErrorCode) -> ErrorBody {
     }
 }
 
-/// Leere Bestätigung.
+/// Empty acknowledgement.
 pub fn ack() -> Ack {
     Ack {
         blob: None,

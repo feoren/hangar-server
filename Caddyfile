@@ -1,17 +1,17 @@
-# Caddy vor dem Teamserver: TLS (Let's Encrypt/ZeroSSL automatisch, TLS 1.2+), WebSocket wird
-# ohne Zusatz durchgereicht. Sicherheitsheader setzt der Teamserver selbst (inkl. HSTS bei
-# https-PUBLIC_URL); Caddy entfernt nur seine eigene Kennung.
+# Caddy in front of the team server: TLS (Let's Encrypt/ZeroSSL automatically, TLS 1.2+); WebSocket
+# is passed through without extra configuration. The team server sets security headers itself
+# (including HSTS with an https PUBLIC_URL); Caddy only removes its own identification.
 {
-	# E-Mail für ACME-Hinweise (optional): email admin@example.org
+	# Email for ACME notices (optional): email admin@example.org
 }
 
 {$TEAM_DOMAIN} {
 	encode zstd gzip
 	header -Server
-	# Zugriffsprotokolle bleiben aus: Pfade wie /invite/<token> und /auth/magic/<token> tragen
-	# Geheimnisse. Wer sie braucht, muss diese Pfade maskieren.
+	# Access logs stay off: paths like /invite/<token> and /auth/magic/<token> carry secrets.
+	# If you need access logs, you must mask these paths.
 	reverse_proxy teamserver:8080 {
-		# Lange offene WebSocket-Verbindungen; der Server pingt alle 25 s.
+		# Long-lived WebSocket connections; the server pings every 25 s.
 		stream_timeout 24h
 		stream_close_delay 5s
 	}

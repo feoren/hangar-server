@@ -1,7 +1,7 @@
-//! Browserseite `/account/devices` (die App verlinkt sie unter `<Ursprung>/account/devices`):
-//! verbundene Geräte des angemeldeten Kontos ansehen und trennen. Trennen beendet die ganze
-//! Gerätesitzung sofort (alle Tokens); die App dort muss sich neu anmelden. Laufende
-//! Live-Verbindungen enden spätestens mit dem nächsten Ticket (höchstens 60 s gültig).
+//! Browser page `/account/devices` (the app links to it as `<origin>/account/devices`):
+//! view and disconnect the connected devices of the signed-in account. Disconnecting ends the whole
+//! device session immediately (all tokens); the app there has to sign in again. Running
+//! live connections end at the latest with the next ticket (valid for at most 60 s).
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -17,8 +17,8 @@ use crate::mail::i18n::fill;
 use crate::mail::templates::escape;
 use crate::util::{is_id, now_s};
 
-/// `JJJJ-MM-TT hh:mm UTC` aus Unix-Sekunden (proleptischer Gregorianischer Kalender, ohne
-/// Zeitzonen-Datenbank; Algorithmus "civil_from_days" von Howard Hinnant).
+/// `YYYY-MM-DD hh:mm UTC` from Unix seconds (proleptic Gregorian calendar, no time zone
+/// database; algorithm "civil_from_days" by Howard Hinnant).
 pub fn utc_minute(unix_s: i64) -> String {
     let days = unix_s.div_euclid(86_400);
     let secs = unix_s.rem_euclid(86_400);
@@ -115,8 +115,8 @@ pub async fn devices_page(
     page(lang, s.page_devices_title, &body, StatusCode::OK)
 }
 
-/// Eine eigene, noch offene App-Sitzung widerrufen; `false` für fremde, unbekannte,
-/// schon widerrufene Sitzungen und Browsersitzungen.
+/// Revokes one of the user's own, still open app sessions; `false` for foreign, unknown,
+/// already revoked sessions and browser sessions.
 async fn revoke_app_session(
     identity: &super::Identity,
     user_id: &str,
@@ -138,12 +138,12 @@ async fn revoke_app_session(
 #[derive(Debug, Deserialize)]
 pub struct RevokeForm {
     csrf: Option<String>,
-    /// Fehlt oder unbrauchbar: wie eine unbekannte Sitzung (404), keine Rohantwort von axum.
+    /// Missing or unusable: treated like an unknown session (404), no raw axum response.
     session: Option<String>,
 }
 
-/// POST: ein eigenes Gerät trennen (nur Sitzungen der App, nie die Browsersitzung), danach
-/// zurück zur Liste (Post/Redirect/Get).
+/// POST: disconnect one of the user's own devices (app sessions only, never the browser session),
+/// then back to the list (Post/Redirect/Get).
 pub async fn devices_revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -172,7 +172,7 @@ pub async fn devices_revoke(
     };
     match done {
         Ok(true) => {
-            tracing::info!("Gerät im Browser getrennt");
+            tracing::info!("device disconnected in browser");
             Redirect::to(&format!("{DEVICES_PAGE}?revoked=1")).into_response()
         }
         Ok(false) => message(
@@ -191,7 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn utc_zeit() {
+    fn utc_time() {
         assert_eq!(utc_minute(0), "1970-01-01 00:00 UTC");
         assert_eq!(utc_minute(951_782_400), "2000-02-29 00:00 UTC");
         assert_eq!(utc_minute(1_794_225_600), "2026-11-09 12:00 UTC");

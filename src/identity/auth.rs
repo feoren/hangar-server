@@ -1,8 +1,8 @@
-//! Anmeldung im Selbstbetrieb: opake, gehashte, rotierende Tokens; Magic Link per Mail;
-//! OAuth 2.0 Device Authorization Grant (RFC 8628) für die App; widerrufbare Sitzungen.
+//! Sign-in for self-hosting: opaque, hashed, rotating tokens; magic link by mail;
+//! OAuth 2.0 Device Authorization Grant (RFC 8628) for the app; revocable sessions.
 //!
-//! Tokens liegen nur als SHA-256 in der Datenbank. Ein Erneuerungstoken gilt genau einmal;
-//! wird ein schon getauschtes erneut vorgelegt, endet die ganze Sitzung (gestohlenes Token).
+//! Tokens are stored only as SHA-256 in the database. A refresh token is valid exactly once;
+//! if an already exchanged one is presented again, the whole session ends (stolen token).
 
 use std::sync::Arc;
 
@@ -24,12 +24,12 @@ use crate::mail::i18n::{fill, pick};
 use crate::mail::templates::{escape, MailKind};
 use crate::util::{normalize_email, now_s, random_bytes, random_id, random_token, token_hash};
 
-/// Erlaubte `client_id`: `hangar-desktop` sendet die App (wie bei der Webseite), `hangar` bleibt
-/// für bestehende Skripte und ältere Fassungen der Selbstbetrieb-Doku gültig. Beide Namen
-/// bezeichnen denselben öffentlichen Client ohne Geheimnis; ein Unterschied in den Rechten
-/// entsteht dadurch nicht.
+/// Allowed `client_id`: the app sends `hangar-desktop` (as with the website); `hangar` stays
+/// valid for existing scripts and older versions of the self-hosting docs. Both names
+/// denote the same public client without a secret; they make no difference in
+/// permissions.
 pub const CLIENT_IDS: [&str; 2] = ["hangar-desktop", "hangar"];
-/// Einziger Scope (wie die Webseite); leer heißt ebenfalls `team`.
+/// The only scope (same as the website); empty also means `team`.
 pub const SCOPE: &str = "team";
 pub const ACCESS_TTL_S: i64 = 3600;
 pub const REFRESH_TTL_S: i64 = 30 * 86_400;
@@ -39,24 +39,24 @@ pub const ADMIN_LINK_TTL_S: i64 = 60 * 60;
 pub const DEVICE_TTL_S: i64 = 600;
 pub const DEVICE_INTERVAL_S: i64 = 5;
 pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-/// Geräteanfragen je Adresse (alte und neue Route teilen sich den Zähler).
+/// Device requests per address (old and new route share the counter).
 const DEVICE_RULE: Rule = Rule {
     limit: 30,
     window_s: 3600,
 };
-/// Tokenabfragen je Adresse und 15 Minuten (wie die Webseite).
+/// Token requests per address and 15 minutes (same as the website).
 const TOKEN_RULE: Rule = Rule {
     limit: 600,
     window_s: 900,
 };
-/// Widerrufe nach RFC 7009 je Adresse und 15 Minuten (wie die Webseite).
+/// RFC 7009 revocations per address and 15 minutes (same as the website).
 const REVOKE_RULE: Rule = Rule {
     limit: 60,
     window_s: 900,
 };
-/// Längste angenommene Tokens und Gerätecodes (ausgegeben werden 43 bis 47 Zeichen).
+/// Longest accepted tokens and device codes (issued ones are 43 to 47 characters).
 const MAX_TOKEN_LEN: usize = 128;
-/// Buchstaben ohne Vokale und Verwechselbares (RFC 8628, Abschnitt 6.1): 20^8 Möglichkeiten.
+/// Letters without vowels and look-alikes (RFC 8628, section 6.1): 20^8 combinations.
 const USER_CODE_ALPHABET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXZ";
 
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ async fn user_by_token(db: &Db, token: &str, kind: &str) -> ApiResult<Option<Use
     Ok(Some(user))
 }
 
-/// Angemeldete App (Bearer-Zugriffstoken).
+/// Signed-in app (bearer access token).
 pub async fn authenticate(identity: &Identity, headers: &HeaderMap) -> ApiResult<User> {
     let token = bearer(headers).ok_or(ApiError::UNAUTHORIZED)?;
     user_by_token(&identity.db, token, "access")
@@ -108,7 +108,7 @@ pub async fn authenticate(identity: &Identity, headers: &HeaderMap) -> ApiResult
         .ok_or(ApiError::UNAUTHORIZED)
 }
 
-/// Angemeldeter Browser (Sitzungscookie).
+/// Signed-in browser (session cookie).
 pub async fn browser_user(identity: &Identity, headers: &HeaderMap) -> ApiResult<Option<User>> {
     match pages::read_cookie(headers, pages::cookie_name(&identity.config)) {
         Some(token) if token.len() <= 128 => user_by_token(&identity.db, token, "browser").await,
@@ -188,7 +188,7 @@ pub struct TokenResponse {
     scope: &'static str,
 }
 
-/// Ohne die Tokens: Debug-Ausgaben dürfen nie Geheimnisse tragen.
+/// Without the tokens: debug output must never carry secrets.
 impl std::fmt::Debug for TokenResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenResponse")
@@ -219,7 +219,7 @@ async fn issue_app_tokens(
     })
 }
 
-/// Startet eine Browsersitzung und gibt das Cookie-Token zurück.
+/// Starts a browser session and returns the cookie token.
 pub async fn start_browser_session(
     tx: &mut Tx,
     user_id: &str,
@@ -256,9 +256,9 @@ pub async fn housekeeping(db: &Db) -> Result<(), sqlx::Error> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Magic Link
+// Magic link
 
-/// Erlaubte Rücksprungziele nach dem Anmeldelink (keine offenen Weiterleitungen).
+/// Allowed return targets after the magic link (no open redirects).
 fn safe_return(raw: Option<&str>) -> String {
     match raw {
         Some(path) if path == "/device" || path == DEVICES_PAGE => path.to_owned(),
@@ -273,12 +273,12 @@ fn safe_return(raw: Option<&str>) -> String {
     }
 }
 
-/// Browserseite der verbundenen Geräte; der Pfad ist fest in der App (`BaseUrl::devices_page`).
+/// Browser page of the connected devices; the path is hard-coded in the app (`BaseUrl::devices_page`).
 pub const DEVICES_PAGE: &str = "/account/devices";
 
-/// Rücksprung nach dem Anmeldelink. Ein Gerätecode im Ziel gilt nur in dem Browser, der den
-/// Link angefordert hat: sonst könnte jemand einen Link mit seinem eigenen Code an eine fremde
-/// Adresse schicken lassen, und die Person ließe mit einem Klick sein Gerät zu.
+/// Return after the magic link. A device code in the target is only honored in the browser that
+/// requested the link: otherwise someone could have a link with their own code sent to another
+/// person's address, and that person would approve the attacker's device with one click.
 fn return_after_magic(stored: &str, bound: Option<&str>, browser: Option<&str>) -> String {
     let same_browser = match (bound, browser) {
         (Some(bound), Some(browser)) => {
@@ -286,7 +286,7 @@ fn return_after_magic(stored: &str, bound: Option<&str>, browser: Option<&str>) 
         }
         _ => false,
     };
-    // Die Geräteliste trägt keinen Code: sie darf in jedem Browser das Ziel sein.
+    // The device list carries no code: it may be the target in any browser.
     if same_browser || stored == DEVICES_PAGE {
         safe_return(Some(stored))
     } else {
@@ -331,9 +331,9 @@ async fn create_magic_link(
     Ok(token)
 }
 
-/// Dienst: Anmeldelink anfordern. Antwortet nie anders, ob die Adresse bekannt ist.
-/// `browser`: Zufallswert aus dem Cookie des anfragenden Browsers; nur dort führt der Link
-/// zurück auf den Gerätecode.
+/// Service: request a magic link. The answer never differs depending on whether the address
+/// is known. `browser`: random value from the requesting browser's cookie; only there does
+/// the link lead back to the device code.
 pub async fn request_magic_link(
     identity: &Identity,
     raw_email: &str,
@@ -391,9 +391,9 @@ pub async fn request_magic_link(
     Ok(())
 }
 
-/// Für `hangar-team-server login-link <email>`: Link ohne Mail für die Person am Server.
+/// For `hangar-team-server login-link <email>`: link without mail for the person at the server.
 pub async fn admin_login_link(db: &Db, config: &Config, raw_email: &str) -> Result<String, String> {
-    let email = normalize_email(raw_email).ok_or("ungültige E-Mail-Adresse")?;
+    let email = normalize_email(raw_email).ok_or("invalid email address")?;
     let token = create_magic_link(db, &email, "/device", ADMIN_LINK_TTL_S, None)
         .await
         .map_err(|e| e.to_string())?;
@@ -474,7 +474,7 @@ pub async fn email_submit(
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     };
-    // Immer setzen, ob eine Mail entstand oder nicht (keine Auskunft über Adressen).
+    // Always set, whether a mail was produced or not (reveals nothing about addresses).
     response.headers_mut().insert(
         header::SET_COOKIE,
         pages::cookie(
@@ -487,7 +487,7 @@ pub async fn email_submit(
     response
 }
 
-/// GET: zeigt nur eine Bestätigung. Linkprüfer in Mailprogrammen lösen so nichts aus.
+/// GET: only shows a confirmation, so link scanners in mail clients trigger nothing.
 pub async fn magic_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -525,7 +525,7 @@ pub async fn magic_page(
     page(lang, s.page_sign_in, &body, StatusCode::OK)
 }
 
-/// POST: löst den Link einmalig ein und startet die Browsersitzung.
+/// POST: redeems the link once and starts the browser session.
 pub async fn magic_consume(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -602,7 +602,7 @@ async fn consume_magic(
     let user = find_or_create_user(&mut tx, &email, lang, now).await?;
     let cookie = start_browser_session(&mut tx, &user, now).await?;
     tx.commit().await?;
-    tracing::info!("Anmeldung per Link");
+    tracing::info!("sign-in via link");
     Ok(Some((
         cookie,
         return_after_magic(&return_to, bound.as_deref(), browser),
@@ -627,7 +627,7 @@ pub async fn browser_logout(State(state): State<AppState>, headers: HeaderMap) -
 }
 
 // ---------------------------------------------------------------------------------------------
-// Device Flow (RFC 8628)
+// Device flow (RFC 8628)
 
 fn user_code() -> String {
     let bytes = random_bytes::<8>();
@@ -638,7 +638,7 @@ fn user_code() -> String {
     format!("{}-{}", &letters[..4], &letters[4..])
 }
 
-/// Eingaben wie `bcdf ghjk` oder `BCDFGHJK` auf die Form `BCDF-GHJK` bringen.
+/// Normalizes input such as `bcdf ghjk` or `BCDFGHJK` to the form `BCDF-GHJK`.
 pub fn normalize_user_code(raw: &str) -> Option<String> {
     let letters: String = raw
         .chars()
@@ -649,8 +649,8 @@ pub fn normalize_user_code(raw: &str) -> Option<String> {
         .then(|| format!("{}-{}", &letters[..4], &letters[4..]))
 }
 
-/// Gerätename für Sitzungsliste und Bestätigungsseite: Steuerzeichen werden zu Leerzeichen,
-/// ohne Rand, gekürzt; leer wird `Hangar`.
+/// Device name for the session list and confirmation page: control characters become spaces,
+/// trimmed, shortened; empty becomes `Hangar`.
 pub fn clean_label(raw: Option<&str>, max_chars: usize) -> String {
     let spaced: String = raw
         .unwrap_or_default()
@@ -666,8 +666,8 @@ pub fn clean_label(raw: Option<&str>, max_chars: usize) -> String {
     }
 }
 
-/// Plattform der App (`windows`, `macos`, `linux`, ...): `[A-Za-z0-9 ._-]`, 1 bis 40 Zeichen,
-/// sonst keine (wie die Webseite).
+/// The app's platform (`windows`, `macos`, `linux`, ...): `[A-Za-z0-9 ._-]`, 1 to 40 characters,
+/// otherwise none (same as the website).
 pub fn clean_platform(raw: Option<&str>) -> Option<String> {
     let value = raw?.trim();
     let fine = !value.is_empty()
@@ -678,7 +678,7 @@ pub fn clean_platform(raw: Option<&str>) -> Option<String> {
     fine.then(|| value.to_owned())
 }
 
-/// Token oder Gerätecode in brauchbarer Länge.
+/// Token or device code of usable length.
 fn usable_token(value: Option<&str>) -> Option<&str> {
     value.filter(|v| !v.is_empty() && v.len() <= MAX_TOKEN_LEN)
 }
@@ -687,12 +687,12 @@ pub fn client_ok(client_id: Option<&str>) -> bool {
     client_id.is_some_and(|id| CLIENT_IDS.contains(&id))
 }
 
-/// Scope der Anfrage: leer oder fehlend heißt `team`, sonst nur `team` (auch mehrfach).
+/// Scope of the request: empty or missing means `team`, otherwise only `team` (also repeated).
 pub fn scope_ok(scope: Option<&str>) -> bool {
     scope.is_none_or(|s| s.split(' ').filter(|p| !p.is_empty()).all(|p| p == SCOPE))
 }
 
-/// Antwort auf den Start des Device Flows (RFC 8628, Abschnitt 3.2).
+/// Response to the start of the device flow (RFC 8628, section 3.2).
 #[derive(Serialize)]
 pub struct DeviceStart {
     device_code: String,
@@ -703,7 +703,7 @@ pub struct DeviceStart {
     interval: i64,
 }
 
-/// Dienst: Device Flow starten. Fehler als OAuth-Code (`rate_limited` wird zu 429).
+/// Service: start the device flow. Errors as OAuth code (`rate_limited` becomes 429).
 pub async fn start_device(
     identity: &Identity,
     ip: &str,
@@ -735,7 +735,7 @@ pub async fn start_device(
         .execute(&identity.db)
         .await
         .map_err(|error| {
-            tracing::error!(%error, "Device Flow: Start");
+            tracing::error!(%error, "device flow: start");
             "server_error"
         })?;
     Ok(DeviceStart {
@@ -748,8 +748,8 @@ pub async fn start_device(
     })
 }
 
-/// Dienst: Token-Endpunkt (Gerätecode einlösen oder Erneuerungstoken rotieren). Fehler als
-/// OAuth-Code nach RFC 6749 5.2 und RFC 8628 3.5; `rate_limited` wird zu 429.
+/// Service: token endpoint (redeem a device code or rotate a refresh token). Errors as
+/// OAuth code per RFC 6749 5.2 and RFC 8628 3.5; `rate_limited` becomes 429.
 pub async fn exchange(
     identity: &Identity,
     ip: &str,
@@ -778,10 +778,10 @@ pub async fn exchange(
     }
 }
 
-/// Dienst: Widerruf durch die App (RFC 7009). Ein Erneuerungstoken beendet die ganze
-/// Gerätesitzung (alle Tokens der Familie), ein Zugriffstoken nur sich selbst. Unbekannte,
-/// fremde oder schon widerrufene Tokens ändern nichts und sehen gleich aus (keine Auskunft).
-/// Browsertokens sind ausgenommen. `token_type_hint` ist nur ein Hinweis (RFC 7009 2.1).
+/// Service: revocation by the app (RFC 7009). A refresh token ends the whole device session
+/// (all tokens of the family), an access token only itself. Unknown, foreign or already
+/// revoked tokens change nothing and look the same (reveals nothing).
+/// Browser tokens are excluded. `token_type_hint` is only a hint (RFC 7009 2.1).
 pub async fn revoke_token(
     identity: &Identity,
     ip: &str,
@@ -802,7 +802,7 @@ pub async fn revoke_token(
         return Err("invalid_request");
     }
     let internal = |error: sqlx::Error| {
-        tracing::error!(%error, "Widerruf (RFC 7009)");
+        tracing::error!(%error, "revocation (RFC 7009)");
         "server_error"
     };
     let now = now_s();
@@ -832,7 +832,7 @@ pub async fn revoke_token(
                 .await
                 .map_err(internal)?;
             tx.commit().await.map_err(internal)?;
-            tracing::info!("App abgemeldet: Gerätesitzung widerrufen (RFC 7009)");
+            tracing::info!("app signed out: device session revoked (RFC 7009)");
         }
         Some(_) => {
             sqlx::query("DELETE FROM auth_tokens WHERE hash = ?")
@@ -851,12 +851,12 @@ pub async fn revoke_token(
 pub struct DeviceAuthForm {
     client_id: Option<String>,
     scope: Option<String>,
-    /// Anzeigename des Geräts für die Sitzungsliste (z. B. "Hangar auf Laptop").
+    /// Display name of the device for the session list (e.g. "Hangar on Laptop").
     device_name: Option<String>,
     platform: Option<String>,
 }
 
-/// Fehler der alten OAuth-Routen: `{"error": code}` (Form bleibt für bestehende Clients).
+/// Errors of the old OAuth routes: `{"error": code}` (format kept for existing clients).
 fn oauth_error(code: &'static str) -> Response {
     let status = match code {
         "rate_limited" => StatusCode::TOO_MANY_REQUESTS,
@@ -866,7 +866,7 @@ fn oauth_error(code: &'static str) -> Response {
     (status, Json(json!({ "error": code }))).into_response()
 }
 
-/// `POST /oauth/device_authorization` (nur Formular). Die App nutzt `/api/v1/oauth/device`.
+/// `POST /oauth/device_authorization` (form only). The app uses `/api/v1/oauth/device`.
 pub async fn device_authorization(
     State(state): State<AppState>,
     ip: ClientIp,
@@ -900,7 +900,7 @@ pub struct TokenForm {
     refresh_token: Option<String>,
 }
 
-/// `POST /oauth/token` (nur Formular). Die App nutzt `/api/v1/oauth/token`.
+/// `POST /oauth/token` (form only). The app uses `/api/v1/oauth/token`.
 pub async fn token(
     State(state): State<AppState>,
     ip: ClientIp,
@@ -938,7 +938,7 @@ type DeviceRow = (
 async fn poll_device(db: &Db, device_code: &str) -> Result<TokenResponse, &'static str> {
     let now = now_s();
     let internal = |error: sqlx::Error| {
-        tracing::error!(%error, "Device Flow");
+        tracing::error!(%error, "device flow");
         "server_error"
     };
     let mut tx = begin_write(db).await.map_err(internal)?;
@@ -999,7 +999,7 @@ async fn poll_device(db: &Db, device_code: &str) -> Result<TokenResponse, &'stat
                 .await
                 .map_err(internal)?;
             tx.commit().await.map_err(internal)?;
-            tracing::info!("App angemeldet (Device Flow)");
+            tracing::info!("app signed in (device flow)");
             Ok(tokens)
         }
         _ => Err("invalid_grant"),
@@ -1009,11 +1009,11 @@ async fn poll_device(db: &Db, device_code: &str) -> Result<TokenResponse, &'stat
 /// session_id, expires_at, used_at, revoked_at, session expires_at
 type RefreshRow = (String, i64, Option<i64>, Option<i64>, i64);
 
-/// Tauscht ein Erneuerungstoken gegen ein neues Paar (Rotation mit Erkennung der Wiederverwendung).
+/// Exchanges a refresh token for a new pair (rotation with reuse detection).
 pub async fn refresh(db: &Db, token: &str) -> Result<TokenResponse, &'static str> {
     let now = now_s();
     let internal = |error: sqlx::Error| {
-        tracing::error!(%error, "Erneuerung");
+        tracing::error!(%error, "refresh");
         "server_error"
     };
     let mut tx = begin_write(db).await.map_err(internal)?;
@@ -1041,7 +1041,7 @@ pub async fn refresh(db: &Db, token: &str) -> Result<TokenResponse, &'static str
             .await
             .map_err(internal)?;
         tx.commit().await.map_err(internal)?;
-        tracing::warn!("Erneuerungstoken erneut verwendet: Sitzung widerrufen");
+        tracing::warn!("refresh token reused: session revoked");
         return Err("invalid_grant");
     }
     if expires_at <= now || revoked_at.is_some() || session_expires <= now {
@@ -1053,7 +1053,7 @@ pub async fn refresh(db: &Db, token: &str) -> Result<TokenResponse, &'static str
         .execute(&mut *tx)
         .await
         .map_err(internal)?;
-    // Alte Zugriffstokens der Sitzung enden mit der Rotation.
+    // The session's old access tokens end with the rotation.
     sqlx::query("DELETE FROM auth_tokens WHERE session_id = ? AND kind = 'access'")
         .bind(&session)
         .execute(&mut *tx)
@@ -1066,8 +1066,8 @@ pub async fn refresh(db: &Db, token: &str) -> Result<TokenResponse, &'static str
     Ok(tokens)
 }
 
-/// Anmeldeformular (Anmeldelink per Mail) mit Rücksprung auf `return_to` (nur Pfade aus
-/// [`safe_return`]); ohne Mailversand ein Hinweis, den Admin um einen Link zu bitten.
+/// Sign-in form (magic link by mail) returning to `return_to` (only paths from
+/// [`safe_return`]); without mail delivery, a note to ask the admin for a link.
 pub(crate) fn sign_in_page(
     identity: &Identity,
     lang: &str,
@@ -1111,7 +1111,7 @@ pub async fn device_page(
     let code = query.code.as_deref().and_then(normalize_user_code);
     let user = browser_user(identity, &headers).await.ok().flatten();
     let Some(user) = user else {
-        // Erst anmelden; danach führt der Link hierher zurück.
+        // Sign in first; afterwards the link leads back here.
         let return_to = code
             .as_ref()
             .map_or("/device".to_owned(), |c| format!("/device?code={c}"));
@@ -1271,7 +1271,7 @@ pub async fn device_decide(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sitzungen
+// Sessions
 
 pub(crate) async fn revoke(db: &Db, user_id: &str, session_id: &str) -> Result<bool, sqlx::Error> {
     let mut tx = begin_write(db).await?;
@@ -1335,7 +1335,7 @@ pub async fn app_logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Sprache für Mails an eine Person: ihre gespeicherte, sonst die Vorgabe.
+/// Language for mails to a person: their stored one, otherwise the default.
 pub fn mail_lang(stored: Option<&str>, config: &Config) -> &'static str {
     pick(stored, None, &config.default_lang)
 }
@@ -1345,7 +1345,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn benutzercode() {
+    fn user_code_format() {
         let code = user_code();
         assert_eq!(code.len(), 9);
         assert_eq!(
@@ -1355,13 +1355,13 @@ mod tests {
         assert_eq!(
             normalize_user_code("ABCD-EFGH"),
             None,
-            "Vokale gehören nicht zum Alphabet"
+            "vowels are not part of the alphabet"
         );
         assert_eq!(normalize_user_code("BCDF"), None);
     }
 
     #[test]
-    fn gerätecode_im_rücksprung_nur_im_anfragenden_browser() {
+    fn device_code_in_return_only_in_requesting_browser() {
         let stored = "/device?code=BCDF-GHJK";
         let bound = token_hash("nonce-a");
         assert_eq!(
@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn rücksprung_nur_auf_erlaubte_pfade() {
+    fn return_only_to_allowed_paths() {
         assert_eq!(
             safe_return(Some("/device?code=BCDF-GHJK")),
             "/device?code=BCDF-GHJK"

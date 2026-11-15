@@ -1,242 +1,241 @@
-# Live-Protokoll (Version 1)
+# Live protocol (version 1)
 
-Das Protokoll gehört der App: Crates `hangar-team-protocol` (Schritt C) und `hangar-team-crypto`
-(Schritt E), hier als unveränderte Kopien aus Commit `79c68ca` unter `vendor/`. Nachrichten,
-Grenzen, Regeln der Reservierung, der Claims, des Logs und der E2E-Prüfungen kommen aus den
-Crates; Referenz sind deren READMEs und `docs/wiki/pages/concepts/team-protocol.md` sowie
-`team-crypto.md` im App-Repository. Dieses Dokument
-beschreibt, wie das Relay es betreibt. Offene Wünsche an das Crate:
+The protocol belongs to the app: the crates `hangar-team-protocol` (step C) and `hangar-team-crypto`
+(step E), kept here as unmodified copies from commit `79c68ca` under `vendor/`. Messages,
+limits, and the rules for reservations, claims, the log and the E2E checks come from the
+crates; the reference is their READMEs plus `docs/wiki/pages/concepts/team-protocol.md` and
+`team-crypto.md` in the app repository. This document
+describes how the relay runs it. Open requests to the crate:
 [protocol-wishes.md](protocol-wishes.md).
 
-## Verbindung
+## Connection
 
-- `GET /v1/live` mit WebSocket-Upgrade. Die App sendet keinen `Origin`; kommt einer, muss er
-  in `ALLOWED_ORIGINS` oder gleich `PUBLIC_URL` sein, sonst 403.
-- Ein Textrahmen = ein JSON-Objekt, höchstens 1 MiB (`limits::MAX_FRAME_BYTES`; größere weist
-  schon der WebSocket-Leser ab). Binärrahmen: `err badRequest`.
-- Der Server pingt alle 25 s; ohne jedes Lebenszeichen 60 s lang trennt er (Close 1001).
-- Grenzen: `MAX_CONNECTIONS` gesamt (200) und `MAX_CONNECTIONS_PER_IP` (20) je Client-Adresse (IPv6 je /64)
-  antworten vor dem Upgrade mit 503; `MAX_CONNECTIONS_PER_MEMBER` je Mitglied `err limit`;
-  30 Rahmen/s je Verbindung mit Vorrat 120 (`err rateLimited` mit `retryAfterMs`); mehr als
-  20 kaputte Rahmen oder abgelehnte `hello`: Close 1008.
-- Ohne gültiges `hello` binnen `close::HELLO_TIMEOUT_SECS` (15 s) schließt der Server mit
-  `CLOSE_HELLO_TIMEOUT` (1008); Pings allein halten keinen Verbindungsplatz.
-- Höchstalter `CONNECTION_MAX_AGE_SECS` (Vorgabe 10 min) je Team ab dem letzten geprüften
-  Ticket (`hello` oder `ticket.renew`); danach Close 4401 und Neuverbindung mit Cursor. Die
-  kurze Vorgabe begrenzt Restrisiken (gehortete Tickets, verpasste Widerrufe), bis
-  `ticket.renew` der App überall wirkt.
-- Close-Codes: 1008 (`CLOSE_HELLO_TIMEOUT`), 1012 Neustart, 1013 zu langsam gelesen
-  (Warteschlange 512 Rahmen voll), 4401 (`CLOSE_ROLE_CHANGED`: neues Ticket nötig), 4403
-  (`CLOSE_REMOVED`: entfernt, Gerät entfernt, kein Platz, Ticket ungültig; bei einem entfernten
-  Gerät erst nach seiner Frist, siehe `device.remove`), 4404 (`CLOSE_TEAM_DELETED`: Team
-  gelöscht).
+- `GET /v1/live` with a WebSocket upgrade. The app sends no `Origin`; if one is present, it must
+  be listed in `ALLOWED_ORIGINS` or equal `PUBLIC_URL`, otherwise 403.
+- One text frame = one JSON object, at most 1 MiB (`limits::MAX_FRAME_BYTES`; larger frames are
+  already rejected by the WebSocket reader). Binary frames: `err badRequest`.
+- The server pings every 25 s; after 60 s without any sign of life it disconnects (close 1001).
+- Limits: `MAX_CONNECTIONS` in total (200) and `MAX_CONNECTIONS_PER_IP` (20) per client address (IPv6 per /64)
+  answer with 503 before the upgrade; `MAX_CONNECTIONS_PER_MEMBER` per member gives `err limit`;
+  30 frames/s per connection with a burst of 120 (`err rateLimited` with `retryAfterMs`); more than
+  20 malformed frames or rejected `hello`s: close 1008.
+- Without a valid `hello` within `close::HELLO_TIMEOUT_SECS` (15 s) the server closes with
+  `CLOSE_HELLO_TIMEOUT` (1008); pings alone do not hold a connection slot.
+- Maximum age `CONNECTION_MAX_AGE_SECS` (default 10 min) per team, counted from the last verified
+  ticket (`hello` or `ticket.renew`); after that, close 4401 and reconnect with a cursor. The
+  short default limits residual risks (hoarded tickets, missed revocations) until the app's
+  `ticket.renew` is in effect everywhere.
+- Close codes: 1008 (`CLOSE_HELLO_TIMEOUT`), 1012 restart, 1013 reading too slowly
+  (queue of 512 frames full), 4401 (`CLOSE_ROLE_CHANGED`: new ticket required), 4403
+  (`CLOSE_REMOVED`: removed, device removed, no seat, ticket invalid; for a removed
+  device only after its grace period, see `device.remove`), 4404 (`CLOSE_TEAM_DELETED`: team
+  deleted).
 
-## Speicher je Verbindung
+## Memory per connection
 
-Jede Verbindung kann einen Rahmen bis 1 MiB im Lesepuffer halten. Schlimmster Fall also
-`MAX_CONNECTIONS × 1 MiB`: mit der Vorgabe 200 sind das 200 MiB, dazu ausgehende
-Warteschlangen und der Zustand der Teams. Das Compose-Limit steht deshalb auf 512 MiB. Wer
-`MAX_CONNECTIONS` erhöht, erhöht das Speicherlimit im selben Verhältnis (Faustregel: 2 MiB je
-Verbindung). Echte Rahmen sind meist wenige KiB; der große Fall ist ein `claim.set` mit 1000
-Dateien und Detail oder ein `blob.put`.
+Every connection can hold a frame of up to 1 MiB in its read buffer. The worst case is therefore
+`MAX_CONNECTIONS × 1 MiB`: with the default of 200 that is 200 MiB, plus outgoing
+queues and the team state. That is why the Compose limit is set to 512 MiB. If you
+raise `MAX_CONNECTIONS`, raise the memory limit in the same proportion (rule of thumb: 2 MiB per
+connection). Real frames are usually a few KiB; the large case is a `claim.set` with 1000
+files and detail, or a `blob.put`.
 
-## Rahmen
+## Frames
 
 ```
 Client: {"v":1,"id":"<op>","team":"<team>","type":"task.reserve","body":{...}}
-Server: {"v":1,"id":"<op beantwortet>","seq":12,"team":"<team>","type":"task.reserved","body":{...}}
+Server: {"v":1,"id":"<op answered>","seq":12,"team":"<team>","type":"task.reserved","body":{...}}
 ```
 
-- `v` wird zuerst gelesen; ältere Clients bekommen `err outdatedClient`.
-- `id`: Operations-ID. Absichten mit `ClientMessage::deduplicated` (alle `task.*`, `blob.put`,
-  `memberlog.append`, `key.rotate`, `key.wrap`) merkt das Relay je Absender (Mitglied und
-  Gerät), Team und `id` zusammen mit dem Digest des Inhalts (`RecentOps`, 4096 je Team): dieselbe
-  Absicht noch einmal bekommt die erste Antwort, eine andere unter derselben `id` `badRequest`.
-- `team`: Projekt-ID der Webseite bzw. Team-ID des Selbstbetriebs, opak. Fehlt nur bei `ping`.
-- Vor jeder Absicht prüft das Relay die Epoche (`ClientMessage::check_epoch`): Hashes und
-  verschlüsselte Inhalte einer anderen als der aktuellen Epoche ergeben `err staleEpoch`.
+- `v` is read first; older clients get `err outdatedClient`.
+- `id`: operation ID. For intents with `ClientMessage::deduplicated` (all `task.*`, `blob.put`,
+  `memberlog.append`, `key.rotate`, `key.wrap`) the relay remembers sender (member and
+  device), team and `id` together with the digest of the content (`RecentOps`, 4096 per team): the same
+  intent sent again gets the first answer, a different one under the same `id` gets `badRequest`.
+- `team`: project ID of the website or team ID in self-hosting, opaque. Missing only for `ping`.
+- Before every intent the relay checks the epoch (`ClientMessage::check_epoch`): hashes and
+  encrypted content of any epoch other than the current one result in `err staleEpoch`.
 
-## Anmelden: `hello`
+## Signing in: `hello`
 
-Ticketprüfung: [ticket-format.md](ticket-format.md). Das Mitglied kommt aus `sub`, das Gerät aus
-`hello.device`; Geräte-IDs gelten nur je Mitglied (gleiche ID bei zwei Mitgliedern sind zwei
-Geräte). Eine Verbindung kann mehrere Teams anmelden, gehört aber genau einem Mitglied.
+Ticket verification: [ticket-format.md](ticket-format.md). The member comes from `sub`, the device from
+`hello.device`; device IDs are only unique per member (the same ID for two members means two
+devices). One connection can sign in to several teams, but belongs to exactly one member.
 
-- **Nachspielen** (Cursor im Fenster): `welcome` mit der `id` des `hello`, danach die Ereignisse
-  nach dem Cursor in Folge, dann live.
-- **Snapshot**: `resync_required`, dann `member.joined`, `task.reserved` je Hold (dazu
-  `reservation.expiring` und `task.release_requested`, wo sie gelten), `presence.update`, zuletzt
+- **Replay** (cursor within the window): `welcome` with the `id` of the `hello`, then the events
+  after the cursor in order, then live.
+- **Snapshot**: `resync_required`, then `member.joined`, `task.reserved` per hold (plus
+  `reservation.expiring` and `task.release_requested` where they apply), `presence.update`, and finally
   `welcome`.
-- Ein entferntes Mitglied kommt nur mit einem Ticket wieder herein, das nach der Entfernung
-  ausgestellt wurde (`iat` später als der Widerruf).
+- A removed member only gets back in with a ticket issued after the removal
+  (`iat` later than the revocation).
 
 ## `ticket.renew`
 
-Die App schickt etwa alle 5 Minuten ein frisches Ticket für ein angemeldetes Team. Nicht
-dedupliziert. Vor dem `hello` des Teams: `err badRequest`.
+The app sends a fresh ticket for a signed-in team roughly every 5 minutes. Not
+deduplicated. Before the team's `hello`: `err badRequest`.
 
-- Gültig (Signatur, kid, Zeit, `aud`, einmalige `jti`, gleiches Mitglied, `seat_ok`): Rolle aus
-  dem Ticket still übernehmen, `ack`, Höchstalter neu starten. Eine echte Änderung meldet
-  `member.role_changed` an alle.
-- `prj` eines anderen Teams: `err forbidden`, dann Close 4403.
-- Ungültig, anderes Mitglied, `seat_ok: false`, schon verwendet: Close 4403.
+- Valid (signature, kid, time, `aud`, unique `jti`, same member, `seat_ok`): silently adopt the role from
+  the ticket, `ack`, restart the maximum age. An actual change is announced to everyone as
+  `member.role_changed`.
+- `prj` of a different team: `err forbidden`, then close 4403.
+- Invalid, different member, `seat_ok: false`, already used: close 4403.
 
-## Rollenänderungen während einer Verbindung
+## Role changes during a connection
 
-Festlegung vom 2026-11-09: Ist die neue Rolle bekannt (aus `ticket.renew`, aus der
-Widerrufsliste `role_changed` mit `role`, im Selbstbetrieb aus der Teamverwaltung), gilt sie
-sofort und still auf allen Verbindungen des Mitglieds; das Team bekommt `member.role_changed`.
-Getrennt wird nicht: da Rechte je Nachricht aus der Rolle der Verbindung geprüft werden,
-scheitern Owner- und Admin-Absichten nach einer Herabstufung von selbst (`err forbidden`, etwa
-beim nächsten `key.rotate`). Nur wenn eine Änderung ohne neue Rolle gemeldet wird
-(`role_changed` ohne `role`), schließt das Relay mit 4401, und die App verbindet sich mit einem
-neuen Ticket.
+Decision of 2026-11-09: if the new role is known (from `ticket.renew`, from the
+revocation list `role_changed` with `role`, in self-hosting from team management), it applies
+immediately and silently on all of the member's connections; the team receives `member.role_changed`.
+There is no disconnect: since permissions are checked per message against the connection's role,
+owner and admin intents fail on their own after a downgrade (`err forbidden`, for example
+on the next `key.rotate`). Only when a change is reported without a new role
+(`role_changed` without `role`) does the relay close with 4401, and the app reconnects with a
+new ticket.
 
-## Ereignislog
+## Event log
 
-- Je Team Sequenznummern ab 1 (`EventLog`), Fenster der letzten 2048 Ereignisse im Speicher.
-- Die Log-Position (`EventLog::position`: Stream und head) liegt zusammen mit dem Buch in
-  `relay_team_state`. Beim Laden setzt `EventLog::resume` den Stream fort: ein Client genau am
-  gespeicherten head macht ohne Snapshot weiter, ein älterer Cursor bekommt `tooOld` (das
-  Fenster liegt nur im Speicher). Fehlt der Zustand oder ist er unlesbar, beginnt ein neuer
-  Stream (`otherStream`, Snapshot).
-- **Haltbarkeitsregel:** kein Rahmen mit `seq` verlässt das Relay, bevor eine Schreibung, deren
-  head diese `seq` abdeckt, dauerhaft ist (SQLite `synchronous = FULL`). Das gilt für jedes
-  geloggte Ereignis, auch solche, die das Buch nicht ändern (`member.joined`,
-  `device.removed`). Sonst vergäbe ein Neustart dieselbe `seq` an ein neues Ereignis, und ein
-  Client verwürfe es als Doppel. Test: `tests/persistence.rs`.
-- Nach dem Zurückspielen einer Sicherung läuft der gespeicherte Stream weiter. Clients, die
-  danach Ereignisse gesehen hatten, stehen vor dem head (`ahead`) und holen einen Snapshot.
-- Geloggt: was `ServerMessage::loggable` nennt. Nicht geloggt: `presence.update`,
-  `claim.overlap`, `key.wrapped`, `notify`, Antworten.
-- Ereignisse gehen an alle Verbindungen des Teams, auch die auslösende; danach die Antwort an
-  die auslösende. Gezielte Nachrichten (`ServerMessage::recipient`) gehen nur an ihren
-  Empfänger.
+- Sequence numbers per team starting at 1 (`EventLog`), with a window of the last 2048 events in memory.
+- The log position (`EventLog::position`: stream and head) is stored together with the book in
+  `relay_team_state`. On load, `EventLog::resume` continues the stream: a client exactly at the
+  stored head carries on without a snapshot, an older cursor gets `tooOld` (the
+  window exists only in memory). If the state is missing or unreadable, a new
+  stream begins (`otherStream`, snapshot).
+- **Durability rule:** no frame with a `seq` leaves the relay before a write whose
+  head covers that `seq` is durable (SQLite `synchronous = FULL`). This applies to every
+  logged event, including those that do not change the book (`member.joined`,
+  `device.removed`). Otherwise a restart would assign the same `seq` to a new event, and a
+  client would discard it as a duplicate. Test: `tests/persistence.rs`.
+- After restoring a backup, the stored stream continues. Clients that had
+  seen events after that point are ahead of the head (`ahead`) and fetch a snapshot.
+- Logged: whatever `ServerMessage::loggable` lists. Not logged: `presence.update`,
+  `claim.overlap`, `key.wrapped`, `notify`, responses.
+- Events go to all of the team's connections, including the one that triggered them; after that the response goes to
+  the triggering connection. Targeted messages (`ServerMessage::recipient`) go only to their
+  recipient.
 
-## Reservierungen
+## Reservations
 
-Regeln: `ReservationBook` des Crates ("first wins" in Ankunftsreihenfolge je Team, Frist 30 min
-nur offline mit Warnung 5 min vorher, Freigabewünsche mit 10 min Frist und Cooldown, `withdraw`,
-`force_release` für owner/admin, Rekey mit `prev` und Frist nach einer Rotation). Ereignisse der
-Zeit (`Applied::timing`) gehen auch bei abgelehnter Absicht hinaus. Präsenz zählt je Verbindung.
+Rules: the crate's `ReservationBook` ("first wins" in order of arrival per team, 30 min timeout
+only while offline with a warning 5 min before, release requests with a 10 min timeout and cooldown, `withdraw`,
+`force_release` for owner/admin, rekey with `prev` and a grace period after a rotation). Time-driven
+events (`Applied::timing`) are sent even when the intent is rejected. Presence is counted per connection.
 
-Nach jeder Operation speichert das Relay `ReservationBook::export()` (BookSnapshot v1) mit
-der Log-Position und den verschlüsselten Notizen (`note`), die es neben dem Buch hält. Beim
-Laden stellt `ReservationBook::restore(snapshot, policy, now)` alles wieder her: Holds mit
-`since`, Aktivität, Warnung, offene Freigabewünsche, Cooldowns, Epoche und Rekey-Frist. Danach
-gelten alle Halter als getrennt: die Frist jedes Holds läuft ab dem Neustart (mindestens die
-Warnzeit), und die Ereignisse des Neustarts (`Restored::events`) gehen ins Log. Hat ein Absturz
-`key.rotate` in der Datenbank schon bestätigt, das Buch aber nicht, dreht das Relay das Buch
-beim Laden auf die Epoche der Datenbank.
+After every operation the relay stores `ReservationBook::export()` (BookSnapshot v1) together with
+the log position and the encrypted notes (`note`) that it keeps next to the book. On
+load, `ReservationBook::restore(snapshot, policy, now)` restores everything: holds with
+`since`, activity, warning, open release requests, cooldowns, epoch and rekey grace period. After that
+all holders count as disconnected: the timeout of each hold runs from the restart (at least the
+warning time), and the restart's events (`Restored::events`) go into the log. If a crash
+left `key.rotate` already committed in the database but not in the book, the relay moves the book
+to the database's epoch on load.
 
 ## notify
 
-`Notify::attention` des Crates: für `task.release_requested` und `reservation.expiring`, wenn
-kein Gerät des haltenden Mitglieds im Team verbunden ist. Gezielt (nur an das Mitglied), nie
-geloggt. Je Mitglied und Team bleibt nur die neueste unzugestellte (`relay_pending_notify`,
-übersteht Neustarts); sie geht direkt nach dem nächsten `welcome` an alle Verbindungen des
-Mitglieds und wird dann gelöscht. Im Selbstbetrieb geht zusätzlich eine Hinweismail ohne Inhalt.
+The crate's `Notify::attention`: for `task.release_requested` and `reservation.expiring` when
+no device of the holding member is connected to the team. Targeted (only to the member), never
+logged. Per member and team only the newest undelivered one is kept (`relay_pending_notify`,
+survives restarts); it is sent right after the next `welcome` to all of the
+member's connections and then deleted. In self-hosting a notification email without content is also sent.
 
 ## device.remove
 
-`{holder, log}`, dedupliziert, nur mit dem signierten Eintrag `RemoveDevice` in `log`.
-`LogVerifier::admit_device_remove` prüft ihn nach der Regel des Logs (jeder ein eigenes anderes
-Gerät, der Owner jedes andere, ein Admin das Gerät eines Mitglieds; genau `holder`). Ohne gültigen
-Eintrag oder für ein Gerät, das das Log nicht kennt: `badRequest`. Danach in einer Transaktion:
-Eintrag speichern, Gerät auf die Sperrliste je Team und Holder (`relay_removed_devices`), seine
-Schlüsselpakete und `device.keys` im Team löschen. Dann `ReservationBook::remove_device`,
-`ClaimBoard::clear_device`, `memberlog.appended` und `device.removed` (beide geloggt). Ein
-Owner oder Admin sollte den Teamschlüssel rotieren.
+`{holder, log}`, deduplicated, only with the signed `RemoveDevice` entry in `log`.
+`LogVerifier::admit_device_remove` checks it against the log's rule (anyone may remove another
+device of their own, the owner any other device, an admin a member's device; exactly `holder`). Without a valid
+entry, or for a device the log does not know: `badRequest`. Then, in one transaction:
+store the entry, put the device on the block list per team and holder (`relay_removed_devices`), delete its
+key packages and `device.keys` in the team. Then `ReservationBook::remove_device`,
+`ClaimBoard::clear_device`, `memberlog.appended` and `device.removed` (both logged). An
+owner or admin should rotate the team key.
 
-**Frist des entfernten Geräts.** Die App glaubt ihre Entfernung erst, wenn sie den signierten
-Eintrag im Log geprüft hat (die Ereignisse des Relays sind nicht signiert). Deshalb schließt das
-Relay nicht sofort:
+**Grace period of the removed device.** The app only believes its removal once it has verified the signed
+entry in the log (the relay's events are not signed). That is why the
+relay does not close immediately:
 
-- Seine Verbindungen sind ab dem Eintrag keine Empfänger mehr (keine Präsenz, keine Claims, keine
-  Reservierungen, zählen nicht als Mitglied). Sie bekommen nur noch `memberlog.appended` bis zum
-  entfernenden Eintrag und ihr eigenes `device.removed`, beide ohne `seq` (das Crate erlaubt
-  geloggte Ereignisse ohne `seq`): die Ereignisse dazwischen, etwa die Freigabe seiner
-  Reservierungen, bekommt es nicht, und mit `seq` sähe die App darin eine Lücke
-  (`SessionEnd::Gap`) und bräche ab, bevor sie das Log geprüft hat.
-- Danach läuft eine Frist (`Config::removed_grace_ms`, 5 s, nicht über die Umgebung
-  einstellbar). In ihr beantwortet das Relay nur `memberlog.get`, mit Einträgen nach `after` bis
-  einschließlich dem entfernenden Eintrag (`relay_removed_devices.log_index`); spätere Einträge
-  (neue Mitglieder, Geräte, Epochen) bekommt das Gerät nie. Alles andere, auch `ping` und
-  `hello`, beantwortet es mit `err forbidden` und schreibt nichts.
-- Nach der letzten Seite (`more: false`) oder mit Ablauf der Frist: Close 4403.
-- War die Verbindung schon weg: ein späteres `hello` dieses Geräts mit gültigem Ticket bekommt
-  nur `welcome` (Stream, head, Epoche; kein Snapshot, kein Nachspiel, keine Beitrittsereignisse,
-  kein `see_member`) und dann dieselbe Frist. Gilt nur für eine Verbindung ohne anderes Team und
-  nur mit einem Ticket, das auch `ticket.renew` annähme (`ticket_age`: nicht bis zu einer
-  Entfernung des Mitglieds oder einer Rollenänderung ausgestellt); sonst `err forbidden` wie
-  bisher.
+- From the entry onward its connections are no longer recipients (no presence, no claims, no
+  reservations, they do not count as a member). They only receive `memberlog.appended` up to the
+  removing entry and their own `device.removed`, both without `seq` (the crate allows
+  logged events without `seq`): it does not get the events in between, such as the release of its
+  reservations, and with a `seq` the app would see a gap
+  (`SessionEnd::Gap`) and abort before verifying the log.
+- After that a grace period runs (`Config::removed_grace_ms`, 5 s, not configurable through the
+  environment). During it the relay only answers `memberlog.get`, with entries after `after` up to
+  and including the removing entry (`relay_removed_devices.log_index`); the device never gets later entries
+  (new members, devices, epochs). Everything else, including `ping` and
+  `hello`, is answered with `err forbidden` and nothing is written.
+- After the last page (`more: false`) or when the grace period ends: close 4403.
+- If the connection was already gone: a later `hello` from this device with a valid ticket gets
+  only `welcome` (stream, head, epoch; no snapshot, no replay, no join events,
+  no `see_member`) and then the same grace period. This applies only to a connection without another team and
+  only with a ticket that `ticket.renew` would also accept (`ticket_age`: not issued up to a
+  removal of the member or a role change); otherwise `err forbidden` as
+  before.
 
-Die App prüft das Log, verwirft ihre Teamidentität und meldet sich mit einer neuen Geräte-ID
-an.
+The app verifies the log, discards its team identity and signs in with a new device ID.
 
 ## Claims
 
-`ClaimBoard` des Crates: Hashes `{area, file}` je Datei, `sameFile` bei gleichem Datei-Hash
-(mit dem verschlüsselten `detail` der Gegenseite), `sameArea` bei gleichem Bereich; nur gleiches
-`repo` und gleiche Epoche, nie zwei Sitzungen desselben Holders. Claims liegen nur im Speicher
-(je Team 2000 Sitzungen, je Gerät 64), bleiben nach Trennung 24 h und verfallen dann; beim
-Austritt `clear_member`, beim Entfernen eines Geräts `clear_device`. Bewusst nicht gespeichert:
-nach einem Neustart ist das Board leer, und jeder Client sendet `claim.set` seiner Sitzungen nach
-jedem `welcome` erneut.
+The crate's `ClaimBoard`: hashes `{area, file}` per file, `sameFile` for an identical file hash
+(with the other side's encrypted `detail`), `sameArea` for an identical area; only for the same
+`repo` and the same epoch, never two sessions of the same holder. Claims exist only in memory
+(2000 sessions per team, 64 per device), remain for 24 h after a disconnect and then expire; on
+leaving, `clear_member`, on removing a device, `clear_device`. Deliberately not persisted:
+after a restart the board is empty, and every client resends `claim.set` for its sessions after
+every `welcome`.
 
-## E2E-Unterbau
+## E2E foundation
 
-Das Relay hält je Team einen `memberlog::LogVerifier` (hangar-team-crypto). Nach einem Neustart
-baut es ihn mit `apply_all` aus den gespeicherten Einträgen neu auf. Jede Prüfung läuft auf einer
-Kopie des Verifiers; erst wenn die Datenbank den Eintrag geschrieben hat, ersetzt die Kopie das
-Original. Ein abgelehnter Eintrag ändert also nichts und blockiert das Log nicht: der nächste
-gültige Eintrag am selben Index geht durch.
+The relay keeps one `memberlog::LogVerifier` (hangar-team-crypto) per team. After a restart
+it rebuilds it with `apply_all` from the stored entries. Every check runs on a
+copy of the verifier; only once the database has written the entry does the copy replace the
+original. A rejected entry therefore changes nothing and does not block the log: the next
+valid entry at the same index goes through.
 
-**Wirksame Rolle** ist die niedrigere aus Log-Rolle und Rolle des Tickets der Verbindung: eine
-Herabstufung auf der Webseite wirkt sofort, auch wenn das Log sie noch nicht kennt.
+The **effective role** is the lower of the log role and the role in the connection's ticket: a
+downgrade on the website takes effect immediately, even if the log does not know about it yet.
 
-- `device.keys` `{sign, kem, proof}`: Schlüssel und Besitznachweis je Team und Holder
-  (`relay_device_keys`). Höchstens `limits::MAX_DEVICES_PER_MEMBER` (16) Geräte je Mitglied und
-  `MAX_WRAPPED_KEYS` (512) je Team, sonst `limit`. `devices.get` listet sie samt Nachweis.
-- `memberlog.append`: erst `relay::check_registered_keys` (jedes Gerät, das der Eintrag
-  aufnimmt, trägt genau die Schlüssel, die dieser Holder über seine eigene Verbindung gesendet
-  hat; sonst `forbidden`), dann `LogVerifier::admit(append, sender, ticket_role)` (Signatur des
-  sendenden Geräts, Rechte je Art, Team, Index, `prev`, Gerätegrenzen). Eintrag 1 nur mit
-  owner-Ticket. Rotation und Geräteentfernung über diesen Weg: `badRequest`. Nimmt der Eintrag
-  Geräte heraus (Mitglied entfernt, `Admitted::removed`), werden sie in derselben Transaktion
-  gesperrt und ihre Pakete gelöscht, dann `device.removed` und die Frist der entfernten Geräte
-  (siehe `device.remove`). Ablehnungen antworten mit `LogError::code()`. `memberlog.get`
-  antwortet mit `MemberLogEntries::page`.
-- `key.rotate` `{epoch, log, wrapped}`: `e2e::check_rotate`, dann
-  `LogVerifier::admit_rotation` (Eintrag gültig, seine Epoche gleich `epoch` und die nächste des
-  Logs, jedes Paket an ein anderes Gerät des Logs). Eintrag, Epoche und alle Pakete in einer
-  Transaktion oder nichts; dann `memberlog.appended` und `key.rotated` (geloggt, jedes Gerät mit
-  nur seinem Paket aus der Rotation).
-- `key.wrap`: `check_epoch`, dann `relay::check_wrap(state, ticket_role, sender, wrap,
-  stored_from)`: Absender und Ziel Geräte des Logs, owner/admin für jedes andere Gerät, ein
-  Mitglied nur für ein eigenes anderes (`forbidden`), unbekanntes Ziel `notFound`, je Absender,
-  Ziel und Epoche ein Paket (`conflict`), höchstens `limits::MAX_KEY_PACKAGES` (4) je Ziel und
-  Epoche, das der Rotation eingeschlossen (`limit`), nie ersetzt. Das Zielgerät bekommt
-  `key.wrapped` (nicht geloggt). Pakete liegen je (Ziel, Epoche, Absender) mit ihrer Reihenfolge.
-- `key.get`: alle gespeicherten Pakete des eigenen Geräts für die Epoche in `ack.keys`, in
-  Reihenfolge des Eintreffens; keines: `notFound`. Das Gerät probiert jedes gegen die
-  Festlegung (Commitment) der Epoche.
+- `device.keys` `{sign, kem, proof}`: keys and proof of possession per team and holder
+  (`relay_device_keys`). At most `limits::MAX_DEVICES_PER_MEMBER` (16) devices per member and
+  `MAX_WRAPPED_KEYS` (512) per team, otherwise `limit`. `devices.get` lists them including the proof.
+- `memberlog.append`: first `relay::check_registered_keys` (every device the entry
+  adds carries exactly the keys this holder sent over its own connection;
+  otherwise `forbidden`), then `LogVerifier::admit(append, sender, ticket_role)` (signature of the
+  sending device, permissions per kind, team, index, `prev`, device limits). Entry 1 only with an
+  owner ticket. Rotation and device removal through this path: `badRequest`. If the entry removes
+  devices (member removed, `Admitted::removed`), they are blocked in the same transaction
+  and their packages deleted, then `device.removed` and the grace period of the removed devices
+  (see `device.remove`). Rejections answer with `LogError::code()`. `memberlog.get`
+  answers with `MemberLogEntries::page`.
+- `key.rotate` `{epoch, log, wrapped}`: `e2e::check_rotate`, then
+  `LogVerifier::admit_rotation` (entry valid, its epoch equal to `epoch` and the log's next one,
+  each package addressed to a different device of the log). Entry, epoch and all packages in one
+  transaction or nothing; then `memberlog.appended` and `key.rotated` (logged, each device with
+  only its own package from the rotation).
+- `key.wrap`: `check_epoch`, then `relay::check_wrap(state, ticket_role, sender, wrap,
+  stored_from)`: sender and target are devices of the log, owner/admin for any other device, a
+  member only for another device of their own (`forbidden`), unknown target `notFound`, one package per sender,
+  target and epoch (`conflict`), at most `limits::MAX_KEY_PACKAGES` (4) per target and
+  epoch, including the one from the rotation (`limit`), never replaced. The target device receives
+  `key.wrapped` (not logged). Packages are stored per (target, epoch, sender) along with their order.
+- `key.get`: all stored packages of the requesting device for the epoch in `ack.keys`, in
+  order of arrival; none: `notFound`. The device tries each one against the epoch's
+  commitment.
 
-## Widerrufsliste (offizieller Betrieb)
+## Revocation list (official mode)
 
-[revocation-format.md](revocation-format.md): das Relay holt alle 15 s signierte Widerrufe der
-Webseite und wendet sie auf laufende Verbindungen an.
+[revocation-format.md](revocation-format.md): every 15 s the relay fetches signed revocations from the
+website and applies them to live connections.
 
-## Fehlercodes
+## Error codes
 
 `conflict`, `limit`, `forbidden`, `rateLimited`, `outdatedClient`, `staleEpoch`, `badRequest`,
-`notFound`. Fehlertexte enthalten nie Inhalte des Rahmens.
+`notFound`. Error texts never contain frame content.
 
-## HTTP neben dem Live-Kanal
+## HTTP alongside the live channel
 
-- `GET /health`: `{"status":"ok","version":...}` oder 503.
-- Nur Selbstbetrieb: Konto-API der App unter `/api/v1` (Device Flow, Widerruf, Konto,
-  Projekte, `relay-ticket`), gleich der Webseite: [account-api.md](account-api.md). Die App
-  braucht damit nur die Basis `<PUBLIC_URL>/api/v1`; die Adresse dieses Live-Kanals steht im
-  Ticket (`relay_url`, `ws`/`wss` aus `PUBLIC_URL`). Verwaltung (Teams, Einladungen, Lizenz)
-  unter `/v1/...`, siehe http-api.md.
+- `GET /health`: `{"status":"ok","version":...}` or 503.
+- Self-hosting only: the app's account API under `/api/v1` (device flow, revocation, account,
+  projects, `relay-ticket`), identical to the website: [account-api.md](account-api.md). This way the app
+  only needs the base `<PUBLIC_URL>/api/v1`; the address of this live channel is in the
+  ticket (`relay_url`, `ws`/`wss` derived from `PUBLIC_URL`). Administration (teams, invitations, license)
+  under `/v1/...`, see [http-api.md](http-api.md).

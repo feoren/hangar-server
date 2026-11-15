@@ -1,7 +1,7 @@
-//! Konto-API der App unter `/api/v1` im Selbstbetrieb: dieselben Pfade, Eingaben (JSON und
-//! Formular) und Antworten wie auf der Webseite. Device Flow, Rotation, Widerruf nach RFC 7009,
-//! Konto, Projekte, Tickets bis zur Live-Verbindung, Fehler als problem+json, die Geräteseite
-//! im Browser und das Fehlen der Routen im offiziellen Betrieb.
+//! The app's account API under `/api/v1` when self-hosting: the same paths, inputs (JSON and
+//! form) and responses as on the website. Device flow, rotation, RFC 7009 revocation, account,
+//! projects, tickets up to the live connection, errors as problem+json, the devices page in the
+//! browser and the absence of these routes in official mode.
 
 mod common;
 
@@ -43,7 +43,7 @@ impl Resp {
             .and_then(|v| v.split(';').next())
             .map(str::to_owned)
     }
-    /// RFC 9457 mit dem erwarteten Code; bei OAuth-Fehlern auch `error`.
+    /// RFC 9457 with the expected code; for OAuth errors also `error`.
     fn problem(&self, status: StatusCode, code: &str) -> Value {
         assert_eq!(self.status, status, "{}", self.body);
         assert!(
@@ -143,7 +143,7 @@ fn local() -> Config {
     Config::for_tests(IdentityMode::Local, KeySet::default())
 }
 
-/// Browsersitzung über einen Admin-Anmeldelink; gibt das Cookie zurück.
+/// Browser session via an admin magic link; returns the cookie.
 async fn browser(s: &TestServer, email: &str) -> String {
     let app = &s.server.router;
     let link = hangar_team_server::identity::auth::admin_login_link(
@@ -162,10 +162,10 @@ async fn browser(s: &TestServer, email: &str) -> String {
     )
     .await;
     assert_eq!(signed_in.status, StatusCode::SEE_OTHER);
-    signed_in.cookie().expect("Sitzungscookie")
+    signed_in.cookie().expect("session cookie")
 }
 
-/// Bestätigt `user_code` auf `/device` und prüft, dass Name und Plattform dort stehen.
+/// Approves `user_code` on `/device` and checks that name and platform are shown there.
 async fn approve(app: &Router, cookie: &str, user_code: &str, shown: &str) {
     let page = call(
         app,
@@ -193,8 +193,8 @@ async fn approve(app: &Router, cookie: &str, user_code: &str, shown: &str) {
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
 }
 
-/// Device Flow der App über `/api/v1` mit JSON, wie `AccountApi` ihn sendet. Gibt Zugriffs- und
-/// Erneuerungstoken und das Browsercookie zurück.
+/// The app's device flow via `/api/v1` with JSON, as `AccountApi` sends it. Returns the access
+/// token, the refresh token and the browser cookie.
 async fn app_login(s: &TestServer, email: &str, device: &str) -> (String, String, String) {
     let app = &s.server.router;
     let started = call(
@@ -245,7 +245,7 @@ async fn app_login(s: &TestServer, email: &str, device: &str) -> (String, String
     assert_eq!(tokens["token_type"], "Bearer");
     assert_eq!(tokens["scope"], "team");
     assert!(tokens["expires_in"].as_i64().unwrap() > 0);
-    // Ein zweites Mal gilt der Gerätecode nicht.
+    // The device code is not valid a second time.
     poll().await.oauth("invalid_grant");
     (
         tokens["access_token"].as_str().unwrap().to_owned(),
@@ -268,7 +268,7 @@ async fn create_team(app: &Router, access: &str, name: &str) -> String {
 }
 
 #[tokio::test]
-async fn gerätestart_nimmt_json_und_formular_und_prüft_eingaben() {
+async fn device_start_accepts_json_and_form_and_validates_input() {
     let s = start(local()).await;
     let app = &s.server.router;
     let path = "/api/v1/oauth/device";
@@ -286,7 +286,7 @@ async fn gerätestart_nimmt_json_und_formular_und_prüft_eingaben() {
     .await;
     assert_eq!(form.status, StatusCode::OK, "{}", form.body);
     assert!(form.json()["device_code"].is_string());
-    // `hangar` bleibt erlaubt (alte Clients und Skripte), ohne scope ebenso.
+    // `hangar` stays allowed (old clients and scripts), as does omitting scope.
     let old = call(
         app,
         "POST",
@@ -302,7 +302,7 @@ async fn gerätestart_nimmt_json_und_formular_und_prüft_eingaben() {
         "POST",
         path,
         &[],
-        In::Json(json!({ "client_id": "fremd" })),
+        In::Json(json!({ "client_id": "foreign" })),
     )
     .await
     .oauth("invalid_client");
@@ -349,14 +349,14 @@ async fn gerätestart_nimmt_json_und_formular_und_prüft_eingaben() {
     .await
     .problem(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
 
-    // Andere Methoden: 405 mit Allow; unbekannte Pfade: 404, beides als problem+json.
+    // Other methods: 405 with Allow; unknown paths: 404, both as problem+json.
     let wrong = call(app, "GET", path, &[], In::None).await;
     wrong.problem(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     assert_eq!(wrong.header("allow"), "POST");
-    call(app, "GET", "/api/v1/gibt-es-nicht", &[], In::None)
+    call(app, "GET", "/api/v1/does-not-exist", &[], In::None)
         .await
         .problem(StatusCode::NOT_FOUND, "not_found");
-    // Fremder Origin (Browser einer anderen Seite): 403, auch hier als problem+json.
+    // Foreign origin (browser on another site): 403, again as problem+json.
     call(
         app,
         "POST",
@@ -369,7 +369,7 @@ async fn gerätestart_nimmt_json_und_formular_und_prüft_eingaben() {
 }
 
 #[tokio::test]
-async fn token_endpunkt_mit_json_und_formular_und_oauth_fehlern() {
+async fn token_endpoint_with_json_and_form_and_oauth_errors() {
     let s = start(local()).await;
     let app = &s.server.router;
     let path = "/api/v1/oauth/token";
@@ -380,7 +380,7 @@ async fn token_endpunkt_mit_json_und_formular_und_oauth_fehlern() {
         &[],
         pairs(&[
             ("grant_type", DEVICE_GRANT),
-            ("device_code", "unbekannt"),
+            ("device_code", "unknown"),
             ("client_id", "hangar-desktop"),
         ]),
     )
@@ -414,7 +414,7 @@ async fn token_endpunkt_mit_json_und_formular_und_oauth_fehlern() {
     .await
     .oauth("invalid_client");
 
-    // Rotation über das Formular, Wiederverwendung des alten Tokens beendet die Sitzung.
+    // Rotation via the form; reusing the old token ends the session.
     let (access, refresh, _) = app_login(&s, "a@example.org", "Laptop").await;
     let rotated = call(
         app,
@@ -464,19 +464,19 @@ async fn token_endpunkt_mit_json_und_formular_und_oauth_fehlern() {
 }
 
 #[tokio::test]
-async fn widerruf_beendet_die_ganze_gerätesitzung() {
+async fn revocation_ends_the_whole_device_session() {
     let s = start(local()).await;
     let app = &s.server.router;
     let path = "/api/v1/oauth/revoke";
     let (access, refresh, _) = app_login(&s, "a@example.org", "Laptop").await;
 
-    // Fehlerhafte Anfragen: falscher Client, fehlendes Token, unbekannter Hinweis.
+    // Malformed requests: wrong client, missing token, unknown hint.
     call(
         app,
         "POST",
         path,
         &[],
-        pairs(&[("token", &refresh), ("client_id", "fremd")]),
+        pairs(&[("token", &refresh), ("client_id", "foreign")]),
     )
     .await
     .oauth("invalid_client");
@@ -503,14 +503,14 @@ async fn widerruf_beendet_die_ganze_gerätesitzung() {
     .await
     .oauth("invalid_request");
 
-    // Unbekanntes Token: 200 ohne Körper, keine Auskunft.
+    // Unknown token: 200 without a body, no information disclosed.
     let unknown = call(
         app,
         "POST",
         path,
         &[],
         pairs(&[
-            ("token", "hgrt_unbekannt"),
+            ("token", "hgrt_unknown"),
             ("token_type_hint", "refresh_token"),
             ("client_id", "hangar-desktop"),
         ]),
@@ -519,7 +519,7 @@ async fn widerruf_beendet_die_ganze_gerätesitzung() {
     assert_eq!(unknown.status, StatusCode::OK);
     assert!(unknown.body.is_empty());
 
-    // Wie die App: Formular mit dem Erneuerungstoken.
+    // Like the app: form with the refresh token.
     let revoked = call(
         app,
         "POST",
@@ -556,7 +556,7 @@ async fn widerruf_beendet_die_ganze_gerätesitzung() {
     )
     .await
     .oauth("invalid_grant");
-    // Ein zweites Mal: weiterhin 200.
+    // A second time: still 200.
     assert_eq!(
         call(
             app,
@@ -570,7 +570,7 @@ async fn widerruf_beendet_die_ganze_gerätesitzung() {
         StatusCode::OK
     );
 
-    // Ein Zugriffstoken (JSON) beendet nur sich selbst; das Erneuerungstoken gilt weiter.
+    // An access token (JSON) only ends itself; the refresh token stays valid.
     let (access, refresh, _) = app_login(&s, "a@example.org", "Desktop").await;
     let only_access = call(
         app,
@@ -610,12 +610,12 @@ async fn widerruf_beendet_die_ganze_gerätesitzung() {
 }
 
 #[tokio::test]
-async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
+async fn account_projects_and_ticket_up_to_the_live_connection() {
     let s = start(local()).await;
     let app = &s.server.router;
 
-    // Ohne oder mit falschem Bearer: 401 mit WWW-Authenticate.
-    for headers in [vec![], vec![("authorization", "Bearer falsch")]] {
+    // Without or with a wrong bearer: 401 with WWW-Authenticate.
+    for headers in [vec![], vec![("authorization", "Bearer wrong")]] {
         for (method, path) in [
             ("GET", "/api/v1/me"),
             ("GET", "/api/v1/projects"),
@@ -650,7 +650,7 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
     .await;
     assert_eq!(me.status, StatusCode::OK, "{}", me.body);
     let me = me.json();
-    assert!(me["id"].is_string(), "IDs als Zeichenketten");
+    assert!(me["id"].is_string(), "IDs as strings");
     assert_eq!(me["email"], "owner@example.org");
     assert_eq!(me["locale"], "en");
     assert_eq!(me["seats_account_total"], 3);
@@ -690,7 +690,7 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
         }]})
     );
 
-    // Einladen und annehmen: das Mitglied sieht keine offenen Einladungen.
+    // Invite and accept: the member sees no pending invitations.
     let (member, _, _) = app_login(&s, "member@example.org", "Desktop").await;
     let invited = call(
         app,
@@ -698,7 +698,7 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
         &format!("/v1/teams/{team}/invitations"),
         &[("authorization", &auth)],
         In::Json(
-            json!({ "emails": ["member@example.org", "offen@example.org"], "role": "member" }),
+            json!({ "emails": ["member@example.org", "pending@example.org"], "role": "member" }),
         ),
     )
     .await;
@@ -729,7 +729,7 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
     assert_eq!(project["role"], "member");
     assert_eq!(project["seats_account_used"], 2);
     assert!(project.get("pending_invitations").is_none(), "{project}");
-    assert!(project.get("invite_url").is_none(), "keine Einladeseite");
+    assert!(project.get("invite_url").is_none(), "no invitation page");
     let owner_view = call(
         app,
         "GET",
@@ -741,7 +741,7 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
     .json();
     assert_eq!(owner_view["projects"][0]["pending_invitations"], 1);
 
-    // Ticket als JSON und als Formular.
+    // Ticket as JSON and as form.
     let ticket = call(
         app,
         "POST",
@@ -782,9 +782,9 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
         "{welcome:?}"
     );
 
-    // Fremde und unbekannte Teams: 404; ohne project_id: 400.
-    let (stranger, _, _) = app_login(&s, "fremd@example.org", "Tablet").await;
-    for (token, project) in [(&stranger, team.as_str()), (&owner, "t_gibtesnicht")] {
+    // Foreign and unknown teams: 404; without project_id: 400.
+    let (stranger, _, _) = app_login(&s, "stranger@example.org", "Tablet").await;
+    for (token, project) in [(&stranger, team.as_str()), (&owner, "t_doesnotexist")] {
         call(
             app,
             "POST",
@@ -805,7 +805,7 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
     .await
     .problem(StatusCode::BAD_REQUEST, "invalid_request");
 
-    // Öffentlicher Ticketschlüssel, cachebar.
+    // Public ticket key, cacheable.
     let keys = call(app, "GET", "/api/v1/keys", &[], In::None).await;
     assert_eq!(keys.status, StatusCode::OK);
     assert_eq!(keys.header("cache-control"), "public, max-age=3600");
@@ -819,14 +819,14 @@ async fn konto_projekte_und_ticket_bis_zur_live_verbindung() {
 }
 
 #[tokio::test]
-async fn geräteseite_listet_und_trennt_geräte() {
+async fn devices_page_lists_and_disconnects_devices() {
     let s = start(local()).await;
     let app = &s.server.router;
     let anonymous = call(app, "GET", "/account/devices", &[], In::None).await;
     assert_eq!(anonymous.status, StatusCode::OK);
     assert!(
         !anonymous.body.contains("csrf"),
-        "ohne Anmeldung keine Liste"
+        "no list without signing in"
     );
 
     let (access, _, cookie) = app_login(&s, "a@example.org", "Laptop").await;
@@ -840,7 +840,10 @@ async fn geräteseite_listet_und_trennt_geräte() {
     .await;
     assert_eq!(page.status, StatusCode::OK);
     assert!(page.body.contains("Laptop (windows)"), "{}", page.body);
-    assert!(!page.body.contains(">Browser<"), "Browsersitzungen fehlen");
+    assert!(
+        !page.body.contains(">Browser<"),
+        "browser sessions are not listed"
+    );
     let csrf = between(&page.body, r#"name="csrf" value=""#, "\"").to_owned();
     let session = between(&page.body, r#"name="session" value=""#, "\"").to_owned();
 
@@ -849,7 +852,7 @@ async fn geräteseite_listet_und_trennt_geräte() {
         "POST",
         "/account/devices",
         &[("cookie", &cookie), ("origin", ORIGIN)],
-        pairs(&[("csrf", "falsch"), ("session", &session)]),
+        pairs(&[("csrf", "wrong"), ("session", &session)]),
     )
     .await;
     assert_eq!(forged.status, StatusCode::FORBIDDEN);
@@ -900,7 +903,7 @@ async fn geräteseite_listet_und_trennt_geräte() {
     )
     .await;
     assert_eq!(again.status, StatusCode::NOT_FOUND);
-    // Ohne Sitzungsfeld: dieselbe Seite "nicht gefunden", keine Rohantwort des Extraktors.
+    // Without the session field: the same "not found" page, no raw extractor response.
     let missing = call(
         app,
         "POST",
@@ -914,7 +917,7 @@ async fn geräteseite_listet_und_trennt_geräte() {
 }
 
 #[tokio::test]
-async fn ratenbegrenzung_gilt_für_gerätestart_und_widerruf() {
+async fn rate_limit_applies_to_device_start_and_revocation() {
     let s = start(local()).await;
     let app = &s.server.router;
     let mut last = None;
@@ -953,7 +956,7 @@ async fn ratenbegrenzung_gilt_für_gerätestart_und_widerruf() {
 }
 
 #[tokio::test]
-async fn offizieller_betrieb_bietet_die_konto_api_nicht_an() {
+async fn official_mode_does_not_offer_the_account_api() {
     let s = start_official().await;
     let app = &s.server.router;
     for (method, path) in [
@@ -979,8 +982,8 @@ async fn offizieller_betrieb_bietet_die_konto_api_nicht_an() {
 }
 
 #[tokio::test]
-async fn startseite_leitet_mit_root_redirect_weiter() {
-    // Ohne ROOT_REDIRECT bleibt `/` ein 404.
+async fn root_page_redirects_with_root_redirect() {
+    // Without ROOT_REDIRECT, `/` stays a 404.
     let s = start_official().await;
     let r = call(&s.server.router, "GET", "/", &[], In::None).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
@@ -995,13 +998,13 @@ async fn startseite_leitet_mit_root_redirect_weiter() {
         r.headers.get("location").and_then(|v| v.to_str().ok()),
         Some("https://hangar.feoren.com/")
     );
-    // Nur die Startseite: andere Pfade und der Zustand bleiben, wie sie sind.
+    // Only the root page: other paths and the state stay as they are.
     assert_eq!(
         call(app, "GET", "/health", &[], In::None).await.status,
         StatusCode::OK
     );
     assert_eq!(
-        call(app, "GET", "/irgendwas", &[], In::None).await.status,
+        call(app, "GET", "/anything", &[], In::None).await.status,
         StatusCode::NOT_FOUND
     );
 }

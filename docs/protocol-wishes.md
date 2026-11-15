@@ -1,73 +1,73 @@
-# Wünsche an das Protokoll-Crate der App
+# Requests to the app's protocol crate
 
-Für die App-Sitzung, die `hangar-team-protocol` und `hangar-team-crypto` pflegt. Der
-Teamserver nutzt beide als unveränderte Kopien aus `79c68ca` (`vendor/`, siehe entwicklung.md);
-`src/wire.rs` reicht nur noch Namen weiter. Die früheren Wünsche (E2E-Nachrichten, `member.role_changed`,
-`offline`, `ticket.renew`, Close-Codes, Rechte-Helfer, `key.wrapped`, Holder in `WrappedKey`) hat
-das Crate umgesetzt. Nach b30b9d5 offen gebliebene Fragen, mit der App-Sitzung am 2026-11-09
-entschieden:
+For the app session that maintains `hangar-team-protocol` and `hangar-team-crypto`. The
+team server uses both as unmodified copies from `79c68ca` (`vendor/`, see [development.md](development.md));
+`src/wire.rs` only re-exports names. The earlier requests (E2E messages, `member.role_changed`,
+`offline`, `ticket.renew`, close codes, permission helpers, `key.wrapped`, holder in `WrappedKey`) have
+been implemented by the crate. Questions left open after b30b9d5, decided together with the app session on
+2026-11-09:
 
-- **Rotation mit unvollständigen Paketen:** bleibt erlaubt. Eine Pflicht zur Vollständigkeit
-  ließe ein defektes oder böswilliges Geräteschlüssel jede Rotation blockieren. Geräte ohne
-  Paket bekommen es später per `key.wrap` von owner/admin oder einem Gerät desselben Mitglieds;
-  die App meldet `Rotation::failed` der Person, die rotiert hat.
-- **Gesperrte Geräte nach `RemoveMember`:** die Sperre bleibt dauerhaft. Bei Wiederaufnahme legt
-  die App immer eine neue Geräteidentität (neue ID, neue Schlüssel) an; eine aufgehobene Sperre
-  würde alte, womöglich verlorene Geräte wieder hereinlassen. Auf 4403 verwirft die App die
-  Teamidentität dieses Projekts.
+- **Rotation with incomplete packages:** remains allowed. Requiring completeness
+  would let a defective or malicious device key block every rotation. Devices without a
+  package get one later via `key.wrap` from owner/admin or a device of the same member;
+  the app reports `Rotation::failed` to the person who rotated.
+- **Blocked devices after `RemoveMember`:** the block is permanent. On readmission the
+  app always creates a new device identity (new ID, new keys); lifting the block
+  would let old, possibly lost devices back in. On 4403 the app discards the
+  team identity for that project.
 
-Aus dem Interop-Lauf mit der App (2026-11-09):
+From the interop run with the app (2026-11-09):
 
-- **Übergabe (`task.release_answer` mit `accept`) und Notiz:** erledigt. Die neue Reservierung
-  trägt `note: None`, gesendet wie gespeichert, also auch im Snapshot. Die Notiz des Wunsches
-  ist eine `ReleaseRequestNote` des Anfragenden; als `task.reserved.note` öffnete die App sie als
-  `ReservationNote` mit dem Halter als Absender, und der Signaturkontext passte nicht. Der neue
-  Halter sendet seine eigene Notiz danach per `task.reserve` (das Relay meldet sie mit
-  `task.reserved`). Damit ist auch der Wunsch "Übergabe mit Notiz des neuen Halters" erledigt.
-- **`task.release_requested.requester` als vollständiger Holder:** offen. Heute nur `MemberId`;
-  die App liefert die Protokollfelder später im Crate.
+- **Handover (`task.release_answer` with `accept`) and note:** done. The new reservation
+  carries `note: None`, sent as stored, so also in the snapshot. The request's note
+  is a `ReleaseRequestNote` from the requester; as `task.reserved.note` the app opened it as a
+  `ReservationNote` with the holder as sender, and the signature context did not match. The new
+  holder then sends their own note via `task.reserve` (the relay announces it with
+  `task.reserved`). This also settles the request "handover with the new holder's note".
+- **`task.release_requested.requester` as a full holder:** open. Currently only `MemberId`;
+  the app will provide the protocol fields in the crate later.
 
-Frühere Wünsche (Verlauf, umgesetzt):
+Earlier requests (history, implemented):
 
-Stand 525a8c7: Wünsche 1 bis 5 unten sind umgesetzt (export/restore, `EventLog::position`,
-`notify` mit Empfänger, `CLOSE_TEAM_DELETED`, `device.remove`, Beschreibung von
-`CLOSE_ROLE_CHANGED`) und im Relay angeschlossen. Der Text bleibt als Verlauf.
+As of 525a8c7: requests 1 to 5 below are implemented (export/restore, `EventLog::position`,
+`notify` with recipient, `CLOSE_TEAM_DELETED`, `device.remove`, description of
+`CLOSE_ROLE_CHANGED`) and wired up in the relay. The text remains as history.
 
-## 1. Reservierungen über einen Neustart
+## 1. Reservations across a restart
 
-`ReservationBook` hat keine Möglichkeit, gespeicherte Holds wiederherzustellen (kein `serde`,
-kein `restore`). Der Server speichert je gehaltener Aufgabe nur Halter, Epoche und Notiz und
-reserviert sie beim Laden neu (`Intent::Reserve` zur aktuellen Epoche). Folgen: `since` und die
-Frist beginnen neu, offene Freigabewünsche, Cooldowns und Holds einer älteren Epoche
-(Rekey-Frist) gehen verloren. Damit Clients keinem veralteten Zustand trauen, beginnt jedes
-Laden einen neuen `stream` (Snapshot statt Nachspielen).
+`ReservationBook` has no way to restore stored holds (no `serde`,
+no `restore`). For each held task the server stores only holder, epoch and note and
+reserves it again on load (`Intent::Reserve` at the current epoch). Consequences: `since` and the
+timeout start over; open release requests, cooldowns and holds from an older epoch
+(rekey grace period) are lost. So that clients do not trust stale state, every
+load begins a new `stream` (snapshot instead of replay).
 
-Wunsch: `ReservationBook::export()` und `ReservationBook::restore(...)` (oder `Serialize`/
-`Deserialize` für `Reservation`), damit ein Neustart nichts verliert; dann kann der Server auch
-`EventLog::resume` mit gespeichertem `head` nutzen.
+Request: `ReservationBook::export()` and `ReservationBook::restore(...)` (or `Serialize`/
+`Deserialize` for `Reservation`), so that a restart loses nothing; then the server can also
+use `EventLog::resume` with a stored `head`.
 
 ## 2. `notify`
 
-`Notify` hat keinen Empfänger. Ein geloggtes Ereignis geht an alle Geräte des Teams, gemeint ist
-aber nur der Halter. Der Server erzeugt `notify` deshalb noch nicht (im Selbstbetrieb geht eine
-Hinweismail ohne Inhalt). Wunsch: ein Feld `member` (Empfänger) oder eine gezielte, nicht
-geloggte Variante wie `key.wrapped`.
+`Notify` has no recipient. A logged event goes to all devices of the team, but it is meant
+only for the holder. The server therefore does not generate `notify` yet (in self-hosting a
+notification email without content is sent). Request: a `member` field (recipient) or a targeted,
+non-logged variant like `key.wrapped`.
 
-## 3. Close-Code für ein gelöschtes Team
+## 3. Close code for a deleted team
 
-Der Server schließt bei gelöschtem Team (`project_deleted` der Widerrufsliste, Selbstbetrieb)
-mit 4404. Das Crate kennt den Code nicht. Wunsch: `CLOSE_TEAM_DELETED = 4404` im Modul `close`.
+The server closes with 4404 when a team is deleted (`project_deleted` in the revocation list, self-hosting).
+The crate does not know this code. Request: `CLOSE_TEAM_DELETED = 4404` in the `close` module.
 
-## 4. Gerät entfernen
+## 4. Removing a device
 
-`ReservationBook::remove_device` und `ClaimBoard::clear_device` sind angeschlossen
-(`Relay::remove_device`), aber keine Nachricht entfernt ein Gerät. Wunsch: festlegen, woraus das
-Relay das erfährt (eigene Absicht `device.remove` für owner/admin, oder die Widerrufsliste der
-Webseite mit einer Art `device_removed`).
+`ReservationBook::remove_device` and `ClaimBoard::clear_device` are wired up
+(`Relay::remove_device`), but no message removes a device. Request: define where the
+relay learns about it (a dedicated `device.remove` intent for owner/admin, or the website's revocation
+list with a kind such as `device_removed`).
 
-## 5. Rollenwechsel ohne Trennung
+## 5. Role change without disconnecting
 
-Festlegung des Koordinators (2026-11-09): Rollenänderungen gelten auf der laufenden Verbindung
-still, aus `ticket.renew` und aus der Widerrufsliste (`role_changed` mit `role`);
-`member.role_changed` meldet sie. 4401 (`CLOSE_ROLE_CHANGED`) nur, wenn die neue Rolle unbekannt
-ist. Bitte die Beschreibung von `CLOSE_ROLE_CHANGED` im Crate daran angleichen.
+Decision by the coordinator (2026-11-09): role changes apply silently on the live connection,
+from `ticket.renew` and from the revocation list (`role_changed` with `role`);
+`member.role_changed` announces them. 4401 (`CLOSE_ROLE_CHANGED`) only when the new role is unknown.
+Please align the description of `CLOSE_ROLE_CHANGED` in the crate with this.

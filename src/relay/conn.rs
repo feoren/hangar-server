@@ -1,13 +1,13 @@
-//! Eine WebSocket-Verbindung: der einzige Live-Kanal. Ping alle 25 s, Trennung nach 60 s ohne
-//! Lebenszeichen, `hello` binnen 15 s, Ratenbegrenzung je Verbindung, Grenzen je Mitglied und
-//! je Client-Adresse, Höchstalter (danach neues Ticket nötig).
+//! One WebSocket connection: the only live channel. Ping every 25 s, disconnect after 60 s
+//! without a sign of life, `hello` within 15 s, rate limiting per connection, limits per member
+//! and per client address, maximum age (a new ticket is needed afterwards).
 //!
-//! Ein entferntes Gerät (`device.removed`, oder sein `hello` nach der Sperre) bekommt eine kurze
-//! Frist (`Relay::removed_grace`, Vorgabe 5 s), in der die Verbindung nur noch `memberlog.get`
-//! beantwortet bekommt, mit Einträgen bis zu dem, der es entfernte; alles andere wird mit
-//! `err forbidden` abgelehnt und schreibt nichts. Nach der letzten Seite oder mit Ablauf der Frist
-//! Close 4403. So prüft die App ihre Entfernung am signierten Eintrag und kommt mit einer neuen
-//! Geräte-ID zurück.
+//! A removed device (`device.removed`, or its `hello` after the block) gets a short grace period
+//! (`Relay::removed_grace`, default 5 s) during which the connection only gets answers to
+//! `memberlog.get`, with entries up to the one that removed it; everything else is rejected with
+//! `err forbidden` and writes nothing. After the last page or when the grace period expires,
+//! close 4403. This way the app verifies its removal against the signed entry and comes back with
+//! a new device ID.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,15 +31,15 @@ use crate::wire::{
 
 pub const PING_INTERVAL: Duration = Duration::from_secs(25);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Ausgehende Rahmen je Verbindung, bevor sie als zu langsam gilt.
+/// Outgoing frames per connection before it counts as too slow.
 const QUEUE: usize = 512;
 const BURST: f64 = 120.0;
 const PER_SECOND: f64 = 30.0;
 const MAX_BAD_FRAMES: u32 = 20;
 
-/// `GET /v1/live`: Upgrade auf WebSocket. Mit `Origin` nur aus der Liste erlaubter Ursprünge
-/// (die App sendet keinen; ein Browser auf fremder Seite wird so abgewiesen). Zu viele
-/// Verbindungen gesamt oder von einer Adresse: 503.
+/// `GET /v1/live`: upgrade to WebSocket. With `Origin` only from the list of allowed origins
+/// (the app sends none; a browser on a foreign site is rejected this way). Too many connections
+/// in total or from one address: 503.
 pub async fn upgrade(
     State(state): State<AppState>,
     ip: ClientIp,
@@ -53,7 +53,7 @@ pub async fn upgrade(
     }
     let ip_key = ip.key();
     if !state.relay.acquire_ip(&ip_key) {
-        tracing::info!("zu viele Verbindungen von einer Adresse");
+        tracing::info!("too many connections from one address");
         return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
     }
     if !state.relay.acquire_connection() {
@@ -100,7 +100,7 @@ impl Bucket {
 
 struct Joined {
     team: Arc<Mutex<Team>>,
-    /// Wann das Ticket dieses Teams zuletzt geprüft wurde (`hello` oder `ticket.renew`).
+    /// When the ticket for this team was last checked (`hello` or `ticket.renew`).
     ticket_at: Instant,
 }
 
@@ -167,18 +167,18 @@ async fn run(
         at: Instant::now(),
     };
     let mut bad = 0u32;
-    // Frist eines entfernten Geräts (siehe Moduldoku); `Some`: nur noch `memberlog.get`.
+    // Grace period of a removed device (see module docs); `Some`: only `memberlog.get` left.
     let mut departing: Option<Instant> = None;
     let close: Option<(u16, &'static str)> = loop {
-        // Höchstalter je Team ab dem letzten geprüften Ticket; `ticket.renew` startet es neu.
+        // Maximum age per team since the last checked ticket; `ticket.renew` restarts it.
         let oldest = joined
             .values()
             .map(|j| j.ticket_at)
             .min()
             .unwrap_or(started);
         let age_left = relay.connection_max_age.saturating_sub(oldest.elapsed());
-        // Bis zum ersten gültigen `hello` gilt eine kurze Frist: Pings allein halten keinen
-        // Verbindungsplatz.
+        // Until the first valid `hello` a short deadline applies: pings alone do not hold a
+        // connection slot.
         let hello_left = joined
             .is_empty()
             .then(|| relay.hello_timeout.saturating_sub(started.elapsed()));
@@ -242,13 +242,13 @@ async fn run(
         };
         let op = frame.id;
         let team_id = frame.team;
-        // Kam die Entfernung zugleich mit diesem Rahmen, wählt `select!` nicht verlässlich
-        // zuerst sie: ein schon ausgelöstes `removed` gilt vor dem Rahmen.
+        // If the removal arrived together with this frame, `select!` does not reliably pick it
+        // first: an already triggered `removed` takes precedence over the frame.
         if departing.is_none() && removed.notified().now_or_never().is_some() {
             departing = Some(Instant::now() + relay.removed_grace);
         }
         if departing.is_some() {
-            // In der Frist: nur `memberlog.get` des Teams, das das Gerät entfernte.
+            // During the grace period: only `memberlog.get` of the team that removed the device.
             let ClientMessage::MemberLogGet(get) = frame.message else {
                 send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
                 continue;
@@ -271,7 +271,7 @@ async fn run(
                 Ok(Some(false)) => {}
                 Ok(None) => send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden))),
                 Err(failure) => {
-                    tracing::error!(error = %failure, "Log für entferntes Gerät nicht lesbar");
+                    tracing::error!(error = %failure, "cannot read log for removed device");
                     send(&tx, err(Some(op), team_id, error(ErrorCode::BadRequest)));
                 }
             }
@@ -298,7 +298,7 @@ async fn run(
                     Ok(ok) => ok,
                     Err(code) => {
                         send(&tx, reply_err(code));
-                        // Abgelehnte Tickets zählen wie kaputte Rahmen (kein Raten am Stück).
+                        // Rejected tickets count like broken frames (no guessing in a row).
                         bad += 1;
                         if bad > MAX_BAD_FRAMES {
                             break Some((close::CLOSE_HELLO_TIMEOUT, "bad frames"));
@@ -310,7 +310,7 @@ async fn run(
                     send(&tx, reply_err(ErrorCode::Forbidden));
                     continue;
                 };
-                // Eine Verbindung gehört genau einem Mitglied.
+                // A connection belongs to exactly one member.
                 match &member {
                     Some(m) if *m != claims.sub => {
                         send(&tx, reply_err(ErrorCode::Forbidden));
@@ -328,7 +328,7 @@ async fn run(
                 let team = match relay.team(team_id.as_str()).await {
                     Ok(team) => team,
                     Err(failure) => {
-                        tracing::error!(error = %failure, "Team nicht ladbar");
+                        tracing::error!(error = %failure, "cannot load team");
                         send(&tx, reply_err(ErrorCode::BadRequest));
                         continue;
                     }
@@ -356,8 +356,8 @@ async fn run(
                             proto,
                             iat_ms,
                             now_ms(),
-                            // Nur eine Verbindung ohne anderes Team: ihr 4403 trifft kein
-                            // Team, aus dem das Gerät nicht entfernt wurde.
+                            // Only a connection without another team: its 4403 does not hit a
+                            // team the device was not removed from.
                             joined.is_empty(),
                         )
                         .await;
@@ -369,7 +369,7 @@ async fn run(
                         if outcome == JoinOutcome::Departing {
                             departing = Some(Instant::now() + relay.removed_grace);
                         } else {
-                            tracing::info!(conn, "Gerät angemeldet");
+                            tracing::info!(conn, "device joined");
                         }
                         joined.insert(
                             team_id.as_str().to_owned(),
@@ -381,7 +381,7 @@ async fn run(
                     }
                     Ok(Err(code)) => send(&tx, reply_err(code)),
                     Err(failure) => {
-                        tracing::error!(error = %failure, "Anmeldung im Team fehlgeschlagen");
+                        tracing::error!(error = %failure, "joining the team failed");
                         send(&tx, reply_err(ErrorCode::BadRequest));
                     }
                 }
@@ -418,7 +418,7 @@ async fn run(
                                 text(Some(op), Some(team_id), ServerMessage::Ack(ack())),
                             ),
                             Err(failure) => {
-                                tracing::error!(error = %failure, "Rolle nicht übernommen");
+                                tracing::error!(error = %failure, "role not applied");
                                 send(
                                     &tx,
                                     err(Some(op), Some(team_id), error(ErrorCode::BadRequest)),
@@ -459,7 +459,7 @@ async fn run(
                     .handle(&relay.db, &relay.limits, conn, &op, other, now_ms())
                     .await
                 {
-                    tracing::error!(error = %failure, "Absicht nicht verarbeitet");
+                    tracing::error!(error = %failure, "intent not processed");
                     drop(guard);
                     send(
                         &tx,
@@ -475,7 +475,7 @@ async fn run(
     for (_, entry) in joined.drain() {
         let mut guard = entry.team.lock().await;
         if let Err(failure) = guard.leave(&relay.db, conn, now_ms()).await {
-            tracing::error!(error = %failure, "Abmelden im Team fehlgeschlagen");
+            tracing::error!(error = %failure, "leaving the team failed");
         }
         relay.forward_attention(&mut guard);
     }
@@ -490,7 +490,7 @@ async fn run(
         .await;
     }
     drop(tx);
-    // Ein Gegenüber, das nicht mehr liest, hält den Schreiber nicht ewig fest.
+    // A peer that no longer reads does not hold the writer forever.
     let abort = writer.abort_handle();
     if tokio::time::timeout(Duration::from_secs(5), writer)
         .await

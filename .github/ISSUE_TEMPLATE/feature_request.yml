@@ -4,7 +4,7 @@ labels: [enhancement]
 body:
   - type: markdown
     attributes:
-      value: Thanks for the idea. Please write in English or German.
+      value: Thanks for the idea. Please write in English.
   - type: textarea
     id: problem
     attributes:

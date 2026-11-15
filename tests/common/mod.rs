@@ -1,4 +1,4 @@
-//! Gemeinsame Helfer der Integrationstests: Server auf freiem Port, Tickets, WebSocket-Client.
+//! Shared helpers for the integration tests: server on a free port, tickets, WebSocket client.
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
@@ -64,7 +64,7 @@ pub async fn start(mut config: Config) -> TestServer {
     config.max_connections_per_member = 16;
     let server = hangar_team_server::build(config)
         .await
-        .expect("Server startet");
+        .expect("server starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = server
@@ -108,7 +108,7 @@ pub fn ticket(member: &str, team: &str, role: Role) -> String {
 pub struct Client {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     next: u32,
-    /// Close-Code, falls der Server die Verbindung geschlossen hat.
+    /// Close code, if the server closed the connection.
     pub closed: Option<u16>,
 }
 
@@ -116,7 +116,7 @@ impl Client {
     pub async fn connect(addr: SocketAddr) -> Client {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/live"))
             .await
-            .expect("verbindet");
+            .expect("connects");
         Client {
             ws,
             next: 0,
@@ -135,7 +135,7 @@ impl Client {
             team: team.map(team_id),
             message,
         };
-        let text = wire::encode_client(&frame).expect("Rahmen kodierbar");
+        let text = wire::encode_client(&frame).expect("frame encodable");
         self.ws.send(Message::Text(text.into())).await.unwrap();
     }
 
@@ -146,7 +146,7 @@ impl Client {
             .unwrap();
     }
 
-    /// Nächster Rahmen des Servers (Pings übergangen); `None` bei Zeitablauf oder Ende.
+    /// Next server frame (pings skipped); `None` on timeout or end of stream.
     pub async fn recv(&mut self) -> Option<ServerFrame> {
         loop {
             let next = tokio::time::timeout(Duration::from_secs(5), self.ws.next())
@@ -154,7 +154,7 @@ impl Client {
                 .ok()??;
             match next.ok()? {
                 Message::Text(t) => {
-                    return Some(wire::decode_server(t.as_str()).expect("Serverrahmen gültig"))
+                    return Some(wire::decode_server(t.as_str()).expect("valid server frame"))
                 }
                 Message::Close(frame) => {
                     self.closed = frame.map(|f| u16::from(f.code));
@@ -165,23 +165,23 @@ impl Client {
         }
     }
 
-    /// Liest, bis der Server schließt, und gibt den Close-Code zurück.
+    /// Reads until the server closes and returns the close code.
     pub async fn close_code(&mut self) -> Option<u16> {
         while self.recv().await.is_some() {}
         self.closed
     }
 
-    /// Wartet auf einen Rahmen, der `pred` erfüllt, und gibt ihn zurück.
+    /// Waits for a frame satisfying `pred` and returns it.
     pub async fn until(&mut self, pred: impl Fn(&ServerFrame) -> bool) -> ServerFrame {
         loop {
-            let frame = self.recv().await.expect("erwarteter Rahmen kam nicht");
+            let frame = self.recv().await.expect("expected frame did not arrive");
             if pred(&frame) {
                 return frame;
             }
         }
     }
 
-    /// Antwort auf `op` (ack, err, welcome, resync_required, devices, memberlog.entries).
+    /// Reply to `op` (ack, err, welcome, resync_required, devices, memberlog.entries).
     pub async fn answer(&mut self, op: &str) -> ServerFrame {
         let op = op.to_owned();
         self.until(move |f| {
@@ -225,7 +225,7 @@ impl Client {
             .await
     }
 
-    /// Verbinden und anmelden; gibt Client und Welcome zurück.
+    /// Connects and says hello; returns the client and the welcome.
     pub async fn join(
         addr: SocketAddr,
         team: &str,
@@ -243,7 +243,7 @@ impl Client {
             .await;
         match frame.message {
             ServerMessage::Welcome(w) => (client, w),
-            other => panic!("kein welcome: {other:?}"),
+            other => panic!("no welcome: {other:?}"),
         }
     }
 
@@ -258,13 +258,13 @@ impl Client {
     }
 }
 
-/// Close-Code als Zahl (für Vergleiche ohne tungstenite-Typen).
+/// Close code as a number (for comparisons without tungstenite types).
 pub fn code_of(code: CloseCode) -> u16 {
     u16::from(code)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Ende-zu-Ende: echte Geräteschlüssel und signierte Log-Einträge (hangar-team-crypto)
+// End-to-end: real device keys and signed log entries (hangar-team-crypto)
 
 use hangar_team_crypto::entropy::OsEntropy;
 use hangar_team_crypto::epoch::TeamSecret;
@@ -277,7 +277,7 @@ use hangar_team_server::wire::{
     DeviceKeys, DeviceRemove, KeyRotate, KeyWrap, MemberLogAppend, UnixMillis,
 };
 
-/// Ein Log-Eintrag, der nie gültig ist (für Prüfungen, die vorher scheitern).
+/// A log entry that is never valid (for checks that fail earlier).
 pub fn dummy_log() -> MemberLogAppend {
     MemberLogAppend {
         index: 1,
@@ -286,7 +286,7 @@ pub fn dummy_log() -> MemberLogAppend {
     }
 }
 
-/// Ein Gerät mit echten Schlüsseln.
+/// A device with real keys.
 pub struct Dev {
     pub holder: Holder,
     pub identity: DeviceIdentity,
@@ -309,8 +309,8 @@ impl Dev {
     }
 }
 
-/// Die Sicht eines Clients auf das Log: baut Einträge und übernimmt sie, wenn das Relay sie
-/// angenommen hat.
+/// A client's view of the log: builds entries and applies them once the relay has accepted
+/// them.
 pub struct Log {
     pub team: String,
     pub verifier: LogVerifier,
@@ -329,7 +329,7 @@ impl Log {
     }
 
     pub fn state(&self) -> &TeamState {
-        self.verifier.state().expect("Team angelegt")
+        self.verifier.state().expect("team created")
     }
 
     fn next(&self, issuer: &Dev, kind: EntryKind) -> MemberLogAppend {
@@ -366,7 +366,7 @@ impl Log {
         )
     }
 
-    /// Weiteres Gerät eines Mitglieds, bestätigt und eingetragen von `endorser` (selbes Mitglied).
+    /// Additional device of a member, endorsed and added by `endorser` (same member).
     pub fn add_device(&self, endorser: &Dev, new: &Dev) -> MemberLogAppend {
         let signature = endorser.identity.endorse(
             &team_id(&self.team),
@@ -425,28 +425,28 @@ impl Log {
         wrap_for_device(self.state(), secret, target, &mut OsEntropy).unwrap()
     }
 
-    /// Übernimmt einen Eintrag, den das Relay angenommen hat (Prüfung wie dort).
+    /// Applies an entry the relay has accepted (same checks as there).
     pub fn accept(&mut self, append: &MemberLogAppend, sender: &Holder) {
         self.verifier
             .admit(append, sender, hangar_team_server::wire::Role::Owner)
-            .expect("lokal gültig");
+            .expect("locally valid");
     }
 
     pub fn accept_rotation(&mut self, rotate: &KeyRotate, sender: &Holder) {
         self.verifier
             .admit_rotation(rotate, sender, hangar_team_server::wire::Role::Owner)
-            .expect("lokal gültig");
+            .expect("locally valid");
     }
 
     pub fn accept_removal(&mut self, remove: &DeviceRemove, sender: &Holder) {
         self.verifier
             .admit_device_remove(remove, sender, hangar_team_server::wire::Role::Owner)
-            .expect("lokal gültig");
+            .expect("locally valid");
     }
 }
 
 impl Client {
-    /// Verbinden als `dev` und `device.keys` senden.
+    /// Connects as `dev` and sends `device.keys`.
     pub async fn join_device(addr: SocketAddr, team: &str, dev: &Dev, role: Role) -> Client {
         let mut client = Client::connect(addr).await;
         let frame = client

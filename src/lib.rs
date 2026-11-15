@@ -1,8 +1,8 @@
-//! Hangar-Teamserver: Relay für die Live-Zusammenarbeit (offizieller Betrieb und
-//! Selbstbetrieb) und eine schlanke eigene Identität für den Selbstbetrieb.
+//! Hangar team server: relay for live collaboration (official mode and
+//! self-hosting) and a lean built-in identity for self-hosting.
 //!
-//! Aufbau: `docs/entwicklung.md`, Betrieb: `docs/betrieb.md`; Protokoll: `docs/protocol.md`; Sicherheit:
-//! `docs/security.md`.
+//! Architecture: `docs/development.md`, operations: `docs/operations.md`; protocol: `docs/protocol.md`;
+//! security: `docs/security.md`.
 
 #![forbid(unsafe_code)]
 
@@ -29,7 +29,7 @@ use http::AppState;
 use identity::Identity;
 use relay::Relay;
 
-/// Alles, was ein laufender Server braucht; die Tests bauen ihn genauso.
+/// Everything a running server needs; the tests build it the same way.
 pub struct Server {
     pub router: Router,
     pub state: AppState,
@@ -38,13 +38,13 @@ pub struct Server {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
-    #[error("Datenordner: {0}")]
+    #[error("data directory: {0}")]
     DataDir(std::io::Error),
-    #[error("Datenbank: {0}")]
+    #[error("database: {0}")]
     Db(#[from] sqlx::Error),
-    #[error("Migration: {0}")]
+    #[error("migration: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
-    #[error("Identität: {0}")]
+    #[error("identity: {0}")]
     Identity(String),
 }
 
@@ -82,7 +82,7 @@ pub async fn build(config: Config) -> Result<Server, StartError> {
                 tokio::spawn(poller.run(shutdown_rx.clone()));
             }
             None => tracing::warn!(
-                "REVOCATION_URL fehlt: entzogene Rechte wirken erst beim nächsten Ticket"
+                "REVOCATION_URL missing: revoked rights only take effect with the next ticket"
             ),
         }
     }

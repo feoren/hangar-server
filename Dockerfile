@@ -1,11 +1,11 @@
-# Hangar-Teamserver: statisches musl-Binary in einem distroless-Image.
+# Hangar team server: static musl binary in a distroless image.
 #
-# Bauen (eine Plattform):   docker build -t hangar-team-server .
-# Bauen (amd64 und arm64):  docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-team-server:<version> --push .
-#   Jede Plattform baut nativ im Alpine-Image (unter QEMU für die fremde Architektur: langsam,
-#   aber ohne Cross-Toolchain für SQLite und ring).
+# Build (one platform):     docker build -t hangar-team-server .
+# Build (amd64 and arm64):  docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-team-server:<version> --push .
+#   Each platform builds natively in the Alpine image (under QEMU for the foreign architecture:
+#   slow, but without a cross toolchain for SQLite and ring).
 #
-# Basis-Images vor einer Veröffentlichung mit Digest pinnen (`rust:1-alpine@sha256:...`).
+# Pin the base images by digest before a release (`rust:1-alpine@sha256:...`).
 
 FROM rust:1-alpine AS build
 RUN apk add --no-cache musl-dev
@@ -22,8 +22,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /hangar-team-server /usr/local/bin/hangar-team-server
-# Das Datenvolumen gehört dem Nutzer nonroot (65532), damit SQLite und der Ticketschlüssel
-# geschrieben werden können.
+# The data volume belongs to the user nonroot (65532) so that SQLite and the ticket key can be
+# written.
 COPY --from=build --chown=65532:65532 /data-empty /data
 ENV DATA_DIR=/data \
     BIND_ADDR=0.0.0.0:8080 \

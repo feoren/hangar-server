@@ -1,9 +1,9 @@
-//! Tickets für die Live-Verbindung (Format: `docs/ticket-format.md`).
+//! Tickets for the live connection (format: `docs/ticket-format.md`).
 //!
-//! Die Webseite (offizieller Betrieb) oder die eigene Identität (Selbstbetrieb) stellt ein
-//! kurzlebiges Ticket aus; die App reicht es unverändert in `hello` weiter. Das Relay prüft
-//! Signatur, kid, Zeitfenster und Zielgruppe; die einmalige Verwendung der `jti` prüft
-//! [`crate::relay::store`] in der Datenbank.
+//! The website (official mode) or the built-in identity (self-hosting) issues a short-lived
+//! ticket; the app passes it on unchanged in `hello`. The relay checks signature, kid, time
+//! window and audience; single use of the `jti` is checked by [`crate::relay::store`] in the
+//! database.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -11,13 +11,13 @@ use thiserror::Error;
 use crate::signed::{self, KeySet, SignedError, TICKET_CONTEXT};
 use crate::util::{is_id, is_opaque};
 
-/// Längstes Ticket (wie `MAX_TICKET_LEN` des Protokolls).
+/// Longest ticket (same as the protocol's `MAX_TICKET_LEN`).
 pub const MAX_TICKET_LEN: usize = 2048;
-/// Längste opake Kennung (Konto, Projekt).
+/// Longest opaque identifier (account, project).
 pub const MAX_OPAQUE_LEN: usize = 128;
-/// Erlaubte Abweichung der Uhren zwischen Aussteller und Relay, in Sekunden.
+/// Allowed clock skew between issuer and relay, in seconds.
 pub const CLOCK_SKEW_S: i64 = 30;
-/// Längste erlaubte Gültigkeit eines Tickets; die Webseite stellt 60 s aus.
+/// Longest allowed validity of a ticket; the website issues 60 s.
 pub const MAX_LIFETIME_S: i64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +46,7 @@ impl Role {
         }
     }
 
-    /// Rang: owner > admin > member.
+    /// Rank: owner > admin > member.
     pub fn rank(self) -> u8 {
         match self {
             Role::Owner => 3,
@@ -56,24 +56,24 @@ impl Role {
     }
 }
 
-/// Inhalt eines Tickets. Unbekannte Felder werden ignoriert (spätere Erweiterungen der Webseite
-/// brechen alte Relays nicht); eine inkompatible Änderung erhöht `v`.
+/// Contents of a ticket. Unknown fields are ignored (later extensions on the website do not
+/// break old relays); an incompatible change increments `v`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TicketClaims {
     pub v: u32,
     pub kid: String,
-    /// Konto-ID der Webseite (opak).
+    /// Account ID of the website (opaque).
     pub sub: String,
-    /// Projekt-ID der Webseite = Team (opak).
+    /// Project ID of the website = team (opaque).
     pub prj: String,
     pub role: Role,
-    /// Die Webseite bestätigt, dass diese Person einen Platz im Team hat.
+    /// The website confirms that this person has a seat in the team.
     pub seat_ok: bool,
     pub iat: i64,
     pub exp: i64,
-    /// Einmalige Kennung gegen Wiederverwendung.
+    /// One-time identifier against reuse.
     pub jti: String,
-    /// Optional: für welches Relay das Ticket gilt (Ursprung, z. B. `https://team.hangar.feoren.com`).
+    /// Optional: which relay the ticket is valid for (origin, e.g. `https://team.hangar.feoren.com`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
 }
@@ -82,21 +82,21 @@ pub struct TicketClaims {
 pub enum TicketError {
     #[error(transparent)]
     Signed(#[from] SignedError),
-    #[error("der Inhalt passt nicht zum Ticketformat")]
+    #[error("the payload does not match the ticket format")]
     Payload,
-    #[error("Version {0} wird nicht unterstützt")]
+    #[error("version {0} is not supported")]
     Version(u32),
-    #[error("das Ticket ist abgelaufen")]
+    #[error("the ticket has expired")]
     Expired,
-    #[error("das Ticket ist noch nicht gültig")]
+    #[error("the ticket is not yet valid")]
     NotYetValid,
-    #[error("die Gültigkeit ist länger als erlaubt")]
+    #[error("the validity is longer than allowed")]
     Lifetime,
-    #[error("das Ticket gilt für ein anderes Relay")]
+    #[error("the ticket is for a different relay")]
     Audience,
 }
 
-/// Prüft ein Ticket vollständig außer der `jti`-Wiederverwendung.
+/// Fully verifies a ticket except for `jti` reuse.
 pub fn verify(
     ticket: &str,
     keys: &KeySet,
@@ -164,14 +164,14 @@ mod tests {
     }
 
     #[test]
-    fn gültiges_ticket() {
+    fn valid_ticket() {
         let k = SigningKey::from_bytes(&[3; 32]);
         let t = ticket(&k, &claims(1000, 1060));
         assert_eq!(verify(&t, &keys(&k), 1010, None).unwrap().sub, "u-42");
     }
 
     #[test]
-    fn zeitfenster() {
+    fn time_window() {
         let k = SigningKey::from_bytes(&[3; 32]);
         let t = ticket(&k, &claims(1000, 1060));
         assert_eq!(verify(&t, &keys(&k), 1090, None), Err(TicketError::Expired));
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn zielgruppe() {
+    fn audience() {
         let k = SigningKey::from_bytes(&[3; 32]);
         let mut c = claims(1000, 1060);
         c.aud = Some("https://a.example".into());
@@ -200,10 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn kid_in_payload_muss_passen_und_jti_lang_genug() {
+    fn kid_in_payload_must_match_and_jti_long_enough() {
         let k = SigningKey::from_bytes(&[3; 32]);
         let mut c = claims(1000, 1060);
-        c.jti = "kurz".into();
+        c.jti = "short".into();
         assert_eq!(
             verify(&ticket(&k, &c), &keys(&k), 1010, None),
             Err(TicketError::Payload)

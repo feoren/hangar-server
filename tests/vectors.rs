@@ -1,8 +1,8 @@
-//! Testvektoren für Tickets und Lizenzen (`testdata/*.json`), damit die PHP-Seite der Webseite
-//! dasselbe Format bauen und gegenprüfen kann. Ed25519 ist deterministisch: dieselbe Payload mit
-//! demselben Schlüssel ergibt dieselbe Signatur.
+//! Test vectors for tickets and licenses (`testdata/*.json`) so the website's PHP side can build
+//! and cross-check the same format. Ed25519 is deterministic: the same payload with the same key
+//! yields the same signature.
 //!
-//! Neu schreiben: `REGENERATE_VECTORS=1 cargo test --test vectors`.
+//! Regenerate: `REGENERATE_VECTORS=1 cargo test --test vectors`.
 
 use std::path::PathBuf;
 
@@ -13,12 +13,12 @@ use hangar_team_server::ticket::{self, TicketError};
 use hangar_team_server::util::{b64, hex};
 use serde_json::{json, Value};
 
-/// Geheimer Schlüssel aus RFC 8032, Abschnitt 7.1, Test 1: öffentlich bekannt, nur für Tests.
+/// Secret key from RFC 8032, section 7.1, test 1: publicly known, for tests only.
 const SEED_HEX: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
-/// Ein zweiter Testschlüssel für "fremde Signatur" (RFC 8032, Test 2).
+/// A second test key for "foreign signature" (RFC 8032, test 2).
 const OTHER_SEED_HEX: &str = "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
 const KID: &str = "test-2026-1";
-/// Feste Prüfzeit: 2026-11-09T12:00:00Z.
+/// Fixed verification time: 2026-11-09T12:00:00Z.
 const NOW: i64 = 1_794_225_600;
 
 fn seed(hex_text: &str) -> SigningKey {
@@ -45,7 +45,7 @@ struct Case {
     expect: &'static str,
 }
 
-/// Zielgruppe des offiziellen Relays; jedes Ticket trägt sie (Pflicht im Relay).
+/// Audience of the official relay; every ticket carries it (mandatory in the relay).
 const AUD: &str = "hangar-relay";
 
 fn ticket_payload(iat: i64, exp: i64, kid: &str, jti: &str) -> String {
@@ -239,7 +239,7 @@ fn document(case: &Case) -> String {
     if !case.tamper {
         return doc;
     }
-    // Plätze bzw. Rolle verändern, Signatur behalten.
+    // Alter seats or role, keep the signature.
     let (_, sig) = doc.split_once('.').unwrap();
     let forged = case
         .payload
@@ -274,7 +274,7 @@ fn license_outcome(doc: &str) -> String {
 fn file(kind: &str, context: &str, cases: &[Case]) -> Value {
     let key = seed(SEED_HEX);
     json!({
-        "description": format!("Testvektoren {kind} (docs/{kind}-format.md). Schlüssel aus RFC 8032 7.1, nur für Tests."),
+        "description": format!("Test vectors {kind} (docs/{kind}-format.md). Keys from RFC 8032 7.1, for tests only."),
         "context": context,
         "now": NOW,
         "key": {
@@ -312,11 +312,11 @@ fn check(name: &str, kind: &str, context: &str, cases: &[Case], outcome: fn(&str
         .unwrap();
     }
     let stored: Value =
-        serde_json::from_str(&std::fs::read_to_string(path(name)).expect("Testvektoren vorhanden"))
+        serde_json::from_str(&std::fs::read_to_string(path(name)).expect("test vectors present"))
             .unwrap();
     assert_eq!(
         stored, built,
-        "{name} ist veraltet: REGENERATE_VECTORS=1 setzen"
+        "{name} is outdated: set REGENERATE_VECTORS=1"
     );
     for vector in stored["vectors"].as_array().unwrap() {
         let doc = vector["document"].as_str().unwrap();
@@ -330,7 +330,7 @@ fn check(name: &str, kind: &str, context: &str, cases: &[Case], outcome: fn(&str
 }
 
 #[test]
-fn ticket_vektoren() {
+fn ticket_vectors() {
     check(
         "tickets.json",
         "ticket",
@@ -341,7 +341,7 @@ fn ticket_vektoren() {
 }
 
 #[test]
-fn lizenz_vektoren() {
+fn license_vectors() {
     check(
         "licenses.json",
         "license",
@@ -352,7 +352,7 @@ fn lizenz_vektoren() {
 }
 
 #[test]
-fn widerrufene_lizenz() {
+fn revoked_license() {
     let doc = document(&license_cases()[0]);
     assert_eq!(
         license::verify(&doc, &keys(), &["lic_8f3a2c".into()]),
@@ -360,25 +360,25 @@ fn widerrufene_lizenz() {
     );
 }
 
-/// Gegenprobe gegen RFC 8032: der öffentliche Schlüssel des Testsamens ist bekannt.
+/// Cross-check against RFC 8032: the public key of the test seed is known.
 #[test]
-fn rfc8032_schlüssel() {
+fn rfc8032_key() {
     assert_eq!(
         hex(seed(SEED_HEX).verifying_key().as_bytes()),
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
     );
 }
 
-/// Gegenprobe mit dem Testvektor der Webseite (`tests/php/fixtures/revocations-vector.json`
-/// im Webseiten-Repository, hier als `testdata/revocations-website.json`): was die PHP-Seite
-/// signiert, muss `revocation::verify` annehmen bzw. ablehnen wie dort angegeben.
+/// Cross-check with the website's test vector (`tests/php/fixtures/revocations-vector.json` in
+/// the website repository, here as `testdata/revocations-website.json`): whatever the PHP side
+/// signs, `revocation::verify` must accept or reject as specified there.
 #[test]
-fn widerrufsliste_der_webseite() {
+fn website_revocation_list() {
     use hangar_team_server::relay::revocation::{self, Revocation, RevocationError};
     use hangar_team_server::ticket::Role;
 
     let stored: Value = serde_json::from_str(
-        &std::fs::read_to_string(path("revocations-website.json")).expect("Vektor der Webseite"),
+        &std::fs::read_to_string(path("revocations-website.json")).expect("website vector"),
     )
     .unwrap();
     assert_eq!(stored["context"], "hangar-revoke-v1");
@@ -429,7 +429,7 @@ fn widerrufsliste_der_webseite() {
             "{}",
             vector["name"]
         );
-        // Eine angenommene Liste gilt nur für den angefragten Cursor.
+        // An accepted list is only valid for the requested cursor.
         if result.is_ok() {
             assert_eq!(
                 revocation::verify(
@@ -495,6 +495,6 @@ fn widerrufsliste_der_webseite() {
     )
     .unwrap();
     assert_eq!((empty.last.as_str(), empty.items.len()), ("44", 0));
-    // Die Beispielantwort ist das gültige Dokument.
+    // The example response is the valid document.
     assert_eq!(stored["response_example"]["body"], vectors[0]["document"]);
 }

@@ -1,6 +1,6 @@
-//! Relay über echte WebSockets mit dem Protokoll-Crate der App: Tickets, Reservierung "first
-//! wins" unter Nebenläufigkeit, idempotente Wiederholung mit Digest, Nachspielen und Snapshot,
-//! Claims, Ablage, E2E-Unterbau, `ticket.renew`, Grenzen.
+//! Relay over real WebSockets with the app's protocol crate: tickets, "first wins" reservation
+//! under concurrency, idempotent retry with digest, replay and snapshot, claims, storage, E2E
+//! groundwork, `ticket.renew`, limits.
 
 mod common;
 
@@ -39,9 +39,9 @@ fn is_ack(frame: &ServerFrame) -> bool {
 }
 
 #[tokio::test]
-async fn ticketprüfung() {
+async fn ticket_validation() {
     let s = start_official().await;
-    // Gültig, ohne Cursor: Snapshot (resync_required) und welcome.
+    // Valid, without cursor: snapshot (resync_required) and welcome.
     let mut c = Client::connect(s.addr).await;
     let t = ticket("u1", "p1", Role::Owner);
     let op = c.op();
@@ -70,18 +70,18 @@ async fn ticketprüfung() {
     ));
 
     let mut c2 = Client::connect(s.addr).await;
-    // Dasselbe Ticket ein zweites Mal: abgelehnt (jti).
+    // The same ticket a second time: rejected (jti).
     assert_eq!(
         code(&c2.hello("p1", t, "d1", None).await),
         Some(ErrorCode::Forbidden)
     );
-    // Ticket für ein anderes Projekt.
+    // Ticket for a different project.
     let other_team = ticket("u1", "p1", Role::Owner);
     assert_eq!(
         code(&c2.hello("p2", other_team, "d1", None).await),
         Some(ErrorCode::Forbidden)
     );
-    // Abgelaufen.
+    // Expired.
     let mut old = claims("u1", "p1", Role::Owner);
     old.iat -= 600;
     old.exp -= 600;
@@ -90,7 +90,7 @@ async fn ticketprüfung() {
         code(&c2.hello("p1", old, "d1", None).await),
         Some(ErrorCode::Forbidden)
     );
-    // Fremde Signatur.
+    // Foreign signature.
     let foreign = sign_ticket(
         &claims("u1", "p1", Role::Owner),
         &SigningKey::from_bytes(&[7; 32]),
@@ -99,8 +99,8 @@ async fn ticketprüfung() {
         code(&c2.hello("p1", foreign, "d1", None).await),
         Some(ErrorCode::Forbidden)
     );
-    // Zielgruppe ist Pflicht: ohne `aud` oder mit fremder abgelehnt.
-    for aud in [None, Some("https://anderes-relay.example".to_owned())] {
+    // Audience is mandatory: rejected without `aud` or with a foreign one.
+    for aud in [None, Some("https://other-relay.example".to_owned())] {
         let mut other = claims("u1", "p1", Role::Owner);
         other.aud = aud;
         let other = sign_ticket(&other, &website_key());
@@ -109,7 +109,7 @@ async fn ticketprüfung() {
             Some(ErrorCode::Forbidden)
         );
     }
-    // Kein Platz laut Webseite.
+    // No seat according to the website.
     let mut full = claims("u9", "p1", Role::Member);
     full.seat_ok = false;
     let full = sign_ticket(&full, &website_key());
@@ -117,7 +117,7 @@ async fn ticketprüfung() {
         code(&c2.hello("p1", full, "d9", None).await),
         Some(ErrorCode::Limit)
     );
-    // Veraltete Protokollversion.
+    // Outdated protocol version.
     let old_proto = ProtoRange::new(0, 0).unwrap();
     let frame = c2
         .hello_with(
@@ -129,7 +129,7 @@ async fn ticketprüfung() {
         )
         .await;
     assert_eq!(code(&frame), Some(ErrorCode::OutdatedClient));
-    // Ohne hello keine Teamnachricht.
+    // No team message without hello.
     assert_eq!(
         code(&c2.request("p1", reserve(h(1))).await),
         Some(ErrorCode::Forbidden)
@@ -137,9 +137,9 @@ async fn ticketprüfung() {
 }
 
 #[tokio::test]
-async fn geräte_ids_gelten_je_mitglied() {
+async fn device_ids_are_scoped_per_member() {
     let s = start_official().await;
-    // Zwei Mitglieder mit derselben Geräte-ID sind zwei Geräte.
+    // Two members with the same device ID are two devices.
     let mut a = Client::connect(s.addr).await;
     assert!(matches!(
         a.hello("t", ticket("alice", "t", Role::Owner), "laptop", None)
@@ -163,24 +163,24 @@ async fn geräte_ids_gelten_je_mitglied() {
 }
 
 #[tokio::test]
-async fn erster_gewinnt_unter_nebenläufigkeit() {
+async fn first_wins_under_concurrency() {
     let s = start_official().await;
     let (mut a, _) = Client::join(s.addr, "team", "alice", Role::Owner).await;
     let (mut b, _) = Client::join(s.addr, "team", "bob", Role::Member).await;
     for round in 0..25u8 {
         let task = h(round);
         let (oa, ob) = (a.op(), b.op());
-        // Beide senden, bevor einer liest.
+        // Both send before either reads.
         a.send(&oa, Some("team"), reserve(task)).await;
         b.send(&ob, Some("team"), reserve(task)).await;
         let (ra, rb) = tokio::join!(a.answer(&oa), b.answer(&ob));
         let wins = [&ra, &rb].iter().filter(|f| is_ack(f)).count();
-        assert_eq!(wins, 1, "Runde {round}: genau einer gewinnt");
+        assert_eq!(wins, 1, "round {round}: exactly one wins");
         let loser = if is_ack(&ra) { &rb } else { &ra };
         match &loser.message {
             ServerMessage::Err(e) => {
                 assert_eq!(e.code, ErrorCode::Conflict);
-                assert!(e.holder.is_some(), "der Konflikt nennt den Halter");
+                assert!(e.holder.is_some(), "the conflict names the holder");
             }
             other => panic!("{other:?}"),
         }
@@ -188,11 +188,11 @@ async fn erster_gewinnt_unter_nebenläufigkeit() {
 }
 
 #[tokio::test]
-async fn idempotente_wiederholung_und_nachspielen() {
+async fn idempotent_retry_and_replay() {
     let s = start_official().await;
     let (mut a, welcome) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     let stream = welcome.stream.clone();
-    // Gleiche Operations-ID zweimal: ein Ereignis, zwei gleiche Antworten.
+    // Same operation ID twice: one event, two identical replies.
     let op = a.op();
     a.send(&op, Some("t"), reserve(h(1))).await;
     let reserved = a
@@ -204,19 +204,19 @@ async fn idempotente_wiederholung_und_nachspielen() {
     assert_eq!(
         again.id.as_ref().map(|i| i.as_str()),
         Some(op.as_str()),
-        "Wiederholung: nur die gemerkte Antwort, kein neues Ereignis"
+        "retry: only the remembered reply, no new event"
     );
     assert_eq!(first.message, again.message);
-    // Dieselbe Operations-ID mit anderem Inhalt: badRequest, nichts angewendet.
+    // Same operation ID with different content: badRequest, nothing applied.
     a.send(&op, Some("t"), reserve(h(2))).await;
     assert_eq!(code(&a.answer(&op).await), Some(ErrorCode::BadRequest));
     let cursor = Cursor {
         stream: stream.clone(),
-        seq: reserved.seq.expect("geloggt"),
+        seq: reserved.seq.expect("logged"),
     };
     a.close().await;
 
-    // Währenddessen ändert Bob etwas.
+    // Meanwhile Bob changes something.
     let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
     assert!(is_ack(&b.request("t", reserve(h(2))).await));
     assert!(is_ack(
@@ -224,7 +224,7 @@ async fn idempotente_wiederholung_und_nachspielen() {
             .await
     ));
 
-    // Alice kommt mit Cursor zurück: welcome, dann die verpassten Ereignisse in Folge.
+    // Alice returns with a cursor: welcome, then the missed events in order.
     let mut a = Client::connect(s.addr).await;
     let w = a
         .hello(
@@ -235,20 +235,20 @@ async fn idempotente_wiederholung_und_nachspielen() {
         )
         .await;
     let ServerMessage::Welcome(w) = w.message else {
-        panic!("kein welcome")
+        panic!("no welcome")
     };
     assert!(w.head > cursor.seq);
     let mut seqs = Vec::new();
     while seqs.last().copied() != Some(w.head) {
-        let f = a.recv().await.expect("Nachspiel");
+        let f = a.recv().await.expect("replay");
         if let Some(seq) = f.seq {
             seqs.push(seq);
         }
     }
     let expected: Vec<Seq> = (cursor.seq.0 + 1..=w.head.0).map(Seq).collect();
-    assert_eq!(seqs, expected, "lückenlos und geordnet");
+    assert_eq!(seqs, expected, "gapless and ordered");
 
-    // Fremder Stream: Snapshot statt Nachspiel; der Snapshot enthält die gehaltene Aufgabe.
+    // Foreign stream: snapshot instead of replay; the snapshot contains the held task.
     let mut c = Client::connect(s.addr).await;
     let op = c.op();
     c.send(
@@ -259,7 +259,7 @@ async fn idempotente_wiederholung_und_nachspielen() {
             device: device("carol-device"),
             proto: ProtoRange::CURRENT,
             last_seq: Some(Cursor {
-                stream: StreamId::new("anderer").unwrap(),
+                stream: StreamId::new("other").unwrap(),
                 seq: Seq(1),
             }),
         }),
@@ -277,7 +277,7 @@ async fn idempotente_wiederholung_und_nachspielen() {
     loop {
         let f = c.recv().await.unwrap();
         if let ServerMessage::TaskReserved(r) = &f.message {
-            assert!(f.seq.is_none(), "Snapshot ohne seq");
+            assert!(f.seq.is_none(), "snapshot without seq");
             saw_task |= r.task == h(1);
         }
         if matches!(f.message, ServerMessage::Welcome(_)) {
@@ -288,7 +288,7 @@ async fn idempotente_wiederholung_und_nachspielen() {
 }
 
 #[tokio::test]
-async fn freigabe_anfragen_übergeben_und_erzwingen() {
+async fn release_request_handover_and_force() {
     let s = start_official().await;
     let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
@@ -314,7 +314,7 @@ async fn freigabe_anfragen_übergeben_und_erzwingen() {
     let ServerMessage::TaskReserved(r) = seen.message else {
         unreachable!()
     };
-    assert_eq!(r.note, Some(note), "die Notiz reist mit");
+    assert_eq!(r.note, Some(note), "the note travels along");
     let req = b
         .request(
             "t",
@@ -347,10 +347,10 @@ async fn freigabe_anfragen_übergeben_und_erzwingen() {
     };
     assert_eq!(
         r.note, None,
-        "die Notiz des alten Halters reist nicht weiter"
+        "the previous holder's note does not carry over"
     );
 
-    // Ein Mitglied darf fremde Reservierungen nicht beenden, der Eigentümer schon.
+    // A member may not end other people's reservations, the owner may.
     assert!(is_ack(&b.request("t", reserve(h(6))).await));
     assert!(is_ack(&a.request("t", reserve(h(7))).await));
     let refused = b
@@ -371,7 +371,7 @@ async fn freigabe_anfragen_übergeben_und_erzwingen() {
 }
 
 #[tokio::test]
-async fn claims_werden_nur_auf_gleichheit_verglichen() {
+async fn claims_are_compared_for_equality_only() {
     let s = start_official().await;
     let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
@@ -404,13 +404,13 @@ async fn claims_werden_nur_auf_gleichheit_verglichen() {
     assert_eq!(
         o.detail.map(|d| d.data.as_str().to_owned()).as_deref(),
         Some("ZGV0YWlsYQ"),
-        "bei gleicher Datei das verschlüsselte Detail der Gegenseite"
+        "same file: the other side's encrypted detail"
     );
     let mine = a
         .until(|f| matches!(f.message, ServerMessage::ClaimOverlap(_)))
         .await;
     assert!(mine.seq.is_none());
-    // Anderer Datei-Hash im selben Bereich: sameArea.
+    // Different file hash in the same area: sameArea.
     b.send("o2", Some("t"), claim("kb", 51, "ZGV0YWlsYg")).await;
     let area = b
         .until(|f| matches!(&f.message, ServerMessage::ClaimOverlap(o) if o.level == MatchLevel::SameArea))
@@ -419,14 +419,14 @@ async fn claims_werden_nur_auf_gleichheit_verglichen() {
 }
 
 #[tokio::test]
-async fn ticket_renew_rolle_still_und_entzug() {
+async fn ticket_renew_silent_role_change_and_revocation() {
     let s = start_official().await;
     let renew = |t: String| {
         ClientMessage::TicketRenew(TicketRenew {
             ticket: Ticket::new(t).unwrap(),
         })
     };
-    // Vor dem hello: badRequest.
+    // Before hello: badRequest.
     let mut early = Client::connect(s.addr).await;
     let r = early
         .request("t", renew(ticket("alice", "t", Role::Owner)))
@@ -435,7 +435,7 @@ async fn ticket_renew_rolle_still_und_entzug() {
 
     let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
-    // Herabstufung über ticket.renew: still angewendet, keine Trennung.
+    // Demotion via ticket.renew: applied silently, no disconnect.
     assert!(is_ack(
         &a.request("t", renew(ticket("alice", "t", Role::Member)))
             .await
@@ -456,21 +456,21 @@ async fn ticket_renew_rolle_still_und_entzug() {
         code(&a.request("t", rotate).await),
         Some(ErrorCode::Forbidden)
     );
-    a.send_raw(r#"{"v":1,"id":"still-da","type":"ping"}"#).await;
-    assert!(is_ack(&a.answer("still-da").await), "die Verbindung bleibt");
+    a.send_raw(r#"{"v":1,"id":"still-here","type":"ping"}"#)
+        .await;
+    assert!(
+        is_ack(&a.answer("still-here").await),
+        "the connection stays"
+    );
 
-    // Ticket für ein anderes Team: err forbidden, dann Close 4403.
+    // Ticket for a different team: err forbidden, then close 4403.
     let op = a.op();
-    a.send(
-        &op,
-        Some("t"),
-        renew(ticket("alice", "anderes", Role::Owner)),
-    )
-    .await;
+    a.send(&op, Some("t"), renew(ticket("alice", "other", Role::Owner)))
+        .await;
     assert_eq!(code(&a.answer(&op).await), Some(ErrorCode::Forbidden));
     assert_eq!(a.close_code().await, Some(close::CLOSE_REMOVED));
 
-    // Ohne Platz: Close 4403.
+    // Without a seat: close 4403.
     let mut lost = claims("bob", "t", Role::Member);
     lost.seat_ok = false;
     let op = b.op();
@@ -480,7 +480,7 @@ async fn ticket_renew_rolle_still_und_entzug() {
 }
 
 #[tokio::test]
-async fn rahmen_und_grenzen() {
+async fn frames_and_limits() {
     let s = start_official().await;
     let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     a.send_raw(r#"{"v":1,"id":"x","type":"ping","extra":1}"#)
@@ -499,18 +499,18 @@ async fn rahmen_und_grenzen() {
 }
 
 #[tokio::test]
-async fn ohne_hello_endet_die_verbindung_nach_der_frist() {
+async fn connection_without_hello_ends_after_the_deadline() {
     let mut config = Config::for_tests(IdentityMode::Official, website_keys());
     config.hello_timeout_ms = 300;
     let s = start(config).await;
-    // Pings allein halten die Verbindung nicht.
+    // Pings alone do not keep the connection alive.
     let mut idle = Client::connect(s.addr).await;
     idle.send_raw(r#"{"v":1,"id":"p","type":"ping"}"#).await;
     assert!(is_ack(&idle.answer("p").await));
     let started = std::time::Instant::now();
     assert_eq!(idle.close_code().await, Some(close::CLOSE_HELLO_TIMEOUT));
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
-    // Mit gültigem hello gilt die Frist nicht mehr.
+    // After a valid hello the deadline no longer applies.
     let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     a.send_raw(r#"{"v":1,"id":"q","type":"ping"}"#).await;
@@ -518,7 +518,7 @@ async fn ohne_hello_endet_die_verbindung_nach_der_frist() {
 }
 
 #[tokio::test]
-async fn grenze_je_adresse() {
+async fn limit_per_address() {
     let mut config = Config::for_tests(IdentityMode::Official, website_keys());
     config.max_connections_per_ip = 3;
     let s = start(config).await;
@@ -526,22 +526,22 @@ async fn grenze_je_adresse() {
     for _ in 0..3 {
         open.push(Client::connect(s.addr).await);
     }
-    // Grenze + 1: 503 vor dem Upgrade.
+    // Limit + 1: 503 before the upgrade.
     let refused = tokio_tungstenite::connect_async(format!("ws://{}/v1/live", s.addr)).await;
     match refused {
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             assert_eq!(response.status().as_u16(), 503)
         }
-        other => panic!("erwartet 503: {other:?}"),
+        other => panic!("expected 503: {other:?}"),
     }
-    // Wird eine frei, geht es wieder.
+    // Once one is freed, it works again.
     open.pop().unwrap().close().await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     Client::connect(s.addr).await;
 }
 
 #[tokio::test]
-async fn origin_wird_geprüft_und_health_hat_header() {
+async fn origin_is_checked_and_health_has_headers() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let s = start_official().await;
     let mut request = format!("ws://{}/v1/live", s.addr)
@@ -566,11 +566,11 @@ async fn origin_wird_geprüft_und_health_hat_header() {
     assert!(lower.contains("cache-control: no-store"));
 }
 
-/// Bei einer Übergabe trägt die neue Reservierung keine Notiz: die Notiz des Wunsches ist eine
-/// `ReleaseRequestNote` des Anfragenden, die App öffnet `task.reserved.note` aber als
-/// `ReservationNote` mit dem Halter als Absender. Auch der Snapshot trägt dann keine.
+/// On a handover the new reservation carries no note: the request's note is a
+/// `ReleaseRequestNote` from the requester, but the app opens `task.reserved.note` as a
+/// `ReservationNote` with the holder as sender. The snapshot then carries none either.
 #[tokio::test]
-async fn übergabe_ohne_notiz_auch_im_snapshot() {
+async fn handover_without_note_also_in_snapshot() {
     let s = start_official().await;
     let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
     let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
@@ -621,7 +621,7 @@ async fn übergabe_ohne_notiz_auch_im_snapshot() {
     };
     assert_eq!(r.note, None);
 
-    // Snapshot für eine neue Verbindung ohne Cursor: Reservierung von bob, ohne Notiz.
+    // Snapshot for a new connection without cursor: bob's reservation, without note.
     let mut c = Client::connect(s.addr).await;
     let op = c.op();
     c.send(
@@ -637,11 +637,11 @@ async fn übergabe_ohne_notiz_auch_im_snapshot() {
     .await;
     let mut seen = false;
     loop {
-        let f = c.recv().await.expect("Snapshot und welcome");
+        let f = c.recv().await.expect("snapshot and welcome");
         if let ServerMessage::TaskReserved(r) = &f.message {
             if r.task == h(8) {
                 assert_eq!(r.holder.member, member("bob"));
-                assert_eq!(r.note, None, "Snapshot ohne Notiz");
+                assert_eq!(r.note, None, "snapshot without note");
                 seen = true;
             }
         }
@@ -649,9 +649,9 @@ async fn übergabe_ohne_notiz_auch_im_snapshot() {
             break;
         }
     }
-    assert!(seen, "Reservierung im Snapshot");
+    assert!(seen, "reservation in the snapshot");
 
-    // Seine eigene Notiz sendet der neue Halter per task.reserve.
+    // The new holder sends their own note via task.reserve.
     let own = sealed("bmV1ZXIgaGFsdGVy");
     let again = b
         .request(

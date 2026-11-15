@@ -1,5 +1,5 @@
-//! SQLite im WAL-Modus über sqlx. Alle Abfragen mit gebundenen Parametern; SQL-Texte sind
-//! statisch (`&'static str`), Spalten- und Tabellennamen kommen nie aus Eingaben.
+//! SQLite in WAL mode via sqlx. All queries use bound parameters; SQL texts are static
+//! (`&'static str`), column and table names never come from input.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -14,8 +14,8 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
     let options = SqliteConnectOptions::from_str(url)?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
-        // FULL: eine bestätigte Schreibung übersteht auch einen Stromausfall. Die
-        // Haltbarkeitsregel des Ereignislogs (kein `seq` vor dem gespeicherten head) braucht das.
+        // FULL: a confirmed write survives even a power failure. The durability rule of the
+        // event log (no `seq` before the stored head) requires this.
         .synchronous(SqliteSynchronous::Full)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
@@ -28,10 +28,10 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
     Ok(pool)
 }
 
-/// Schreibende Transaktion, die die Schreibsperre sofort nimmt. Ohne `IMMEDIATE` könnten zwei
-/// lesend begonnene Transaktionen beim ersten Schreiben in `SQLITE_BUSY` laufen; so warten sie
-/// stattdessen (busy_timeout) nacheinander. Das ist die Grundlage für "erster gewinnt" bei
-/// Plätzen und Einladungen.
+/// Write transaction that takes the write lock immediately. Without `IMMEDIATE`, two
+/// transactions started as readers could run into `SQLITE_BUSY` on their first write; this way
+/// they wait for each other instead (busy_timeout). This is the basis for "first one wins" for
+/// seats and invitations.
 pub async fn begin_write(db: &Db) -> Result<Tx, sqlx::Error> {
     db.begin_with("BEGIN IMMEDIATE").await
 }

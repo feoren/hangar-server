@@ -1,10 +1,10 @@
-//! Kompakte, Ed25519-signierte Dokumente (Tickets und Lizenzen), Format in
-//! `docs/ticket-format.md` und `docs/license-format.md`.
+//! Compact, Ed25519-signed documents (tickets and licenses), format in
+//! `docs/ticket-format.md` and `docs/license-format.md`.
 //!
-//! Aufbau: `base64url(payload) "." base64url(signature)`, beide ohne Auffüllung. Signiert wird
-//! nicht das JSON selbst, sondern die ASCII-Bytes `"<kontext>." + base64url(payload)`. Damit
-//! braucht keine Seite kanonisches JSON (geprüft werden genau die gesendeten Bytes), und der
-//! Kontext trennt die Dokumentarten: eine Lizenz gilt nie als Ticket und umgekehrt.
+//! Layout: `base64url(payload) "." base64url(signature)`, both without padding. What is signed
+//! is not the JSON itself but the ASCII bytes `"<context>." + base64url(payload)`. This way
+//! neither side needs canonical JSON (exactly the bytes sent are verified), and the context
+//! separates the document kinds: a license never counts as a ticket and vice versa.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,34 +15,34 @@ use thiserror::Error;
 
 use crate::util::{b64, is_id, unb64};
 
-/// Kontext der Tickets für die Live-Verbindung.
+/// Context of the tickets for the live connection.
 pub const TICKET_CONTEXT: &str = "hangar-ticket-v1";
-/// Kontext der Lizenzdokumente.
+/// Context of the license documents.
 pub const LICENSE_CONTEXT: &str = "hangar-license-v1";
-/// Kontext der Widerrufsliste, die das Relay im offiziellen Betrieb von der Webseite holt.
+/// Context of the revocation list the relay fetches from the website in official mode.
 pub const REVOKE_CONTEXT: &str = "hangar-revoke-v1";
-/// Längste Schlüssel-ID.
+/// Longest key ID.
 pub const MAX_KID_LEN: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SignedError {
-    #[error("das Dokument ist zu lang")]
+    #[error("the document is too long")]
     TooLong,
-    #[error("das Dokument hat nicht die Form payload.signature")]
+    #[error("the document does not have the form payload.signature")]
     Shape,
-    #[error("die Kodierung ist kein base64url ohne Auffüllung")]
+    #[error("the encoding is not base64url without padding")]
     Encoding,
-    #[error("der Inhalt ist kein JSON-Objekt mit gültiger kid")]
+    #[error("the payload is not a JSON object with a valid kid")]
     Payload,
-    #[error("die Schlüssel-ID ist unbekannt")]
+    #[error("the key ID is unknown")]
     UnknownKey,
-    #[error("die Signatur ist ungültig")]
+    #[error("the signature is invalid")]
     BadSignature,
 }
 
-/// Öffentliche Schlüssel nach Schlüssel-ID. Mehrere gleichzeitig erlauben die Rotation: der
-/// neue Schlüssel wird ergänzt, bevor die Webseite mit ihm signiert, der alte entfernt, wenn
-/// keine mit ihm signierten Dokumente mehr gültig sind.
+/// Public keys by key ID. Holding several at once allows rotation: the new key is added before
+/// the website signs with it, the old one is removed once no documents signed with it are
+/// valid any more.
 #[derive(Clone, Default)]
 pub struct KeySet {
     keys: BTreeMap<String, VerifyingKey>,
@@ -56,18 +56,18 @@ impl fmt::Debug for KeySet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum KeySetError {
-    #[error("Eintrag {0}: erwartet kid:base64url")]
+    #[error("entry {0}: expected kid:base64url")]
     Entry(usize),
-    #[error("Eintrag {0}: die kid ist ungültig ([A-Za-z0-9_-], höchstens 64 Zeichen)")]
+    #[error("entry {0}: the kid is invalid ([A-Za-z0-9_-], at most 64 characters)")]
     Kid(usize),
-    #[error("Eintrag {0}: kein öffentlicher Ed25519-Schlüssel (32 Byte base64url)")]
+    #[error("entry {0}: not an Ed25519 public key (32 bytes base64url)")]
     Key(usize),
-    #[error("die kid {0} kommt doppelt vor")]
+    #[error("the kid {0} occurs more than once")]
     Duplicate(String),
 }
 
 impl KeySet {
-    /// Liest `kid:base64url,kid2:base64url`. Leerer Text ergibt eine leere Menge.
+    /// Reads `kid:base64url,kid2:base64url`. Empty text yields an empty set.
     pub fn parse(text: &str) -> Result<Self, KeySetError> {
         let mut set = KeySet::default();
         for (index, entry) in text
@@ -111,9 +111,9 @@ struct KidOnly {
     kid: String,
 }
 
-/// Prüft ein kompaktes Dokument und gibt die signierten Payload-Bytes und die kid zurück.
-/// Die Payload wird vor der Prüfung nur gelesen, um die kid zu finden; ihr übriger Inhalt zählt
-/// erst nach erfolgreicher Prüfung.
+/// Verifies a compact document and returns the signed payload bytes and the kid.
+/// Before verification the payload is only read to find the kid; the rest of its content
+/// counts only after successful verification.
 pub fn verify(
     document: &str,
     context: &str,
@@ -144,7 +144,7 @@ pub fn verify(
     Ok((payload, kid))
 }
 
-/// Signiert JSON-Bytes (Selbstbetrieb stellt so Tickets aus; die Tests bauen so Testvektoren).
+/// Signs JSON bytes (self-hosting issues tickets this way; the tests build test vectors this way).
 pub fn sign(payload_json: &[u8], context: &str, key: &SigningKey) -> String {
     let payload_b64 = b64(payload_json);
     let signature = key.sign(signing_input(context, &payload_b64).as_bytes());
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn signieren_und_prüfen() {
+    fn sign_and_verify() {
         let k = key(7);
         let doc = sign(br#"{"kid":"a1","x":1}"#, TICKET_CONTEXT, &k);
         let (payload, kid) = verify(&doc, TICKET_CONTEXT, &set("a1", &k), 4096).unwrap();
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn kontext_trennt_dokumentarten() {
+    fn context_separates_document_kinds() {
         let k = key(7);
         let doc = sign(br#"{"kid":"a1"}"#, LICENSE_CONTEXT, &k);
         assert_eq!(
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn fremder_schlüssel_und_unbekannte_kid() {
+    fn foreign_key_and_unknown_kid() {
         let doc = sign(br#"{"kid":"a1"}"#, TICKET_CONTEXT, &key(7));
         assert_eq!(
             verify(&doc, TICKET_CONTEXT, &set("a1", &key(8)), 4096),
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn veränderte_payload_scheitert() {
+    fn tampered_payload_fails() {
         let k = key(7);
         let doc = sign(br#"{"kid":"a1","seats":3}"#, LICENSE_CONTEXT, &k);
         let (_, sig) = doc.split_once('.').unwrap();
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn form_und_länge() {
+    fn shape_and_length() {
         let keys = set("a1", &key(7));
         assert_eq!(
             verify("abc", TICKET_CONTEXT, &keys, 4096),
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn schlüsselliste() {
+    fn key_list() {
         let k = key(1);
         let pk = b64(k.verifying_key().as_bytes());
         assert!(KeySet::parse("").unwrap().is_empty());

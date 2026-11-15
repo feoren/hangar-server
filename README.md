@@ -1,32 +1,27 @@
-# Hangar-Teamserver
+# Hangar Team Server
 
 [![CI](https://github.com/feoren/hangar-team-server/actions/workflows/ci.yml/badge.svg)](https://github.com/feoren/hangar-team-server/actions/workflows/ci.yml)
 [![License: Elastic 2.0](https://img.shields.io/badge/license-Elastic%202.0-blue)](LICENSE)
 
-Der Server für die Teamarbeit in [Hangar](https://github.com/feoren/hangar), der Desktop-App für
-KI-Coding-Agenten. Er verbindet die Hangar-Apps eines Teams: Wer arbeitet gerade woran, wer hat
-welche Aufgabe reserviert, welche Dateien ändert ein Agent, dazu Ende-zu-Ende-verschlüsselte
-Notizen. Der Server sieht dabei nie Klartext, er speichert und verteilt nur verschlüsselte Daten.
+The server for teamwork in [Hangar](https://github.com/feoren/hangar), the desktop app for AI
+coding agents. It connects the Hangar apps of a team: who is working on what right now, who has
+reserved which task, which files an agent is changing, plus end-to-end encrypted notes. The server
+never sees plaintext; it only stores and relays encrypted data.
 
-> **In English:** the team server for [Hangar](https://github.com/feoren/hangar). It relays live
-> presence, task reservations, file claims and end-to-end encrypted notes between teammates and
-> can be self-hosted with its own accounts and invitations. One Rust binary with SQLite, shipped
-> as a Docker image behind Caddy. The documentation is in German.
+## Do I need this?
 
-## Brauche ich das?
+**Usually not.** Out of the box, Hangar uses the official service at
+[hangar.feoren.com](https://hangar.feoren.com), where there is nothing to set up.
 
-**Meistens nicht.** Hangar nutzt von Haus aus den offiziellen Dienst unter
-[hangar.feoren.com](https://hangar.feoren.com), dort ist nichts einzurichten.
+You only need this server if your team wants to run its **own server**, for example to keep all
+data inside your own network.
 
-Diesen Server brauchst du nur, wenn dein Team einen **eigenen Server** betreiben will, etwa damit
-alle Daten im eigenen Netz bleiben.
+## Set up your own server
 
-## Eigenen Server einrichten
+You need a machine with Docker, a domain name that points to it, and open ports 80 and 443. The
+bundled Caddy obtains the certificate automatically.
 
-Du brauchst einen Rechner mit Docker, einen Domainnamen, der auf ihn zeigt, und offene Ports
-80 und 443. Das Zertifikat holt der mitgelieferte Caddy automatisch.
-
-**1. Herunterladen und Einstellungen anlegen**
+**1. Download and create the settings**
 
 ```sh
 git clone https://github.com/feoren/hangar-team-server.git
@@ -34,73 +29,72 @@ cd hangar-team-server
 cp .env.example .env
 ```
 
-**2. In `.env` diese Werte setzen**
+**2. Set these values in `.env`**
 
 ```
 IDENTITY=local
 PUBLIC_URL=https://team.example.org
 TEAM_DOMAIN=team.example.org
-SERVER_SECRET=<mindestens 32 zufällige Zeichen, z. B. von: openssl rand -base64 48>
+SERVER_SECRET=<at least 32 random characters, e.g. from: openssl rand -base64 48>
 ```
 
-Mails sind optional. Ohne Mailserver (`MAIL_TRANSPORT=none`) gibt der Server Links auf der
-Kommandozeile aus.
+Mail is optional. Without a mail server (`MAIL_TRANSPORT=none`) the server prints links on the
+command line.
 
-**3. Starten und prüfen**
+**3. Start and check**
 
 ```sh
 docker compose up -d --build
-curl https://team.example.org/health      # ergibt {"status":"ok",...}
+curl https://team.example.org/health      # returns {"status":"ok",...}
 ```
 
-**4. Team anlegen und Leute einladen**
+**4. Create a team and invite people**
 
 ```sh
-docker compose run --rm teamserver create-team du@example.org Entwicklung
-docker compose run --rm teamserver invite Entwicklung anna@example.org
-docker compose run --rm teamserver teams                  # Übersicht
+docker compose run --rm teamserver create-team you@example.org Engineering
+docker compose run --rm teamserver invite Engineering anna@example.org
+docker compose run --rm teamserver teams                  # overview
 ```
 
-`invite` gibt einen Einladungslink aus. Den schickst du der Person, er gilt einmal und 7 Tage.
-Mit `admin` am Ende bekommt sie Adminrechte.
+`invite` prints an invitation link. Send it to the person; it can be used once and is valid for
+7 days. Add `admin` at the end to give them admin rights.
 
-**5. In Hangar verbinden**
+**5. Connect in Hangar**
 
-In Hangar als Server-Adresse `https://team.example.org/api/v1` eintragen, auf Anmelden klicken und
-den Code im Browser bestätigen. Ohne Mailserver holst du dir den Anmeldelink für den Browser mit
-`docker compose run --rm teamserver login-link du@example.org`.
+In Hangar, enter `https://team.example.org/api/v1` as the server address, click sign in and
+confirm the code in the browser. Without a mail server, you get the magic link for the browser
+with `docker compose run --rm teamserver login-link you@example.org`.
 
-## Gut zu wissen
+## Good to know
 
-- **Plätze:** Bis zu 3 Personen sind kostenlos. Für mehr kaufst du Plätze auf
-  [hangar.feoren.com](https://hangar.feoren.com) und hinterlegst das Lizenzdokument auf dem Server.
-- **Sicherung:** Alle Daten liegen im Docker-Volume `team-data`. Sichere es regelmäßig, wie in
-  [docs/betrieb.md](docs/betrieb.md) beschrieben.
-- **Updates:** `git pull` und danach `docker compose up -d --build`. Die Datenbank wird beim Start
-  automatisch angepasst.
-- **Nur mit HTTPS:** Außerhalb des eigenen Rechners verbindet sich Hangar nur über `https`.
+- **Seats:** Up to 3 people are free. For more, buy seats on
+  [hangar.feoren.com](https://hangar.feoren.com) and place the license document on the server.
+- **Backups:** All data lives in the Docker volume `team-data`. Back it up regularly as described
+  in [docs/operations.md](docs/operations.md).
+- **Updates:** `git pull`, then `docker compose up -d --build`. The database is migrated
+  automatically on startup.
+- **HTTPS only:** Outside your own machine, Hangar only connects via `https`.
 
-## Mehr Dokumentation
+## More documentation
 
-| Thema | Datei |
+| Topic | File |
 | --- | --- |
-| Betrieb ausführlich: Konfiguration, Sicherung, Neustarts, offizieller Dienst | [docs/betrieb.md](docs/betrieb.md) |
-| Alle HTTP-Routen | [docs/http-api.md](docs/http-api.md) |
-| Konto-API für die App | [docs/account-api.md](docs/account-api.md) |
-| Protokoll des Live-Kanals | [docs/protocol.md](docs/protocol.md) |
-| Sicherheit und Bedrohungsmodell | [docs/security.md](docs/security.md) |
-| Code, Bauen, Tests, Crates der App | [docs/entwicklung.md](docs/entwicklung.md) |
-| Alle Einstellungen mit Erklärung | [.env.example](.env.example) |
+| Operations in detail: configuration, backups, restarts, official service | [docs/operations.md](docs/operations.md) |
+| All HTTP routes | [docs/http-api.md](docs/http-api.md) |
+| Account API for the app | [docs/account-api.md](docs/account-api.md) |
+| Protocol of the live channel | [docs/protocol.md](docs/protocol.md) |
+| Security and threat model | [docs/security.md](docs/security.md) |
+| Code, building, tests, crates from the app | [docs/development.md](docs/development.md) |
+| All settings with explanations | [.env.example](.env.example) |
 
-> **Hinweis:** Das Verschlüsselungsverfahren ist ein eigenes Protokoll der App und noch nicht
-> extern geprüft. Vor dem Einsatz mit sensiblen Daten bitte [docs/security.md](docs/security.md)
-> lesen.
+> **Note:** The encryption scheme is the app's own protocol and has not been externally audited
+> yet. Please read [docs/security.md](docs/security.md) before using it with sensitive data.
 
-## Lizenz und Sicherheit
+## License and security
 
-[Elastic License 2.0](LICENSE): Nutzen, Ändern und Selbstbetrieb für das eigene Team sind erlaubt.
-Nicht erlaubt ist, den Server als gehosteten Dienst für andere anzubieten oder die Platz- und
-Lizenzprüfung zu umgehen.
+[Elastic License 2.0](LICENSE): using, modifying and self-hosting for your own team are allowed.
+Offering the server as a hosted service to others, or circumventing the seat and license check,
+is not.
 
-Sicherheitslücken bitte nicht öffentlich melden, sondern wie in [SECURITY.md](SECURITY.md)
-beschrieben.
+Please do not report security vulnerabilities publicly; follow [SECURITY.md](SECURITY.md)
+instead.

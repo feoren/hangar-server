@@ -1,7 +1,7 @@
-//! Mailvorlagen im Hangar-Stil: Tabellenlayout mit Inline-CSS (Outlook, Gmail, Apple Mail),
-//! hell als Grundlage, dunkel über `prefers-color-scheme`, keine Bilder aus dem Netz, kein
-//! Tracking. Jede Mail hat einen gleichwertigen Textteil; der Knopf-Link steht auch als Text da.
-//! Farben aus den Design-Tokens der App (`resources/css/theme.css` der Webseite).
+//! Mail templates in Hangar style: table layout with inline CSS (Outlook, Gmail, Apple Mail),
+//! light as the base, dark via `prefers-color-scheme`, no images from the network, no
+//! tracking. Every mail has an equivalent text part; the button link is also given as text.
+//! Colors from the app's design tokens (`resources/css/theme.css` of the website).
 
 use super::i18n::{fill, strings, Strings};
 
@@ -48,8 +48,8 @@ pub fn escape(text: &str) -> String {
     out
 }
 
-/// Werte aus Eingaben (Teamname, Adressen) dürfen keine Zeilen umbrechen oder Steuerzeichen
-/// tragen; im Betreff würde das sonst Kopfzeilen fälschen.
+/// Values from input (team name, addresses) must not contain line breaks or control
+/// characters; in the subject they could otherwise forge header lines.
 fn clean(value: &str) -> String {
     value
         .chars()
@@ -130,7 +130,7 @@ fn cleaned(kind: &MailKind) -> MailKind {
     }
 }
 
-/// Baut Betreff, Text- und HTML-Teil. `server` ist der Host des Servers (für den Fuß).
+/// Builds subject, text and HTML part. `server` is the server's host (for the footer).
 pub fn render(kind: &MailKind, lang: &str, server: &str) -> Rendered {
     let s = strings(lang);
     let kind = cleaned(kind);
@@ -146,7 +146,7 @@ pub fn render(kind: &MailKind, lang: &str, server: &str) -> Rendered {
     }
     text.push_str(&format!("\nHangar\n\n--\n{footer}\n"));
 
-    // Für HTML dieselben Teile, aber mit maskierten Werten.
+    // Same parts for HTML, but with escaped values.
     let html_kind = match &kind {
         MailKind::Invitation {
             inviter,
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn maskiert_und_ohne_fremde_bilder() {
+    fn escaped_and_without_remote_images() {
         let r = render(&invitation(), "de", "team.example.org");
         assert!(!r.html.contains("<script>"));
         assert!(r.html.contains("&lt;script&gt;"));
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn alle_arten_in_allen_sprachen() {
+    fn all_kinds_in_all_languages() {
         let kinds = [
             invitation(),
             MailKind::LoginLink {
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn aufmerksamkeit_ohne_inhalt() {
+    fn attention_without_content() {
         let r = render(
             &MailKind::Attention {
                 team: "Core".into(),

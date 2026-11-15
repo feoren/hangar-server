@@ -1,7 +1,7 @@
-# Betrieb auf einem VPS oder Docker-Host: Teamserver hinter Caddy (TLS per ACME).
-# Vorher: .env aus .env.example anlegen und TEAM_DOMAIN, PUBLIC_URL, Schlüssel setzen.
+# Running on a VPS or Docker host: team server behind Caddy (TLS via ACME).
+# Beforehand: create .env from .env.example and set TEAM_DOMAIN, PUBLIC_URL and the keys.
 #   docker compose up -d --build
-# Nur Caddy ist von außen erreichbar (80/443); der Teamserver lauscht nur im Compose-Netz.
+# Only Caddy is reachable from outside (80/443); the team server listens only inside the Compose network.
 
 services:
   teamserver:
@@ -12,7 +12,7 @@ services:
     environment:
       DATA_DIR: /data
       BIND_ADDR: 0.0.0.0:8080
-      # Caddy hängt die Client-Adresse an X-Forwarded-For an; nur deshalb vertrauen wir ihr.
+      # Caddy appends the client address to X-Forwarded-For; that is the only reason we trust it.
       TRUST_PROXY: "true"
     volumes:
       - team-data:/data
@@ -25,7 +25,7 @@ services:
     deploy:
       resources:
         limits:
-          # 200 Verbindungen × bis 1 MiB Lesepuffer plus Zustand (docs/protocol.md).
+          # 200 connections × up to 1 MiB read buffer plus state (docs/protocol.md).
           memory: 512M
     stop_grace_period: 20s
 
@@ -39,7 +39,7 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      TEAM_DOMAIN: ${TEAM_DOMAIN:?TEAM_DOMAIN fehlt in .env}
+      TEAM_DOMAIN: ${TEAM_DOMAIN:?TEAM_DOMAIN missing in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

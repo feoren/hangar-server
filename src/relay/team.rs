@@ -1,12 +1,11 @@
-//! Laufzeitzustand eines Teams. Die Regeln kommen aus dem Protokoll-Crate der App:
-//! `ReservationBook` ("first wins", Ablauf, Freigabe, Rekey), `ClaimBoard` (Vergleich der Keyed
-//! Hashes), `EventLog` (Sequenz, Nachspielen, Resync), `RecentOps` (Wiederholungen je Absender,
-//! Team und Operations-ID mit Digest des Inhalts), `check_epoch`, `check_rotate`,
-//! `check_append`. Hier liegen nur Verteilung, Speicherung und die Rechte, die das Relay aus dem
-//! Ticket kennt.
+//! Runtime state of a team. The rules come from the app's protocol crate: `ReservationBook`
+//! ("first wins", expiry, release, rekey), `ClaimBoard` (comparison of the keyed hashes),
+//! `EventLog` (sequence, replay, resync), `RecentOps` (retries per sender, team and operation ID
+//! with a digest of the content), `check_epoch`, `check_rotate`, `check_append`. Only
+//! distribution, storage and the permissions the relay knows from the ticket live here.
 //!
-//! Der Aufrufer hält die Sperre des Teams; damit gilt die Ankunftsreihenfolge als Wahrheit, und
-//! Ereignisse gehen in Sequenzreihenfolge an alle Empfänger.
+//! The caller holds the team lock; thus the order of arrival counts as the truth, and events go
+//! to all receivers in sequence order.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -38,18 +37,18 @@ use crate::wire::{
     TaskReleased, TaskReserved, TeamId, UnixMillis, Welcome,
 };
 
-/// Ereignisse im Speicher für das Nachspielen; ältere verlangen einen Snapshot.
+/// Events kept in memory for replay; older ones require a snapshot.
 pub const REPLAY_WINDOW: usize = 2048;
-/// Gemerkte Operations-IDs je Team für idempotente Wiederholung.
+/// Remembered operation IDs per team for idempotent retries.
 pub const RECENT_OPS: usize = 4096;
-/// Claims je Gerät.
+/// Claims per device.
 pub const MAX_SESSIONS_PER_DEVICE: usize = 64;
-/// Claims je Team (Schutz des Speichers).
+/// Claims per team (protects memory).
 pub const MAX_SESSIONS_PER_TEAM: usize = 2000;
-/// Claims eines Geräts, das so lange offline ist, verfallen (in Millisekunden).
+/// Claims of a device that has been offline this long expire (in milliseconds).
 pub const OFFLINE_CLAIMS_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Close-Codes und `hello`-Frist des Protokoll-Crates.
+/// Close codes and `hello` deadline of the protocol crate.
 pub mod close {
     pub use hangar_team_protocol::close::{
         CLOSE_HELLO_TIMEOUT, CLOSE_REMOVED, CLOSE_ROLE_CHANGED, CLOSE_TEAM_DELETED,
@@ -57,30 +56,30 @@ pub mod close {
     };
 }
 
-/// Was an eine Verbindung geht.
+/// What goes to a connection.
 #[derive(Debug, Clone)]
 pub enum Outgoing {
     Text(Utf8Bytes),
     Close(u16, &'static str),
 }
 
-/// Eine Verbindung, die im Team angemeldet ist.
+/// A connection that has joined the team.
 #[derive(Debug, Clone)]
 pub struct Subscriber {
     pub holder: Holder,
     pub role: Role,
     pub tx: mpsc::Sender<Outgoing>,
-    /// Wird ausgelöst, wenn die Verbindung nicht mehr mitkommt (Warteschlange voll).
+    /// Triggered when the connection can no longer keep up (queue full).
     pub kick: Arc<Notify>,
-    /// Wird ausgelöst, wenn ein Log-Eintrag das Gerät aus dem Team nahm: die Verbindung beginnt
-    /// die Frist, in der sie nur noch `memberlog.get` stellen darf.
+    /// Triggered when a log entry took the device out of the team: the connection starts the
+    /// grace period during which it may only send `memberlog.get`.
     pub removed: Arc<Notify>,
 }
 
-/// Eine Verbindung eines entfernten Geräts in ihrer Frist: kein Mitglied, keine Präsenz, kein
-/// Empfänger von Ereignissen außer `memberlog.appended` (bis `until`) und dem eigenen
-/// `device.removed`. Beantwortet wird nur `memberlog.get`, mit Einträgen bis `until` (dem
-/// Eintrag, der das Gerät entfernte).
+/// A connection of a removed device in its grace period: no member, no presence, no receiver of
+/// events except `memberlog.appended` (up to `until`) and its own `device.removed`. Only
+/// `memberlog.get` is answered, with entries up to `until` (the entry that removed the
+/// device).
 #[derive(Debug, Clone)]
 struct Departing {
     holder: Holder,
@@ -88,17 +87,17 @@ struct Departing {
     until: u64,
 }
 
-/// Ergebnis einer Anmeldung.
+/// Result of a join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Joined {
-    /// Angemeldet wie üblich.
+    /// Joined as usual.
     Member,
-    /// Gesperrtes Gerät: nur `welcome`, danach nur `memberlog.get` bis zum entfernenden
-    /// Eintrag, dann Close 4403 (siehe `conn`).
+    /// Blocked device: only `welcome`, then only `memberlog.get` up to the removing entry, then
+    /// close 4403 (see `conn`).
     Departing,
 }
 
-/// Wem eine Hinweismail gelten könnte (Selbstbetrieb): Mitglied ist nicht verbunden.
+/// Who a notice email could be for (self-hosting): the member is not connected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attention {
     pub team: String,
@@ -107,7 +106,7 @@ pub struct Attention {
 
 type Reply = Result<Ack, ErrorBody>;
 
-/// Notizen, die das Relay neben dem Buch hält und mit ihm speichert.
+/// Notes the relay keeps next to the book and stores with it.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoredNotes {
     holds: BTreeMap<KeyedHash, Sealed>,
@@ -146,35 +145,35 @@ pub struct Team {
     log: EventLog<ServerMessage>,
     book: ReservationBook,
     board: ClaimBoard,
-    /// Sitzungen je Gerät, für die Grenzen (das Board zählt nicht).
+    /// Sessions per device, for the limits (the board does not count them).
     sessions: HashMap<Holder, HashSet<SessionKey>>,
-    /// Verschlüsselte Notizen gehaltener Aufgaben und offener Freigabewünsche; das Buch kennt
-    /// sie nicht, die Ereignisse tragen sie.
+    /// Encrypted notes of held tasks and open release requests; the book does not know them,
+    /// the events carry them.
     notes: HashMap<KeyedHash, Sealed>,
     request_notes: HashMap<KeyedHash, Sealed>,
     members: BTreeMap<String, Role>,
     presence: HashMap<Holder, PresenceUpdate>,
     subscribers: HashMap<u64, Subscriber>,
-    /// Verbindungen entfernter Geräte in ihrer Frist (siehe `Departing`).
+    /// Connections of removed devices in their grace period (see `Departing`).
     departing: HashMap<u64, Departing>,
     offline_since: HashMap<Holder, u64>,
     ops: RecentOps<Reply>,
-    /// Das geprüfte Mitgliedschafts-Log (hangar-team-crypto), nach einem Neustart mit `apply_all`
-    /// aus den gespeicherten Einträgen neu aufgebaut.
+    /// The verified membership log (hangar-team-crypto), rebuilt from the stored entries with
+    /// `apply_all` after a restart.
     verifier: LogVerifier,
-    /// Neueste unzugestellte `notify` je Mitglied (auch gespeichert).
+    /// Latest undelivered `notify` per member (also stored).
     pending: HashMap<MemberId, NotifyMessage>,
-    /// Das Buch hat sich seit dem letzten Speichern geändert.
+    /// The book has changed since the last save.
     dirty: bool,
     pub attention: Vec<Attention>,
     pub last_activity: u64,
 }
 
 impl Team {
-    /// Lädt ein Team: Buch und Log-Position aus dem gespeicherten Zustand (`restore` des
-    /// Crates, alle Halter gelten danach als getrennt); die Ereignisse des Neustarts gehen ins
-    /// Log. Fehlt der Zustand oder passt er nicht, beginnt ein leeres Buch mit neuem Stream
-    /// (Clients holen einen Snapshot).
+    /// Loads a team: book and log position from the stored state (the crate's `restore`; all
+    /// holders count as disconnected afterwards); the restart events go into the log. If the
+    /// state is missing or does not fit, an empty book starts with a new stream (clients fetch a
+    /// snapshot).
     pub async fn load(db: &Db, id: &str, policy: Policy, now: u64) -> Result<Team, sqlx::Error> {
         let protocol = |e: String| sqlx::Error::Protocol(e);
         let team = TeamId::new(id).map_err(|e| protocol(e.to_string()))?;
@@ -186,14 +185,14 @@ impl Team {
             let snapshot = match BookSnapshot::from_json(&state.book) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    tracing::warn!(%error, "Reservierungen nicht lesbar, neuer Stream");
+                    tracing::warn!(%error, "cannot read reservations, new stream");
                     return None;
                 }
             };
             match ReservationBook::restore(snapshot, policy, at) {
                 Ok(restored) => Some((position, notes, restored)),
                 Err(error) => {
-                    tracing::warn!(%error, "Reservierungen nicht wiederherstellbar, neuer Stream");
+                    tracing::warn!(%error, "cannot restore reservations, new stream");
                     None
                 }
             }
@@ -220,9 +219,9 @@ impl Team {
         let mut verifier = LogVerifier::new(team.clone());
         let entries = store::log_all(db, id).await?;
         if let Err(error) = verifier.apply_all(&entries) {
-            // Gespeichert wird nur, was zugelassen war; ein Fehler hier heißt beschädigte Daten.
-            // Das Log bleibt beim letzten gültigen Eintrag stehen.
-            tracing::error!(%error, "gespeichertes Mitgliedschafts-Log nicht nachvollziehbar");
+            // Only what was admitted gets stored; an error here means corrupted data.
+            // The log stops at the last valid entry.
+            tracing::error!(%error, "stored membership log cannot be replayed");
         }
         let mut pending = HashMap::new();
         for (member, json) in store::pending_notifies(db, id).await? {
@@ -256,8 +255,8 @@ impl Team {
             last_activity: now,
         };
         let mut events = loaded.book_messages(events);
-        // Hat ein Absturz die Epoche in der Datenbank weitergedreht als im Buch, gilt die der
-        // Datenbank (key.rotate wurde dort schon bestätigt).
+        // If a crash left the epoch in the database further ahead than in the book, the
+        // database's one applies (key.rotate was already confirmed there).
         if Epoch(row.epoch) > loaded.book.epoch() {
             if let Ok(rotated) = loaded.book.rotate(Epoch(row.epoch), at) {
                 events.extend(loaded.book_messages(rotated));
@@ -276,7 +275,7 @@ impl Team {
         self.book.epoch()
     }
 
-    /// Nichts verbunden, nichts gehalten, nichts gemerkt: darf aus dem Speicher.
+    /// Nothing connected, nothing held, nothing remembered: may be unloaded from memory.
     pub fn idle(&self, now: u64) -> bool {
         self.subscribers.is_empty()
             && self.departing.is_empty()
@@ -310,7 +309,7 @@ impl Team {
         }) {
             Ok(text) => Some(Utf8Bytes::from(text)),
             Err(error) => {
-                tracing::error!(%error, kind, "Rahmen nicht kodierbar");
+                tracing::error!(%error, kind, "cannot encode frame");
                 None
             }
         }
@@ -320,7 +319,7 @@ impl Team {
         let Some(text) = text else { return };
         if let Some(sub) = self.subscribers.get(&conn) {
             if sub.tx.try_send(Outgoing::Text(text)).is_err() {
-                // Wer nicht mitkommt, wird getrennt und holt per Cursor nach.
+                // Whoever cannot keep up is disconnected and catches up via cursor.
                 sub.kick.notify_one();
             }
         }
@@ -335,7 +334,7 @@ impl Team {
         self.send(conn, text);
     }
 
-    /// Ein Ereignis des Buchs als Servernachricht, mit den Notizen, die das Relay hält.
+    /// A book event as a server message, with the notes the relay holds.
     fn book_message(&self, (task, event): BookEvent) -> ServerMessage {
         match event {
             ReservationEvent::Reserved {
@@ -403,7 +402,7 @@ impl Team {
         events.into_iter().map(|e| self.book_message(e)).collect()
     }
 
-    /// Notizen nur für Aufgaben behalten, die noch gehalten bzw. angefragt sind.
+    /// Keeps notes only for tasks that are still held or requested.
     fn prune_notes(&mut self) {
         let book = &self.book;
         self.notes.retain(|task, _| book.get(task).is_some());
@@ -415,8 +414,8 @@ impl Team {
         });
     }
 
-    /// Verteilt Ereignisse: geloggte bekommen die nächste Sequenznummer, alle gehen an jede
-    /// Verbindung des Teams. `wrapped` füllt `key.rotated` je Gerät.
+    /// Distributes events: logged ones get the next sequence number, all go to every connection
+    /// of the team. `wrapped` fills `key.rotated` per device.
     async fn emit(
         &mut self,
         db: &Db,
@@ -429,9 +428,9 @@ impl Team {
             }
             return Ok(());
         }
-        // Haltbarkeitsregel: erst Buch und Log-Position speichern, dann senden. Kein Rahmen mit
-        // `seq` verlässt das Relay, bevor ein gespeicherter head ihn abdeckt; sonst vergäbe ein
-        // Neustart dieselbe `seq` an ein neues Ereignis.
+        // Durability rule: store book and log position first, then send. No frame with `seq`
+        // leaves the relay before a stored head covers it; otherwise a restart would assign the
+        // same `seq` to a new event.
         let mut numbered = Vec::with_capacity(messages.len());
         let mut notifies = Vec::new();
         let mut logged = false;
@@ -489,11 +488,11 @@ impl Team {
         Ok(())
     }
 
-    /// Ein entferntes Gerät in seiner Frist bekommt nur, was zu seiner Entfernung führt:
-    /// `memberlog.appended` bis zum entfernenden Eintrag und sein eigenes `device.removed`, beide
-    /// ohne `seq`: die Ereignisse dazwischen (etwa die Freigabe seiner Reservierungen) bekommt es
-    /// nicht, und mit `seq` sähe die App darin eine Lücke und brächte die Sitzung ab, bevor sie
-    /// ihre Entfernung im Log geprüft hat.
+    /// A removed device in its grace period only gets what leads to its removal:
+    /// `memberlog.appended` up to the removing entry and its own `device.removed`, both without
+    /// `seq`: it does not get the events in between (such as the release of its reservations),
+    /// and with `seq` the app would see a gap and abort the session before it has verified its
+    /// removal in the log.
     fn send_departing(&self, message: &ServerMessage) {
         let mut text = None;
         for departing in self.departing.values() {
@@ -514,9 +513,9 @@ impl Team {
         }
     }
 
-    /// `memberlog.get` einer Verbindung in ihrer Frist: Einträge nach `after` bis zum
-    /// entfernenden Eintrag. `None`: die Verbindung ist hier nicht in ihrer Frist. `Some(true)`:
-    /// die letzte Seite ist beantwortet, die Verbindung schließt mit 4403.
+    /// `memberlog.get` of a connection in its grace period: entries after `after` up to the
+    /// removing entry. `None`: the connection is not in its grace period here. `Some(true)`: the
+    /// last page has been answered, the connection closes with 4403.
     pub async fn departing_log_get(
         &mut self,
         db: &Db,
@@ -540,7 +539,7 @@ impl Team {
         Ok(Some(done))
     }
 
-    /// Buch (`export`), Log-Position und Notizen in einer Schreibung.
+    /// Book (`export`), log position and notes in a single write.
     async fn persist(&mut self, db: &Db) -> Result<(), sqlx::Error> {
         let encode = |e: serde_json::Error| sqlx::Error::Protocol(e.to_string());
         let book = serde_json::to_string(&self.book.export()).map_err(encode)?;
@@ -567,7 +566,7 @@ impl Team {
         Ok(())
     }
 
-    /// Die gemerkte `notify` eines Mitglieds an alle seine Verbindungen (nach `welcome`).
+    /// Sends a member's remembered `notify` to all of its connections (after `welcome`).
     async fn deliver_pending(&mut self, db: &Db, member: &MemberId) -> Result<(), sqlx::Error> {
         let Some(notify) = self.pending.remove(member) else {
             return Ok(());
@@ -585,8 +584,8 @@ impl Team {
         store::clear_pending_notify(db, &self.id, member.as_str()).await
     }
 
-    /// Freigabewunsch oder bevorstehender Ablauf bei einem nicht verbundenen Halter. `notify`
-    /// legt `emit` ab; im Selbstbetrieb geht zusätzlich eine Hinweismail.
+    /// Release request or upcoming expiry for a holder that is not connected. `emit` stores the
+    /// `notify`; in self-hosting a notice email is sent in addition.
     fn note_attention(&mut self, message: &ServerMessage) {
         let member = match message {
             ServerMessage::TaskReleaseRequested(m) => &m.holder.member,
@@ -601,8 +600,8 @@ impl Team {
         }
     }
 
-    /// Anmeldung einer Verbindung nach geprüftem Ticket. Schickt Nachspiel oder Snapshot und
-    /// danach die Beitrittsereignisse. Präsenz zählt je Verbindung.
+    /// Joins a connection after a verified ticket. Sends replay or snapshot and then the join
+    /// events. Presence counts per connection.
     #[allow(clippy::too_many_arguments)]
     pub async fn join(
         &mut self,
@@ -616,7 +615,7 @@ impl Team {
         now: u64,
         allow_departing: bool,
     ) -> Result<Result<Joined, ErrorCode>, sqlx::Error> {
-        // Erst das gesperrte Gerät, ohne etwas zu schreiben: es zählt nicht als Mitglied.
+        // The blocked device first, without writing anything: it does not count as a member.
         if let Some(until) = store::device_removed(
             db,
             &self.id,
@@ -628,10 +627,10 @@ impl Team {
             let age =
                 store::ticket_age(db, &self.id, sub.holder.member.as_str(), ticket_iat_ms).await?;
             if !allow_departing || age != store::TicketAge::Current {
-                tracing::info!("hello eines entfernten Geräts abgelehnt");
+                tracing::info!("hello from a removed device rejected");
                 return Ok(Err(ErrorCode::Forbidden));
             }
-            tracing::info!("hello eines entfernten Geräts: nur memberlog.get bis zur Entfernung");
+            tracing::info!("hello from a removed device: only memberlog.get up to the removal");
             let welcome = ServerMessage::Welcome(Welcome {
                 proto,
                 stream: self.log.stream().clone(),
@@ -751,7 +750,7 @@ impl Team {
         })
     }
 
-    /// Zustand als Ereignisse ohne `seq` (nach `resync_required`).
+    /// State as events without `seq` (after `resync_required`).
     fn snapshot(&self) -> Vec<ServerMessage> {
         let mut out: Vec<ServerMessage> = self
             .members
@@ -806,7 +805,7 @@ impl Team {
         out
     }
 
-    /// Eine Verbindung meldet sich ab (getrennt, zu langsam, Ticketalter erreicht).
+    /// A connection leaves (disconnected, too slow, ticket age reached).
     pub async fn leave(&mut self, db: &Db, conn: u64, now: u64) -> Result<(), sqlx::Error> {
         self.departing.remove(&conn);
         let Some(sub) = self.subscribers.remove(&conn) else {
@@ -844,8 +843,8 @@ impl Team {
         }
     }
 
-    /// Ein Mitglied wurde entfernt (Selbstbetrieb oder Widerrufsliste): Reservierungen und
-    /// Claims enden, offene Verbindungen werden mit 4403 geschlossen.
+    /// A member was removed (self-hosting or revocation list): reservations and claims end,
+    /// open connections are closed with 4403.
     pub async fn remove_member(
         &mut self,
         db: &Db,
@@ -872,10 +871,10 @@ impl Team {
         self.emit(db, events, None).await
     }
 
-    /// Ein Gerät verlässt das Team (sein Mitglied bleibt): Reservierungen frei, Claims weg.
-    /// Seine Verbindungen sind ab sofort keine Empfänger mehr; sie beginnen ihre Frist
-    /// (`Departing`, bis zum Eintrag `until`), in der sie nur noch `memberlog.get` stellen dürfen,
-    /// dann schließt `conn` mit 4403. Gibt die Ereignisse zurück (ohne `device.removed`).
+    /// A device leaves the team (its member stays): reservations released, claims gone. Its
+    /// connections stop being receivers right away; they start their grace period (`Departing`,
+    /// up to the entry `until`) during which they may only send `memberlog.get`, then `conn`
+    /// closes with 4403. Returns the events (without `device.removed`).
     fn drop_device(&mut self, holder: &Holder, until: u64, now: u64) -> Vec<ServerMessage> {
         let removed = self.book.remove_device(holder, UnixMillis(now));
         self.dirty = true;
@@ -908,18 +907,18 @@ impl Team {
         events
     }
 
-    /// Verbindungen eines Mitglieds schließen (4401), weil seine Rolle sich änderte und die neue
-    /// unbekannt ist; die App kommt mit einem neuen Ticket zurück.
+    /// Closes a member's connections (4401) because its role changed and the new one is
+    /// unknown; the app comes back with a new ticket.
     pub fn renew_member(&mut self, member: &str) {
         self.close_where(close::CLOSE_ROLE_CHANGED, "role changed", |s| {
             s.holder.member.as_str() == member
         });
     }
 
-    /// Eine bekannte neue Rolle still auf allen Verbindungen des Mitglieds anwenden (aus
-    /// `ticket.renew`, der Widerrufsliste oder dem Selbstbetrieb). Rechte werden je Nachricht
-    /// geprüft, also scheitern Owner- und Admin-Absichten danach von selbst; getrennt wird
-    /// nicht. Eine echte Änderung meldet `member.role_changed`.
+    /// Applies a known new role silently to all connections of the member (from
+    /// `ticket.renew`, the revocation list or self-hosting). Permissions are checked per
+    /// message, so owner and admin intents fail by themselves afterwards; nothing is
+    /// disconnected. A real change reports `member.role_changed`.
     pub async fn apply_role(
         &mut self,
         db: &Db,
@@ -949,7 +948,7 @@ impl Team {
         Ok(())
     }
 
-    /// Alle Verbindungen schließen (Team gelöscht).
+    /// Closes all connections (team deleted).
     pub fn close_all(&mut self) {
         for (_, sub) in self.subscribers.drain() {
             let _ = sub
@@ -1001,7 +1000,7 @@ impl Team {
         Ok(())
     }
 
-    /// Eine Absicht einer angemeldeten Verbindung.
+    /// An intent of a joined connection.
     pub async fn handle(
         &mut self,
         db: &Db,
@@ -1012,8 +1011,8 @@ impl Team {
         now: u64,
     ) -> Result<(), sqlx::Error> {
         let Some(sub) = self.subscribers.get(&conn).cloned() else {
-            // Entfernt, während der Rahmen schon unterwegs war: ein `memberlog.get` bekommt die
-            // Antwort der Frist, damit die App nicht auf eine Antwort wartet, die nie kommt.
+            // Removed while the frame was already in flight: a `memberlog.get` gets the grace
+            // period answer, so the app does not wait for an answer that never comes.
             if let ClientMessage::MemberLogGet(get) = message {
                 self.departing_log_get(db, conn, op, get.after).await?;
             }
@@ -1060,7 +1059,7 @@ impl Team {
         Ok(())
     }
 
-    /// Wendet eine Absicht an. `None` als Antwort: die Antwort ist schon gesendet (Lesen).
+    /// Applies an intent. `None` as reply: the reply has already been sent (reads).
     #[allow(clippy::too_many_arguments)]
     async fn apply(
         &mut self,
@@ -1161,10 +1160,10 @@ impl Team {
                 (events, reply, None)
             }
             ClientMessage::TaskReleaseAnswer(m) => {
-                // Bei Annahme trägt die neue Reservierung keine Notiz: die des Wunsches ist eine
-                // `ReleaseRequestNote` (Absender der Anfragende), eine Reservierungsnotiz öffnet
-                // die App als `ReservationNote` mit dem Halter als Absender. Der neue Halter
-                // sendet seine eigene Notiz danach per `task.reserve`.
+                // On acceptance the new reservation carries no note: the request's note is a
+                // `ReleaseRequestNote` (sender is the requester), while the app opens a
+                // reservation note as a `ReservationNote` with the holder as sender. The new
+                // holder sends its own note afterwards via `task.reserve`.
                 let before = self.notes.get(&m.task).cloned();
                 if m.accept {
                     self.notes.remove(&m.task);
@@ -1326,8 +1325,8 @@ impl Team {
                 (Vec::new(), None, None)
             }
             ClientMessage::MemberLogAppend(m) => {
-                // Erst die Schlüssel, die der Eintrag einträgt, gegen die über die eigenen
-                // Verbindungen registrierten; dann der Eintrag selbst gegen das geprüfte Log.
+                // First the keys the entry records, against those registered over the own
+                // connections; then the entry itself against the verified log.
                 let registered = self.registered_for(db, &m).await?;
                 let checked = check_registered_keys(&m, |holder| registered.get(holder).copied())
                     .and_then(|()| {
@@ -1384,7 +1383,7 @@ impl Team {
                 match checked {
                     Err(reply) => (Vec::new(), Some(reply), None),
                     Ok((next, admitted)) => {
-                        // Eintrag, Epoche und Pakete in einer Transaktion oder nichts.
+                        // Entry, epoch and packages in one transaction, or nothing.
                         match store::rotate_epoch(
                             db,
                             &self.id,
@@ -1410,7 +1409,7 @@ impl Team {
                                     Ok(timing) => events.extend(self.book_messages(timing)),
                                     Err(refused) => tracing::error!(
                                         ?refused,
-                                        "Buch und Datenbank sind bei der Epoche uneins"
+                                        "book and database disagree on the epoch"
                                     ),
                                 }
                                 let wrapped =
@@ -1427,7 +1426,7 @@ impl Team {
                 }
             }
             ClientMessage::KeyWrap(m) => {
-                // Rechte vor Zustand; ein Paket je Absender, höchstens MAX_KEY_PACKAGES je Ziel.
+                // Permissions before state; one package per sender, at most MAX_KEY_PACKAGES per target.
                 let stored_from =
                     store::package_senders(db, &self.id, m.epoch, &m.wrapped.holder).await?;
                 let checked = match self.verifier.state() {
@@ -1454,7 +1453,7 @@ impl Team {
                 }
             }
             ClientMessage::DeviceRemove(m) => {
-                // Nur mit dem signierten Eintrag; gespeichert und entfernt in einem Schritt.
+                // Only with the signed entry; stored and removed in one step.
                 let mut next = self.verifier.clone();
                 match next.admit_device_remove(&m, &who, wire::role(sub.role)) {
                     Err(refused) => (Vec::new(), Some(log_refused(&refused)), None),
@@ -1511,8 +1510,8 @@ impl Team {
         })
     }
 
-    /// Die registrierten Schlüssel der Holder, die ein Eintrag einträgt (für
-    /// `check_registered_keys`, das synchron fragt).
+    /// The registered keys of the holders an entry records (for `check_registered_keys`, which
+    /// asks synchronously).
     async fn registered_for(
         &self,
         db: &Db,
@@ -1530,9 +1529,9 @@ impl Team {
         Ok(out)
     }
 
-    /// Geräte, die ein zugelassener Eintrag aus dem Team nahm: Reservierungen frei, Claims weg,
-    /// Verbindungen 4403; `device.removed` je Gerät. Gesperrt und vergessen hat sie schon die
-    /// Transaktion des Eintrags.
+    /// Devices an admitted entry took out of the team: reservations released, claims gone,
+    /// connections 4403; `device.removed` per device. The entry's transaction has already
+    /// blocked and forgotten them.
     fn drop_removed(&mut self, admitted: &Admitted, now: u64) -> Vec<ServerMessage> {
         let mut events = Vec::new();
         for holder in &admitted.removed {
@@ -1544,8 +1543,8 @@ impl Team {
         events
     }
 
-    /// `key.wrapped` geht nur an die Verbindungen des Zielgeräts (Mitglied und Gerät), nie ins
-    /// Ereignislog.
+    /// `key.wrapped` only goes to the connections of the target device (member and device),
+    /// never into the event log.
     fn deliver_wrapped(&mut self, epoch: Epoch, holder: &Holder) {
         let text = self.frame(
             None,
@@ -1567,14 +1566,14 @@ impl Team {
     }
 }
 
-/// Antwort auf einen abgelehnten Log-Eintrag (`LogError::code`). Abgelehnte Einträge ändern
-/// nichts; das Log bleibt für den nächsten gültigen Eintrag offen.
+/// Reply to a rejected log entry (`LogError::code`). Rejected entries change nothing; the log
+/// stays open for the next valid entry.
 fn log_refused(refused: &LogError) -> Reply {
-    tracing::info!(reason = %refused, "Log-Eintrag abgelehnt");
+    tracing::info!(reason = %refused, "log entry rejected");
     Err(error(refused.code()))
 }
 
-/// Grenzen aus der Konfiguration, die `handle` braucht.
+/// Limits from the configuration that `handle` needs.
 #[derive(Debug, Clone, Copy)]
 pub struct HandleLimits {
     pub blob_quota_bytes: u64,

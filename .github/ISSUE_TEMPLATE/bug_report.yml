@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report a bug. Please write in English or German.
+        Thanks for taking the time to report a bug. Please write in English.
         Security problems do not belong here; report them privately (see the link on the "New issue" page).
         Problems in the desktop app belong in https://github.com/feoren/hangar.
   - type: textarea

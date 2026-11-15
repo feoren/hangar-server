@@ -1,8 +1,8 @@
-//! TLS-Anbieter für ausgehende Verbindungen (rustls mit ring, wie lettre). reqwest wird ohne
-//! eigenen Anbieter gebaut, damit kein zweiter (aws-lc-rs mit C-Abhängigkeiten) im statischen
-//! Binary landet.
+//! TLS provider for outgoing connections (rustls with ring, like lettre). reqwest is built without
+//! a provider of its own, so that no second one (aws-lc-rs with C dependencies) ends up in the
+//! static binary.
 
-/// Setzt ring als Standard-Anbieter des Prozesses; mehrfacher Aufruf schadet nicht.
+/// Installs ring as the process-wide default provider; calling it more than once is harmless.
 pub fn install_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

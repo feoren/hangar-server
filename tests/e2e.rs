@@ -1,6 +1,6 @@
-//! E2E-Unterbau mit hangar-team-crypto (b30b9d5): das Relay prüft jeden Log-Eintrag mit dem
-//! `LogVerifier`, Rotation und Geräteentfernung nur mit signiertem Eintrag und atomar,
-//! Schlüsselpakete nach `relay::check_wrap`, Besitznachweis und Gerätegrenzen.
+//! E2E foundation with hangar-team-crypto (b30b9d5): the relay checks every log entry with the
+//! `LogVerifier`, rotation and device removal only with a signed entry and atomically, key
+//! packages per `relay::check_wrap`, proof of possession and device limits.
 
 mod common;
 
@@ -33,12 +33,12 @@ async fn log_len(c: &mut Client, team: &str) -> usize {
         .await
         .message
     else {
-        panic!("keine Einträge")
+        panic!("no entries")
     };
     page.entries.len()
 }
 
-/// Team `t` mit alice (owner) und bob (member), beide mit Schlüsseln und im Log.
+/// Team `t` with alice (owner) and bob (member), both with keys and in the log.
 async fn team(s: &TestServer) -> (Log, Dev, Client, Dev, Client) {
     let mut log = Log::new("t");
     let alice = Dev::new("alice", "alice-laptop");
@@ -55,9 +55,9 @@ async fn team(s: &TestServer) -> (Log, Dev, Client, Dev, Client) {
 }
 
 #[tokio::test]
-async fn regelwidrige_einträge_werden_abgelehnt_und_blockieren_nichts() {
+async fn invalid_entries_are_rejected_and_block_nothing() {
     let s = start_official().await;
-    // Eintrag 1 nur mit owner-Ticket.
+    // Entry 1 only with an owner ticket.
     let mut early = Log::new("t2");
     let eve = Dev::new("eve", "eve-pc");
     let mut e = Client::join_device(s.addr, "t2", &eve, Role::Admin).await;
@@ -69,23 +69,23 @@ async fn regelwidrige_einträge_werden_abgelehnt_und_blockieren_nichts() {
 
     let (mut log, alice, mut a, bob, mut b) = team(&s).await;
     let carol = Dev::new("carol", "carol-pc");
-    // Schlüssel nie über die eigene Verbindung registriert: forbidden.
+    // Keys never registered over the sender's own connection: forbidden.
     let unregistered = log.add_member(&alice, &carol, LogRole::Member);
     assert_eq!(
         code(&append(&mut a, "t", &unregistered).await),
         Some(ErrorCode::Forbidden)
     );
-    // Ein Mitglied darf keine Mitglieder aufnehmen.
+    // A member may not add members.
     let mut c = Client::join_device(s.addr, "t", &carol, Role::Member).await;
     let by_member = log.add_member(&bob, &carol, LogRole::Member);
     assert_eq!(
         code(&append(&mut b, "t", &by_member).await),
         Some(ErrorCode::Forbidden)
     );
-    // Von alice signiert, aber von bob gesendet: nicht der Absender.
+    // Signed by alice but sent by bob: not the sender.
     let foreign = log.add_member(&alice, &carol, LogRole::Member);
     assert!(code(&append(&mut b, "t", &foreign).await).is_some());
-    // Rotation und Geräteentfernung nie über memberlog.append.
+    // Rotation and device removal never via memberlog.append.
     let (rotate, _) = log.rotate(&alice);
     assert_eq!(
         code(&append(&mut a, "t", &rotate.log).await),
@@ -96,7 +96,7 @@ async fn regelwidrige_einträge_werden_abgelehnt_und_blockieren_nichts() {
         code(&append(&mut a, "t", &removal.log).await),
         Some(ErrorCode::BadRequest)
     );
-    // Nichts davon wurde gespeichert, und der nächste gültige Eintrag geht durch.
+    // None of it was stored, and the next valid entry goes through.
     assert_eq!(log_len(&mut a, "t").await, 2);
     let ok = log.add_member(&alice, &carol, LogRole::Member);
     assert!(is_ack(&append(&mut a, "t", &ok).await));
@@ -109,11 +109,11 @@ async fn regelwidrige_einträge_werden_abgelehnt_und_blockieren_nichts() {
 }
 
 #[tokio::test]
-async fn wirksame_rolle_ist_die_niedrigere() {
+async fn effective_role_is_the_lower_one() {
     let s = start_official().await;
     let (log, alice, a, _bob, _b) = team(&s).await;
     a.close().await;
-    // alice ist im Log owner, ihr Ticket sagt aber member (die Webseite hat herabgestuft).
+    // alice is owner in the log, but her ticket says member (the website downgraded her).
     let mut a = Client::connect(s.addr).await;
     let w = a
         .hello(
@@ -137,14 +137,14 @@ async fn wirksame_rolle_ist_die_niedrigere() {
 }
 
 #[tokio::test]
-async fn rotation_ist_atomar() {
+async fn rotation_is_atomic() {
     let s = start_official().await;
     let (mut log, alice, mut a, bob, mut b) = team(&s).await;
     let (rotate, _) = log.rotate(&alice);
-    // Ein Paket an ein Gerät, das das Log nicht kennt: abgelehnt, weder Eintrag noch Epoche.
+    // A package for a device unknown to the log: rejected, neither entry nor epoch.
     let mut bad = rotate.clone();
     let mut stranger = bad.wrapped[0].clone();
-    stranger.holder = holder("niemand", "nirgends");
+    stranger.holder = holder("nobody", "nowhere");
     bad.wrapped.push(stranger);
     assert!(code(&a.request("t", ClientMessage::KeyRotate(bad)).await).is_some());
     assert_eq!(log_len(&mut a, "t").await, 2);
@@ -152,14 +152,14 @@ async fn rotation_ist_atomar() {
         .request("t", ClientMessage::KeyGet(KeyGet { epoch: Epoch(1) }))
         .await;
     assert_eq!(code(&none), Some(ErrorCode::NotFound));
-    // Falsche Epoche im Umschlag.
+    // Wrong epoch in the envelope.
     let mut wrong = rotate.clone();
     wrong.epoch = Epoch(2);
     assert_eq!(
         code(&a.request("t", ClientMessage::KeyRotate(wrong)).await),
         Some(ErrorCode::StaleEpoch)
     );
-    // Die richtige Rotation: Eintrag und Pakete zusammen.
+    // The correct rotation: entry and packages together.
     assert!(is_ack(
         &a.request("t", ClientMessage::KeyRotate(rotate.clone()))
             .await
@@ -178,7 +178,7 @@ async fn rotation_ist_atomar() {
         .iter()
         .find(|w| w.holder == bob.holder)
         .unwrap();
-    assert_eq!(r.wrapped.as_ref(), Some(&mine.data), "nur das eigene Paket");
+    assert_eq!(r.wrapped.as_ref(), Some(&mine.data), "only its own package");
     let got = b
         .request("t", ClientMessage::KeyGet(KeyGet { epoch: Epoch(1) }))
         .await;
@@ -190,7 +190,7 @@ async fn rotation_ist_atomar() {
 }
 
 #[tokio::test]
-async fn schlüsselpakete_nach_den_regeln_des_logs() {
+async fn key_packages_follow_the_log_rules() {
     let s = start_official().await;
     let (mut log, alice, mut a, bob, mut b) = team(&s).await;
     let (rotate, secret) = log.rotate(&alice);
@@ -199,7 +199,7 @@ async fn schlüsselpakete_nach_den_regeln_des_logs() {
             .await
     ));
     log.accept_rotation(&rotate, &alice.holder);
-    // Weitere Geräte: bob-phone (Ziel), alice-phone, alice-tablet, bob-tablet (Absender).
+    // More devices: bob-phone (target), alice-phone, alice-tablet, bob-tablet (senders).
     let mut devs = Vec::new();
     for (owner_dev, name, role) in [
         (&bob, "bob-phone", Role::Member),
@@ -218,7 +218,7 @@ async fn schlüsselpakete_nach_den_regeln_des_logs() {
     }
     let (phone, mut phone_c) = devs.remove(0);
     let wrap = log.wrap(&secret, &phone.holder);
-    // Nie für sich selbst.
+    // Never for itself.
     assert_eq!(
         code(
             &phone_c
@@ -227,14 +227,17 @@ async fn schlüsselpakete_nach_den_regeln_des_logs() {
         ),
         Some(ErrorCode::Forbidden)
     );
-    // owner für jedes Gerät, das Mitglied für ein eigenes anderes; je Absender eins.
+    // Owner for any device, the member for another device of its own; one per sender.
     assert!(is_ack(
         &a.request("t", ClientMessage::KeyWrap(wrap.clone())).await
     ));
     let wrapped = phone_c
         .until(|f| matches!(f.message, ServerMessage::KeyWrapped(_)))
         .await;
-    assert!(wrapped.seq.is_none(), "key.wrapped geht nicht ins Log");
+    assert!(
+        wrapped.seq.is_none(),
+        "key.wrapped does not go into the log"
+    );
     assert_eq!(
         code(&a.request("t", ClientMessage::KeyWrap(wrap.clone())).await),
         Some(ErrorCode::Conflict)
@@ -263,7 +266,7 @@ async fn schlüsselpakete_nach_den_regeln_des_logs() {
         )
         .await
     ));
-    // Höchstens vier Pakete je Ziel und Epoche.
+    // At most four packages per target and epoch.
     assert_eq!(
         code(
             &bt.request(
@@ -274,14 +277,14 @@ async fn schlüsselpakete_nach_den_regeln_des_logs() {
         ),
         Some(ErrorCode::Limit)
     );
-    // Unbekanntes Ziel.
+    // Unknown target.
     let mut unknown = wrap.clone();
-    unknown.wrapped.holder = holder("bob", "gibt-es-nicht");
+    unknown.wrapped.holder = holder("bob", "does-not-exist");
     assert_eq!(
         code(&a.request("t", ClientMessage::KeyWrap(unknown)).await),
         Some(ErrorCode::NotFound)
     );
-    // key.get liefert alle Pakete.
+    // key.get returns all packages.
     let got = phone_c
         .request("t", ClientMessage::KeyGet(KeyGet { epoch: Epoch(1) }))
         .await;
@@ -292,7 +295,7 @@ async fn schlüsselpakete_nach_den_regeln_des_logs() {
 }
 
 #[tokio::test]
-async fn gerät_entfernen_nur_mit_signiertem_eintrag() {
+async fn removing_a_device_requires_a_signed_entry() {
     let s = start_official().await;
     let (mut log, alice, mut a, bob, mut b) = team(&s).await;
     let phone = Dev::new("bob", "bob-phone");
@@ -307,16 +310,16 @@ async fn gerät_entfernen_nur_mit_signiertem_eintrag() {
         note: None,
     });
     assert!(is_ack(&p.request("t", reserve).await));
-    // Ohne gültigen Eintrag: badRequest.
+    // Without a valid entry: badRequest.
     let bare = DeviceRemove {
         holder: phone.holder.clone(),
         log: dummy_log(),
     };
     assert!(code(&b.request("t", ClientMessage::DeviceRemove(bare)).await).is_some());
-    // Ein Gerät, das das Log nicht kennt: badRequest.
-    let ghost = log.remove_device(&alice, &holder("bob", "gibt-es-nicht"));
+    // A device unknown to the log: badRequest.
+    let ghost = log.remove_device(&alice, &holder("bob", "does-not-exist"));
     assert!(code(&a.request("t", ClientMessage::DeviceRemove(ghost)).await).is_some());
-    // bob-laptop entfernt bob-phone mit signiertem Eintrag.
+    // bob-laptop removes bob-phone with a signed entry.
     let removal = log.remove_device(&bob, &phone.holder);
     assert!(is_ack(
         &b.request("t", ClientMessage::DeviceRemove(removal.clone()))
@@ -334,7 +337,7 @@ async fn gerät_entfernen_nur_mit_signiertem_eintrag() {
         .await;
     assert!(removed.seq.is_some());
     assert_eq!(p.close_code().await, Some(close::CLOSE_REMOVED));
-    // Danach nur noch die Frist (eigene Tests unten), und devices nennt es nicht.
+    // After that only the grace period remains (separate tests below), and devices omits it.
     let mut again = Client::connect(s.addr).await;
     let welcome = again
         .hello("t", ticket("bob", "t", Role::Member), "bob-phone", None)
@@ -350,12 +353,12 @@ async fn gerät_entfernen_nur_mit_signiertem_eintrag() {
         list.devices
             .iter()
             .all(|d| d.proof.to_base64url().len() == 86),
-        "Besitznachweis gelistet"
+        "proof of possession listed"
     );
 }
 
-/// Team `t` mit alice, bob (bob-laptop) und bob-phone im Log; bob-phone hält eine
-/// Reservierung. Gibt auch die Verbindung von bob-phone zurück.
+/// Team `t` with alice, bob (bob-laptop) and bob-phone in the log; bob-phone holds a
+/// reservation. Also returns the connection of bob-phone.
 async fn team_with_phone(s: &TestServer) -> (Log, Dev, Client, Dev, Client, Dev, Client) {
     let (mut log, alice, a, bob, mut b) = team(s).await;
     let phone = Dev::new("bob", "bob-phone");
@@ -388,16 +391,16 @@ fn grace_config(ms: u64) -> Config {
     config
 }
 
-/// Eine Seite des Logs, wie die App sie mit einem frischen `LogVerifier` prüft.
+/// A page of the log, as the app checks it with a fresh `LogVerifier`.
 fn entries_of(frame: ServerFrame) -> MemberLogEntries {
     match frame.message {
         ServerMessage::MemberLogEntries(page) => page,
-        other => panic!("keine Einträge: {other:?}"),
+        other => panic!("no entries: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn entferntes_gerät_liest_das_log_bis_zur_entfernung_dann_4403() {
+async fn removed_device_reads_log_up_to_removal_then_4403() {
     let s = start(grace_config(5_000)).await;
     let (mut log, _alice, _a, bob, mut b, phone, mut p) = team_with_phone(&s).await;
     let removal = log.remove_device(&bob, &phone.holder);
@@ -407,14 +410,14 @@ async fn entferntes_gerät_liest_das_log_bis_zur_entfernung_dann_4403() {
     ));
     log.accept_removal(&removal, &bob.holder);
     let removed_at = log.state().head().index;
-    // Das Gerät bekommt nur memberlog.appended und sein device.removed, keine Teamdaten (die
-    // Freigabe seiner Reservierung geht an die anderen), und beide ohne seq: mit seq sähe die
-    // App in der ausgelassenen Freigabe eine Lücke und bräche ab, bevor sie das Log prüft.
+    // The device only gets memberlog.appended and its device.removed, no team data (the
+    // release of its reservation goes to the others), and both without seq: with seq the app
+    // would see a gap at the skipped release and abort before checking the log.
     loop {
-        let frame = p.recv().await.expect("Rahmen vor der Frist");
+        let frame = p.recv().await.expect("frame before the grace period ends");
         assert!(
             frame.seq.is_none(),
-            "Rahmen in der Frist mit seq: {frame:?}"
+            "frame with seq during the grace period: {frame:?}"
         );
         match &frame.message {
             ServerMessage::MemberLogAppended(m) => assert_eq!(m.index, removed_at),
@@ -422,10 +425,10 @@ async fn entferntes_gerät_liest_das_log_bis_zur_entfernung_dann_4403() {
                 assert_eq!(r.holder, phone.holder);
                 break;
             }
-            other => panic!("entferntes Gerät bekam {other:?}"),
+            other => panic!("removed device got {other:?}"),
         }
     }
-    // In der Frist wird alles außer memberlog.get abgelehnt und schreibt nichts.
+    // During the grace period everything except memberlog.get is rejected and writes nothing.
     assert_eq!(
         code(&p.request("t", reserve_task(9)).await),
         Some(ErrorCode::Forbidden)
@@ -443,9 +446,9 @@ async fn entferntes_gerät_liest_das_log_bis_zur_entfernung_dann_4403() {
     );
     assert!(
         is_ack(&b.request("t", reserve_task(9)).await),
-        "nichts reserviert"
+        "nothing reserved"
     );
-    // memberlog.get: das Log bis zur Entfernung, prüfbar wie in der App; dann 4403.
+    // memberlog.get: the log up to the removal, verifiable as in the app; then 4403.
     let page = entries_of(
         p.request("t", ClientMessage::MemberLogGet(MemberLogGet { after: 0 }))
             .await,
@@ -453,18 +456,18 @@ async fn entferntes_gerät_liest_das_log_bis_zur_entfernung_dann_4403() {
     assert!(!page.more);
     assert_eq!(page.entries.last().map(|e| e.index), Some(removed_at));
     let mut check = LogVerifier::new(team_id("t"));
-    check.apply_all(&page.entries).expect("Log prüfbar");
+    check.apply_all(&page.entries).expect("log verifiable");
     assert!(check.state().unwrap().device(&phone.holder).is_none());
     let started = std::time::Instant::now();
     assert_eq!(p.close_code().await, Some(close::CLOSE_REMOVED));
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),
-        "4403 direkt nach der Antwort, nicht erst nach der Frist"
+        "4403 right after the reply, not only after the grace period"
     );
 }
 
 #[tokio::test]
-async fn frist_ohne_memberlog_get_endet_mit_4403() {
+async fn grace_period_without_memberlog_get_ends_with_4403() {
     let s = start(grace_config(300)).await;
     let (log, _alice, _a, bob, mut b, phone, mut p) = team_with_phone(&s).await;
     let removal = log.remove_device(&bob, &phone.holder);
@@ -479,12 +482,12 @@ async fn frist_ohne_memberlog_get_endet_mit_4403() {
     let waited = started.elapsed();
     assert!(
         waited >= std::time::Duration::from_millis(150),
-        "zu früh geschlossen: {waited:?}"
+        "closed too early: {waited:?}"
     );
 }
 
 #[tokio::test]
-async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung() {
+async fn hello_from_removed_device_only_gets_log_up_to_removal() {
     let s = start(grace_config(5_000)).await;
     let (mut log, _alice, mut a, bob, mut b, phone, p) = team_with_phone(&s).await;
     let removal = log.remove_device(&bob, &phone.holder);
@@ -494,15 +497,15 @@ async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung()
     ));
     log.accept_removal(&removal, &bob.holder);
     let removed_at = log.state().head().index;
-    // Die Verbindung war schon weg (App beendet), bevor sie das Log lesen konnte.
+    // The connection was already gone (app closed) before it could read the log.
     p.close().await;
-    // Ein späterer Eintrag (neues Gerät) bleibt dem entfernten Gerät verborgen.
+    // A later entry (new device) stays hidden from the removed device.
     let tablet = Dev::new("bob", "bob-tablet");
     let _t = Client::join_device(s.addr, "t", &tablet, Role::Member).await;
     let add = log.add_device(&bob, &tablet);
     assert!(is_ack(&append(&mut b, "t", &add).await));
     log.accept(&add, &bob.holder);
-    // Alles bisher Gesendete bei alice abholen (darunter die frühere Präsenz von bob-phone).
+    // Drain everything sent to alice so far (including the earlier presence of bob-phone).
     a.request("t", ClientMessage::DevicesGet).await;
     let mut again = Client::connect(s.addr).await;
     let op = again.op();
@@ -518,8 +521,8 @@ async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung()
             }),
         )
         .await;
-    // Nur welcome: kein Snapshot, keine Reservierungen, keine Präsenz.
-    let first = again.recv().await.expect("Antwort auf hello");
+    // Only welcome: no snapshot, no reservations, no presence.
+    let first = again.recv().await.expect("reply to hello");
     assert!(
         matches!(first.message, ServerMessage::Welcome(_)),
         "{:?}",
@@ -542,7 +545,7 @@ async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung()
     ] {
         let op = again.op();
         again.send(&op, Some("t"), message).await;
-        let answer = again.recv().await.expect("Antwort in der Frist");
+        let answer = again.recv().await.expect("reply during the grace period");
         assert_eq!(answer.id.as_ref().map(|i| i.as_str()), Some(op.as_str()));
         assert_eq!(code(&answer), Some(ErrorCode::Forbidden));
     }
@@ -554,29 +557,29 @@ async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung()
     assert!(!page.more);
     assert_eq!(page.entries.last().map(|e| e.index), Some(removed_at));
     let mut check = LogVerifier::new(team_id("t"));
-    check.apply_all(&page.entries).expect("Log prüfbar");
+    check.apply_all(&page.entries).expect("log verifiable");
     assert!(check.state().unwrap().device(&phone.holder).is_none());
     assert_eq!(again.close_code().await, Some(close::CLOSE_REMOVED));
-    // Nichts geschrieben: keine Schlüssel, keine Reservierung, nicht unter den Geräten.
+    // Nothing written: no keys, no reservation, not among the devices.
     assert!(is_ack(&b.request("t", reserve_task(10)).await));
-    // Bis zur Antwort auf devices.get kam bei alice nichts über das entfernte Gerät an
-    // (keine Präsenz, kein Beitritt): alles davor ging vor dem hello ein.
+    // Up to the reply to devices.get alice received nothing about the removed device
+    // (no presence, no join): everything before that arrived before the hello.
     let op = a.op();
     a.send(&op, Some("t"), ClientMessage::DevicesGet).await;
     let list = loop {
-        let frame = a.recv().await.expect("Antwort auf devices.get");
+        let frame = a.recv().await.expect("reply to devices.get");
         match frame.message {
             ServerMessage::Devices(list) if frame.id.as_ref().map(|i| i.as_str()) == Some(&op) => {
                 break list
             }
             ServerMessage::PresenceUpdate(u) => assert_ne!(u.holder, phone.holder),
-            ServerMessage::MemberJoined(_) => panic!("Beitritt gemeldet"),
+            ServerMessage::MemberJoined(_) => panic!("join reported"),
             _ => {}
         }
     };
     assert!(list.devices.iter().all(|d| d.holder != phone.holder));
 
-    // Sperren von vor Migration 0010 (ohne log_index): der letzte Eintrag bis zur Sperre.
+    // Blocks from before migration 0010 (without log_index): the last entry up to the block.
     sqlx::query("UPDATE relay_removed_devices SET log_index = NULL")
         .execute(&s.server.state.relay.db)
         .await
@@ -595,7 +598,7 @@ async fn hello_eines_entfernten_geräts_bekommt_nur_das_log_bis_zur_entfernung()
 }
 
 #[tokio::test]
-async fn mitglied_entfernen_schließt_seine_geräte() {
+async fn removing_a_member_closes_its_devices() {
     let s = start_official().await;
     let (mut log, alice, mut a, _bob, mut b) = team(&s).await;
     let remove = log.remove_member(&alice, "bob");
@@ -606,7 +609,7 @@ async fn mitglied_entfernen_schließt_seine_geräte() {
         ClientMessage::MemberLogAppend(remove.clone()),
     )
     .await;
-    // Die Ereignisse gehen an alle, auch an die auslösende Verbindung, vor der Bestätigung.
+    // The events go to everyone, including the triggering connection, before the ack.
     let removed = a
         .until(|f| matches!(f.message, ServerMessage::DeviceRemoved(_)))
         .await;
@@ -621,7 +624,7 @@ async fn mitglied_entfernen_schließt_seine_geräte() {
 }
 
 #[tokio::test]
-async fn neustart_baut_das_geprüfte_log_wieder_auf() {
+async fn restart_rebuilds_the_verified_log() {
     let config = Config::for_tests(IdentityMode::Official, website_keys());
     let s = start(config.clone()).await;
     let (mut log, alice, a, _bob, b) = team(&s).await;
@@ -630,7 +633,7 @@ async fn neustart_baut_das_geprüfte_log_wieder_auf() {
     let _ = s.server.shutdown.send(true);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let s2 = start(config).await;
-    // Der nächste Eintrag passt nur, wenn das Relay das Log mit apply_all neu aufgebaut hat.
+    // The next entry only fits if the relay rebuilt the log with apply_all.
     let mut a = Client::join_device(s2.addr, "t", &alice, Role::Owner).await;
     let carol = Dev::new("carol", "carol-pc");
     let _c = Client::join_device(s2.addr, "t", &carol, Role::Member).await;
@@ -641,16 +644,16 @@ async fn neustart_baut_das_geprüfte_log_wieder_auf() {
 }
 
 #[tokio::test]
-async fn höchstens_sechzehn_geräte_je_mitglied() {
+async fn at_most_sixteen_devices_per_member() {
     let s = start_official().await;
     for i in 0..16 {
-        let dev = Dev::new("viel", &format!("gerät-{i}"));
+        let dev = Dev::new("many", &format!("device-{i}"));
         let _c = Client::join_device(s.addr, "t", &dev, Role::Member).await;
     }
-    let extra = Dev::new("viel", "gerät-16");
+    let extra = Dev::new("many", "device-16");
     let mut c = Client::connect(s.addr).await;
     assert!(matches!(
-        c.hello("t", ticket("viel", "t", Role::Member), "gerät-16", None)
+        c.hello("t", ticket("many", "t", Role::Member), "device-16", None)
             .await
             .message,
         ServerMessage::Welcome(_)
@@ -662,7 +665,7 @@ async fn höchstens_sechzehn_geräte_je_mitglied() {
 }
 
 #[tokio::test]
-async fn ablage_verschlüsselter_inhalte() {
+async fn storing_encrypted_content() {
     let s = start_official().await;
     let (_log, _alice, mut a, _bob, mut b) = team(&s).await;
     let put = a

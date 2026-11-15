@@ -1,6 +1,6 @@
 {
   "context": "hangar-license-v1",
-  "description": "Testvektoren license (docs/license-format.md). Schlüssel aus RFC 8032 7.1, nur für Tests.",
+  "description": "Test vectors license (docs/license-format.md). Keys from RFC 8032 7.1, for tests only.",
   "key": {
     "kid": "test-2026-1",
     "public_key_base64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",

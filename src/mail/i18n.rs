@@ -1,8 +1,8 @@
-//! Texte der Mails und Seiten in den 12 Sprachen der App. Platzhalter in geschweiften Klammern
-//! (`{team}`, `{inviter}`, `{who}`, `{email}`, `{days}`, `{minutes}`, `{server}`) setzt
-//! [`fill`] ein; eingesetzte Werte werden vorher für HTML maskiert, wo HTML entsteht.
-//! Angelehnt an `www/lang/*/mail.php` der Webseite. Mails tragen nie Inhalte aus Aufgaben
-//! oder Dateien.
+//! Texts of the mails and pages in the app's 12 languages. Placeholders in curly braces
+//! (`{team}`, `{inviter}`, `{who}`, `{email}`, `{days}`, `{minutes}`, `{server}`) are filled
+//! in by [`fill`]; inserted values are escaped for HTML beforehand wherever HTML is produced.
+//! Modeled on `www/lang/*/mail.php` of the website. Mails never carry content from tasks
+//! or files.
 
 pub const LANGS: [&str; 12] = [
     "de", "en", "tr", "fr", "es", "pt", "el", "pl", "ru", "ja", "zh", "ar",
@@ -26,10 +26,10 @@ pub struct Strings {
     pub attention_subject: &'static str,
     pub attention_intro: &'static str,
     pub attention_note: &'static str,
-    // Seiten
+    // Pages
     pub page_device_title: &'static str,
     pub page_device_prompt: &'static str,
-    /// Name des anfragenden Geräts (`{label}`), gegen Phishing mit fremden Codes.
+    /// Name of the requesting device (`{label}`), against phishing with foreign codes.
     pub page_device_label: &'static str,
     pub page_approve: &'static str,
     pub page_deny: &'static str,
@@ -53,12 +53,12 @@ pub struct Strings {
     pub page_wrong_account: &'static str,
     pub page_signed_in: &'static str,
     pub page_too_many: &'static str,
-    // Seite /account/devices
+    // Page /account/devices
     pub page_devices_title: &'static str,
     pub page_devices_empty: &'static str,
     pub page_devices_revoke: &'static str,
     pub page_devices_revoked: &'static str,
-    /// `{created}` und `{used}`: Zeitpunkte als `JJJJ-MM-TT hh:mm UTC`.
+    /// `{created}` and `{used}`: timestamps as `YYYY-MM-DD hh:mm UTC`.
     pub page_devices_meta: &'static str,
 }
 
@@ -79,8 +79,8 @@ pub fn strings(lang: &str) -> &'static Strings {
     }
 }
 
-/// Wählt die Sprache: zuerst ein ausdrücklicher Wunsch, dann `Accept-Language`, sonst die
-/// Vorgabe des Servers.
+/// Picks the language: first an explicit choice, then `Accept-Language`, otherwise the
+/// server's default.
 pub fn pick(explicit: Option<&str>, accept_language: Option<&str>, default: &str) -> &'static str {
     let find = |tag: &str| {
         let primary = tag
@@ -104,7 +104,7 @@ pub fn pick(explicit: Option<&str>, accept_language: Option<&str>, default: &str
     find(default).unwrap_or("en")
 }
 
-/// Setzt Platzhalter ein. Werte werden nicht weiter interpretiert.
+/// Fills in placeholders. Values are not interpreted any further.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
     let mut out = template.to_owned();
     for (key, value) in values {
@@ -719,7 +719,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sprachwahl() {
+    fn language_choice() {
         assert_eq!(pick(Some("de-AT"), None, "en"), "de");
         assert_eq!(pick(None, Some("fr-CH, fr;q=0.9, en;q=0.8"), "en"), "fr");
         assert_eq!(pick(Some("xx"), Some("ja"), "en"), "ja");
@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn alle_sprachen_haben_alle_platzhalter_und_keine_gedankenstriche() {
+    fn all_languages_have_all_placeholders_and_no_dashes() {
         for lang in LANGS {
             let s = strings(lang);
             assert!(

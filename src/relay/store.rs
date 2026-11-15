@@ -1,6 +1,6 @@
-//! Dauerhafter Zustand des Relays. Jede Funktion ist eine Abfrage oder eine Transaktion;
-//! Fachregeln liegen in `team.rs` und im Protokoll-Crate, hier nur Speicherung und die
-//! Prüfungen, die atomar mit dem Schreiben passieren müssen (Ketten, Kontingente, Epochenfolge).
+//! Persistent state of the relay. Every function is a query or a transaction; domain rules
+//! live in `team.rs` and in the protocol crate, here only storage and the checks that must
+//! happen atomically with the write (chains, quotas, epoch order).
 
 use sqlx::Row;
 
@@ -15,7 +15,7 @@ use crate::wire::{
 
 pub type Result<T> = std::result::Result<T, sqlx::Error>;
 
-/// Gespeicherter Zustand eines Teams (`relay_team_state`), roh als JSON-Texte.
+/// Stored state of a team (`relay_team_state`), raw as JSON texts.
 #[derive(Debug, Clone)]
 pub struct StoredState {
     pub book: String,
@@ -25,13 +25,13 @@ pub struct StoredState {
 
 #[derive(Debug, Clone)]
 pub struct TeamRow {
-    /// Kennung für einen neuen Stream, falls kein gespeicherter Zustand weiterläuft.
+    /// Identifier for a new stream, in case no stored state continues.
     pub fresh_stream: String,
     pub epoch: u32,
     pub state: Option<StoredState>,
 }
 
-/// Lädt oder legt das Team an, samt gespeichertem Zustand (Buch, Log-Position, Notizen).
+/// Loads or creates the team, including stored state (book, log position, notes).
 pub async fn load_team(db: &Db, team: &str, now: u64) -> Result<TeamRow> {
     let stream = random_id();
     sqlx::query(
@@ -62,8 +62,8 @@ pub async fn load_team(db: &Db, team: &str, now: u64) -> Result<TeamRow> {
     })
 }
 
-/// Schreibt Buch, Log-Position und Notizen in einem Schritt. Erst danach darf ein Rahmen mit
-/// einer `seq` bis zu dieser Position das Relay verlassen (Haltbarkeitsregel).
+/// Writes book, log position and notes in one step. Only afterwards may a frame with a `seq` up
+/// to this position leave the relay (durability rule).
 pub async fn save_state(
     db: &Db,
     team: &str,
@@ -87,7 +87,7 @@ pub async fn save_state(
     Ok(())
 }
 
-/// Neueste unzugestellte `notify` eines Mitglieds merken (ersetzt eine ältere).
+/// Remembers a member's latest undelivered `notify` (replaces an older one).
 pub async fn set_pending_notify(
     db: &Db,
     team: &str,
@@ -124,9 +124,9 @@ pub async fn clear_pending_notify(db: &Db, team: &str, member: &str) -> Result<(
     Ok(())
 }
 
-/// Geräte, die ein Log-Eintrag aus dem Team genommen hat (`device.remove`, Mitglied entfernt):
-/// sperren (mit dem Index des Eintrags, `log_index`) und ihre Schlüsselpakete und -angaben im
-/// Team vergessen. Läuft in der Transaktion, die auch den Eintrag schreibt.
+/// Devices that a log entry took out of the team (`device.remove`, member removed): block them
+/// (with the index of the entry, `log_index`) and forget their key packages and key details in
+/// the team. Runs in the transaction that also writes the entry.
 async fn drop_devices(
     tx: &mut Tx,
     team: &str,
@@ -168,10 +168,10 @@ async fn drop_devices(
     Ok(())
 }
 
-/// Wurde dieses Gerät aus dem Team entfernt? `Some(index)`: ja, durch den Log-Eintrag `index`
-/// (bei Zeilen vor Migration 0010 der letzte Eintrag bis zum Zeitpunkt der Sperre; beide
-/// schrieb dieselbe Transaktion mit demselben Zeitstempel; 0, wenn keiner zu finden ist). Bis
-/// zu diesem Eintrag darf das Gerät das Log noch lesen.
+/// Was this device removed from the team? `Some(index)`: yes, by the log entry `index` (for
+/// rows from before migration 0010, the last entry up to the time of the block; the same
+/// transaction wrote both with the same timestamp; 0 if none can be found). Up to this entry
+/// the device may still read the log.
 pub async fn device_removed(
     db: &Db,
     team: &str,
@@ -196,26 +196,26 @@ pub enum MemberSeen {
     New,
     RoleChanged,
     Same,
-    /// Entfernt (Selbstbetrieb oder Widerrufsliste der Webseite); ein vor der Entfernung
-    /// ausgestelltes Ticket öffnet das Team nicht mehr.
+    /// Removed (self-hosting or revocation list of the website); a ticket issued before the
+    /// removal no longer opens the team.
     Removed,
-    /// Das Ticket ist nicht jünger als die letzte Entfernung oder Rollenänderung
-    /// (`relay_ticket_floors`); es trägt womöglich eine entzogene Rolle. Die App holt ein neues.
+    /// The ticket is not newer than the last removal or role change (`relay_ticket_floors`); it
+    /// may carry a revoked role. The app fetches a new one.
     Stale,
 }
 
-/// Wie alt ist ein Ticket gemessen an Entfernung und Rollenänderung (`ticket.renew`)?
+/// How old is a ticket measured against removal and role change (`ticket.renew`)?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketAge {
     Current,
-    /// Ausgestellt bis zur (noch geltenden) Entfernung.
+    /// Issued up to the (still effective) removal.
     BeforeRemoval,
-    /// Ausgestellt bis zu einer Rollenänderung oder einer früheren Entfernung.
+    /// Issued up to a role change or an earlier removal.
     Stale,
 }
 
-/// Untergrenze für Tickets anheben (nur vorwärts): Tickets mit `iat` bis `at_ms` gelten für
-/// dieses Mitglied in diesem Team nicht mehr. Das Team muss angelegt sein.
+/// Raises the floor for tickets (forward only): tickets with `iat` up to `at_ms` are no longer
+/// valid for this member in this team. The team must exist.
 pub async fn raise_ticket_floor(db: &Db, team: &str, member: &str, at_ms: u64) -> Result<()> {
     sqlx::query(
         "INSERT INTO relay_ticket_floors (team_id, member, floor_ms) VALUES (?, ?, ?) \
@@ -229,7 +229,7 @@ pub async fn raise_ticket_floor(db: &Db, team: &str, member: &str, at_ms: u64) -
     Ok(())
 }
 
-/// Prüft ein Ticket gegen Entfernung und Untergrenze (für `ticket.renew`).
+/// Checks a ticket against removal and floor (for `ticket.renew`).
 pub async fn ticket_age(
     db: &Db,
     team: &str,
@@ -262,9 +262,9 @@ pub async fn ticket_age(
     })
 }
 
-/// Ein Mitglied meldet sich mit einem geprüften Ticket an (`ticket_iat_ms`: Ausstellung des
-/// Tickets). Ein entferntes Mitglied kommt nur mit einem Ticket wieder herein, das nach der
-/// Entfernung ausgestellt wurde: dann hat die Webseite es wieder zugelassen.
+/// A member joins with a verified ticket (`ticket_iat_ms`: issue time of the ticket). A removed
+/// member only gets back in with a ticket issued after the removal: then the website has
+/// admitted the member again.
 pub async fn see_member(
     db: &Db,
     team: &str,
@@ -290,7 +290,7 @@ pub async fn see_member(
     .await?;
     let seen = match current {
         Some((_, Some(removed))) if ticket_iat_ms <= u64_of(removed) => MemberSeen::Removed,
-        // Ticket von vor einer Rollenänderung oder früheren Entfernung: alte Rolle möglich.
+        // Ticket from before a role change or earlier removal: old role possible.
         _ if floor.is_some_and(|at| ticket_iat_ms <= u64_of(at)) => MemberSeen::Stale,
         Some((_, Some(_))) | None => MemberSeen::New,
         Some((old, None)) if old == role.as_str() => MemberSeen::Same,
@@ -313,7 +313,7 @@ pub async fn see_member(
     Ok(seen)
 }
 
-/// Mitglied entfernen (Selbstbetrieb) oder wieder zulassen (erneuter Beitritt).
+/// Removes a member (self-hosting) or admits them again (rejoin).
 pub async fn set_member_removed(
     db: &Db,
     team: &str,
@@ -329,8 +329,8 @@ pub async fn set_member_removed(
     Ok(())
 }
 
-/// Mitglied als entfernt vermerken, auch wenn es sich nie verbunden hat: so kommt es mit
-/// einem vor der Entfernung ausgestellten Ticket nicht mehr herein.
+/// Records a member as removed, even if it never connected: this way it cannot get in with a
+/// ticket issued before the removal.
 pub async fn mark_member_removed(db: &Db, team: &str, member: &str, now: u64) -> Result<()> {
     sqlx::query(
         "INSERT INTO relay_members (team_id, member, role, first_seen, last_seen, removed_at) \
@@ -347,7 +347,7 @@ pub async fn mark_member_removed(db: &Db, team: &str, member: &str, now: u64) ->
     Ok(())
 }
 
-/// Neue Rolle eines Mitglieds (aus `ticket.renew`, Widerrufsliste oder Selbstbetrieb).
+/// New role of a member (from `ticket.renew`, revocation list or self-hosting).
 pub async fn set_member_role(
     db: &Db,
     team: &str,
@@ -380,8 +380,8 @@ pub async fn members(db: &Db, team: &str) -> Result<Vec<(String, Role)>> {
         .collect())
 }
 
-/// Vermerkt ein Gerät eines Mitglieds. Geräte-IDs sind nur je Mitglied eindeutig; das Gerät
-/// ist damit an das Subjekt des Tickets gebunden, ein anderes Mitglied kann es nicht nennen.
+/// Records a device of a member. Device IDs are only unique per member; the device is thus
+/// bound to the subject of the ticket, another member cannot name it.
 pub async fn bind_device(db: &Db, device: &str, member: &str, now: u64) -> Result<()> {
     sqlx::query(
         "INSERT INTO relay_devices (member, device, created_at, last_seen) VALUES (?, ?, ?, ?) \
@@ -396,17 +396,17 @@ pub async fn bind_device(db: &Db, device: &str, member: &str, now: u64) -> Resul
     Ok(())
 }
 
-/// Ergebnis von `device.keys`.
+/// Result of `device.keys`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeysStored {
     Stored,
-    /// Mehr als `limits::MAX_DEVICES_PER_MEMBER` Geräte des Mitglieds oder `MAX_WRAPPED_KEYS`
-    /// im Team.
+    /// More than `limits::MAX_DEVICES_PER_MEMBER` devices of the member or `MAX_WRAPPED_KEYS`
+    /// in the team.
     TooManyDevices,
 }
 
-/// `device.keys` eines Geräts im Team (Schlüssel und Besitznachweis, je Team). Neue Geräte nur
-/// innerhalb der Grenzen je Mitglied und je Team.
+/// `device.keys` of a device in the team (keys and proof of possession, per team). New devices
+/// only within the limits per member and per team.
 pub async fn set_device_keys(
     db: &Db,
     team: &str,
@@ -455,7 +455,7 @@ pub async fn set_device_keys(
     Ok(KeysStored::Stored)
 }
 
-/// Die über die eigene Verbindung gesendeten Schlüssel eines Holders im Team
+/// The keys of a holder in the team that were sent over its own connection
 /// (`relay::check_registered_keys`).
 pub async fn registered_keys(
     db: &Db,
@@ -478,7 +478,7 @@ pub async fn registered_keys(
     }))
 }
 
-/// Geräte aktueller Mitglieder mit Schlüsseln und Nachweis, ohne entfernte, höchstens `limit`.
+/// Devices of current members with keys and proof, without removed ones, at most `limit`.
 pub async fn team_devices(db: &Db, team: &str, limit: usize) -> Result<Vec<DeviceInfo>> {
     let rows = sqlx::query(
         "SELECT k.member, k.device, k.sign_key, k.kem_key, k.proof, k.keys_at FROM relay_device_keys k \
@@ -509,7 +509,7 @@ pub async fn team_devices(db: &Db, team: &str, limit: usize) -> Result<Vec<Devic
         .collect())
 }
 
-/// Verbraucht eine Ticket-ID. `false`: schon verwendet.
+/// Consumes a ticket ID. `false`: already used.
 pub async fn use_jti(db: &Db, jti: &str, exp_s: i64) -> Result<bool> {
     let done = sqlx::query(
         "INSERT INTO relay_used_tickets (jti, exp) VALUES (?, ?) ON CONFLICT (jti) DO NOTHING",
@@ -612,9 +612,9 @@ pub async fn get_blob(db: &Db, team: &str, id: &str) -> Result<Option<(Epoch, Ci
     }))
 }
 
-/// Schreibt einen Eintrag, den `LogVerifier` schon zugelassen hat. Prüft die Kette gegen die
-/// gespeicherte als zweite Linie (`check_append`); `false` heißt, gespeichert ist etwas anderes
-/// (dann bleibt alles, wie es war).
+/// Writes an entry that `LogVerifier` has already accepted. Checks the chain against the stored
+/// one as a second line of defense (`check_append`); `false` means something else is stored
+/// (then everything stays as it was).
 async fn insert_entry(
     tx: &mut Tx,
     team: &str,
@@ -658,8 +658,8 @@ async fn insert_entry(
     Ok(true)
 }
 
-/// `memberlog.append` oder `device.remove`: Eintrag schreiben und die Geräte, die er aus dem Team
-/// nimmt, im selben Schritt sperren und vergessen. `false`: nichts geschrieben.
+/// `memberlog.append` or `device.remove`: writes the entry and, in the same step, blocks and
+/// forgets the devices it takes out of the team. `false`: nothing written.
 pub async fn log_append(
     db: &Db,
     team: &str,
@@ -678,19 +678,19 @@ pub async fn log_append(
     Ok(true)
 }
 
-/// Alle gespeicherten Einträge in Reihenfolge (zum Neuaufbau des `LogVerifier`).
+/// All stored entries in order (for rebuilding the `LogVerifier`).
 pub async fn log_all(db: &Db, team: &str) -> Result<Vec<MemberLogEntry>> {
     log_get(db, team, 0, usize::MAX >> 1).await
 }
 
-/// Einträge nach `after`, höchstens `limit`; der Aufrufer fragt eins mehr ab, damit
-/// `MemberLogEntries::page` weiß, ob es weitere gibt.
+/// Entries after `after`, at most `limit`; the caller requests one more so that
+/// `MemberLogEntries::page` knows whether there are more.
 pub async fn log_get(db: &Db, team: &str, after: u64, limit: usize) -> Result<Vec<MemberLogEntry>> {
     log_get_until(db, team, after, u64::MAX, limit).await
 }
 
-/// Wie `log_get`, aber nur Einträge bis einschließlich `until` (für ein entferntes Gerät: bis
-/// zu dem Eintrag, der es entfernte).
+/// Like `log_get`, but only entries up to and including `until` (for a removed device: up to
+/// the entry that removed it).
 pub async fn log_get_until(
     db: &Db,
     team: &str,
@@ -728,9 +728,9 @@ pub async fn log_get_until(
 #[derive(Debug, PartialEq, Eq)]
 pub enum EpochChange {
     Done,
-    /// Nicht genau aktuelle + 1, oder der Eintrag passt nicht an die gespeicherte Kette.
+    /// Not exactly current + 1, or the entry does not fit the stored chain.
     WrongEpoch,
-    /// `key.wrap`: dieser Absender hat schon ein Paket für das Ziel in dieser Epoche.
+    /// `key.wrap`: this sender already has a package for the target in this epoch.
     AlreadyWrapped,
 }
 
@@ -766,8 +766,8 @@ async fn insert_package(
     Ok(done.rows_affected() == 1)
 }
 
-/// `key.rotate`: Eintrag der Rotation, neue Epoche und alle Pakete in einer Transaktion oder
-/// nichts davon.
+/// `key.rotate`: rotation entry, new epoch and all packages in one transaction, or none of
+/// them.
 #[allow(clippy::too_many_arguments)]
 pub async fn rotate_epoch(
     db: &Db,
@@ -808,8 +808,8 @@ pub async fn rotate_epoch(
     Ok(EpochChange::Done)
 }
 
-/// Absender der gespeicherten Pakete eines Ziels in einer Epoche, in Reihenfolge des Eintreffens
-/// (`stored_from` für `relay::check_wrap`).
+/// Senders of the stored packages of a target in an epoch, in order of arrival (`stored_from`
+/// for `relay::check_wrap`).
 pub async fn package_senders(
     db: &Db,
     team: &str,
@@ -837,7 +837,7 @@ pub async fn package_senders(
         .collect())
 }
 
-/// `key.wrap`: ein weiteres Paket für das Ziel in der aktuellen Epoche; nie ersetzt.
+/// `key.wrap`: one more package for the target in the current epoch; never replaced.
 pub async fn wrap_key(
     db: &Db,
     team: &str,
@@ -861,7 +861,7 @@ pub async fn wrap_key(
     Ok(EpochChange::Done)
 }
 
-/// Alle Pakete eines Holders in einer Epoche, in Reihenfolge des Eintreffens (`key.get`).
+/// All packages of a holder in an epoch, in order of arrival (`key.get`).
 pub async fn key_packages(
     db: &Db,
     team: &str,
@@ -883,7 +883,7 @@ pub async fn key_packages(
         .collect())
 }
 
-/// Das erste Paket eines Holders in einer Epoche (das der Rotation), für `key.rotated`.
+/// The first package of a holder in an epoch (the rotation's one), for `key.rotated`.
 pub async fn key_package(
     db: &Db,
     team: &str,
@@ -896,7 +896,7 @@ pub async fn key_package(
         .next())
 }
 
-/// Die Rolle, die ein Mitglied im Team zuletzt hatte (für Prüfungen ohne Ticket).
+/// The role a member last had in the team (for checks without a ticket).
 pub async fn member_role(db: &Db, team: &str, member: &str) -> Result<Option<Role>> {
     let role: Option<String> = sqlx::query_scalar(
         "SELECT role FROM relay_members WHERE team_id = ? AND member = ? AND removed_at IS NULL",
@@ -909,9 +909,9 @@ pub async fn member_role(db: &Db, team: &str, member: &str) -> Result<Option<Rol
 }
 
 // ---------------------------------------------------------------------------------------------
-// Widerrufsliste der Webseite (offizieller Betrieb)
+// Revocation list of the website (official mode)
 
-/// Letzter verarbeiteter Cursor (`last`) der Widerrufsliste; `None` vor dem ersten Abruf.
+/// Last processed cursor (`last`) of the revocation list; `None` before the first fetch.
 pub async fn revocation_cursor(db: &Db) -> Result<Option<String>> {
     sqlx::query_scalar("SELECT cursor FROM relay_revocation_cursor WHERE id = 1")
         .fetch_optional(db)
@@ -930,7 +930,7 @@ pub async fn set_revocation_cursor(db: &Db, cursor: &str, now: u64) -> Result<()
     Ok(())
 }
 
-/// Schon verarbeitete Widerrufs-ID?
+/// Revocation ID already processed?
 pub async fn revocation_seen(db: &Db, rid: &str) -> Result<bool> {
     let found: Option<i64> =
         sqlx::query_scalar("SELECT 1 FROM relay_revocations_seen WHERE rid = ?")
@@ -940,7 +940,7 @@ pub async fn revocation_seen(db: &Db, rid: &str) -> Result<bool> {
     Ok(found.is_some())
 }
 
-/// Widerrufs-ID als verarbeitet merken (nach dem Anwenden; die Wirkungen sind wiederholbar).
+/// Remembers a revocation ID as processed (after applying; the effects are repeatable).
 pub async fn mark_revocation(db: &Db, rid: &str, now: u64) -> Result<()> {
     sqlx::query(
         "INSERT INTO relay_revocations_seen (rid, seen_at) VALUES (?, ?) ON CONFLICT (rid) DO NOTHING",

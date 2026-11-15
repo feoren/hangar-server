@@ -1,64 +1,65 @@
-# Lizenzformat (Version 1)
+# License format (version 1)
 
-Lizenzdokumente gelten für den **Selbstbetrieb** (`IDENTITY=local`). Die Webseite
-hangar.feoren.com verkauft Plätze und stellt nach dem Kauf ein signiertes Dokument aus; der
-Eigentümer hinterlegt es auf seinem Teamserver (`PUT /v1/license`). Der Server prüft es nur mit
-öffentlichen Schlüsseln aus seiner Konfiguration (`LICENSE_PUBLIC_KEYS`), offline.
+License documents apply to **self-hosting** (`IDENTITY=local`). The website hangar.feoren.com
+sells seats and issues a signed document after purchase; the owner uploads it to their team
+server (`PUT /v1/license`). The server verifies it only with public keys from its configuration
+(`LICENSE_PUBLIC_KEYS`), offline.
 
-Im offiziellen Betrieb gibt es keine Lizenzprüfung im Teamserver: dort entscheidet die Webseite
-über den Platz und meldet ihn im Ticket (`seat_ok`).
+In official mode there is no license check in the team server: there, the website decides
+about the seat and reports it in the ticket (`seat_ok`).
 
-## Modell: Plätze je Konto
+## Model: seats per account
 
-- Der Eigentümer kauft `seats` Plätze. Sie gelten für **alle Teams, die ihm auf diesem Server
-  gehören**.
-- Gezählt werden **verschiedene Personen** über alle seine Teams, er selbst eingeschlossen.
-  Wer schon in einem seiner Teams ist, braucht für ein weiteres keinen neuen Platz.
-- Ohne gültige Lizenz gilt **Free: 3 Personen**. Eine Lizenz mit weniger als 3 Plätzen ergibt 3.
-- Geprüft wird **beim Annehmen** einer Einladung, in derselben Schreibtransaktion wie der
-  Beitritt. Offene Einladungen belegen keinen Platz.
-- **Ablauf:** nichts wird gelöscht, niemand entfernt. Nur Beitritte über die dann geltende
-  Grenze (3) werden abgelehnt.
+- The owner buys `seats` seats. They apply to **all teams the owner has on this server**.
+- What counts is the number of **distinct people** across all of the owner's teams, the owner
+  included. Someone who is already in one of the owner's teams does not need a new seat for
+  another one.
+- Without a valid license, **Free: 3 people** applies. A license with fewer than 3 seats
+  results in 3.
+- The check happens **when an invitation is accepted**, in the same write transaction as the
+  join. Open invitations do not occupy a seat.
+- **Expiry:** nothing is deleted, nobody is removed. Only joins beyond the limit that then
+  applies (3) are rejected.
 
-## Aufbau
+## Structure
 
-Gleiches Verfahren wie Tickets ([ticket-format.md](ticket-format.md)), anderer Kontext:
+Same scheme as tickets ([ticket-format.md](ticket-format.md)), different context:
 
 ```
 license   = base64url(payload) "." base64url(signature)
 signature = Ed25519(secret_key, "hangar-license-v1." + base64url(payload))
 ```
 
-Höchstlänge 4096 Zeichen. Leerraum am Anfang und Ende wird beim Hinterlegen entfernt.
+Maximum length 4096 characters. Leading and trailing whitespace is removed on upload.
 
-## Felder
+## Fields
 
-| Feld | Typ | Pflicht | Bedeutung |
+| Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `v` | Zahl | ja | `1` |
-| `kid` | Text `[A-Za-z0-9_-]{1,64}` | ja | Schlüssel-ID der Webseite |
-| `lid` | Text `[A-Za-z0-9_-]{1,64}` | ja | Lizenz-ID; auf einem Server kann sie nur ein Konto hinterlegen; Widerruf über `LICENSE_REVOKED` |
-| `sub` | Text, bis 128 Zeichen | ja | Konto-ID der Webseite (nur zur Zuordnung, der Server vergleicht sie nicht) |
-| `email` | Text, klein geschrieben, ohne Rand | ja | Adresse des Kontos; muss der Adresse des hinterlegenden Kontos auf dem Server entsprechen |
-| `plan` | Text `[a-z0-9-]{1,32}` | ja | Tarif, z. B. `team`; später Staffelungen |
-| `seats` | Zahl 1 bis 100000 | ja | Plätze |
-| `features` | Liste von `[A-Za-z0-9_-]{1,64}`, höchstens 32 | nein | Zusatzfunktionen; Version 1 kennt keine und ignoriert sie |
-| `iat` | Unix-Sekunden | ja | Ausstellung |
-| `exp` | Unix-Sekunden | ja | Ablauf, `exp > iat` |
+| `v` | number | yes | `1` |
+| `kid` | text `[A-Za-z0-9_-]{1,64}` | yes | key ID of the website |
+| `lid` | text `[A-Za-z0-9_-]{1,64}` | yes | license ID; on a given server only one account can upload it; revocation via `LICENSE_REVOKED` |
+| `sub` | text, up to 128 characters | yes | account ID on the website (for reference only, the server does not compare it) |
+| `email` | text, lower case, no surrounding whitespace | yes | address of the account; must match the address of the uploading account on the server |
+| `plan` | text `[a-z0-9-]{1,32}` | yes | plan, e.g. `team`; tiers later |
+| `seats` | number 1 to 100000 | yes | seats |
+| `features` | list of `[A-Za-z0-9_-]{1,64}`, at most 32 | no | additional features; version 1 knows none and ignores them |
+| `iat` | Unix seconds | yes | issued at |
+| `exp` | Unix seconds | yes | expiry, `exp > iat` |
 
-Unbekannte Felder werden ignoriert. So bleibt Raum für `plan`-Staffelungen oder eine spätere
-Kombination mit Projekten, ohne neue Version.
+Unknown fields are ignored. This leaves room for `plan` tiers or a later combination with
+projects, without a new version.
 
-## Prüfregeln
+## Verification rules
 
-1. Signatur, `kid`, Form wie beim Ticket (Kontext `hangar-license-v1`).
-2. `v == 1`; Felder wie oben; `email` muss schon normalisiert sein (`Owner@…` wird abgelehnt).
-3. `lid` nicht in `LICENSE_REVOKED`.
-4. Beim Hinterlegen: `email` gleich der Kontoadresse, `iat <= jetzt + 300 s`, `jetzt < exp`.
-5. Bei jeder Platzprüfung wird das gespeicherte Dokument erneut geprüft (rotierte oder
-   widerrufene Schlüssel wirken sofort); abgelaufen heißt Free.
+1. Signature, `kid` and form as for the ticket (context `hangar-license-v1`).
+2. `v == 1`; fields as above; `email` must already be normalized (`Owner@…` is rejected).
+3. `lid` not in `LICENSE_REVOKED`.
+4. On upload: `email` equals the account address, `iat <= now + 300 s`, `now < exp`.
+5. On every seat check the stored document is verified again (rotated or revoked keys take
+   effect immediately); expired means Free.
 
-## So signiert die Webseite (PHP)
+## How the website signs (PHP)
 
 ```php
 function hangar_license(string $kid, string $seed32, string $licenseId, string $accountId,
@@ -78,29 +79,29 @@ function hangar_license(string $kid, string $seed32, string $licenseId, string $
 }
 ```
 
-Empfehlung: Laufzeit an das Abo koppeln (z. B. Ende der bezahlten Periode plus 14 Tage) und
-bei Verlängerung ein neues Dokument ausstellen, das der Eigentümer im Konto herunterlädt.
-`lid` = ID der Lizenzzeile der Webseite.
+Recommendation: tie the validity to the subscription (e.g. end of the paid period plus 14 days)
+and, on renewal, issue a new document that the owner downloads from their account.
+`lid` = ID of the website's license record.
 
-## Testvektoren
+## Test vectors
 
-`testdata/licenses.json` (Testschlüssel aus RFC 8032, nur für Tests): `valid` (10 Plätze),
-`valid_with_features`, `expired` (Signatur gültig, wirksam 3 Plätze), `foreign_signature`,
-`tampered_payload` (Plätze auf 1000 geändert), `ticket_context`, `email_not_normalized`.
-Gegenprobe: `cargo test --test vectors` und `php tools/php/verify_vectors.php testdata/licenses.json`.
+`testdata/licenses.json` (test key from RFC 8032, for tests only): `valid` (10 seats),
+`valid_with_features`, `expired` (signature valid, effectively 3 seats), `foreign_signature`,
+`tampered_payload` (seats changed to 1000), `ticket_context`, `email_not_normalized`.
+Cross-check: `cargo test --test vectors` and `php tools/php/verify_vectors.php testdata/licenses.json`.
 
-Beispiel (`valid`):
+Example (`valid`):
 
 ```
 payload  {"v":1,"kid":"test-2026-1","lid":"lic_8f3a2c","sub":"1042","email":"owner@example.org","plan":"team","seats":10,"iat":1793900000,"exp":1825502400}
 license  eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTgyNTUwMjQwMH0.pnbaTN9YuVKd3tc4Gb1L09lkfVIN0irR6lUHpAjPQB99rCGQ8WipWrUvypQVnnRGrHnS4NKG0UPQGNqageCEBg
 ```
 
-## Bekannte Grenze
+## Known limitation
 
-Der Server vertraut den Schlüsseln seiner Konfiguration. Wer einen eigenen Server betreibt,
-kann dort einen eigenen Schlüssel eintragen und sich selbst Lizenzen ausstellen. Technisch
-lässt sich das bei Quelltext in fremder Hand nicht verhindern; die Elastic License 2.0 verbietet
-es ("move, change, disable, or circumvent the license key functionality"). Wer das härter
-will, bettet die öffentlichen Schlüssel der Webseite beim Bau ein und lässt die Konfiguration
-nur zusätzliche Schlüssel für Tests zu (offener Punkt, siehe entwicklung.md).
+The server trusts the keys in its configuration. Anyone who runs their own server can add their
+own key there and issue licenses to themselves. Technically this cannot be prevented when the
+source code is in someone else's hands; the Elastic License 2.0 prohibits it ("move, change,
+disable, or circumvent the license key functionality"). If you want this to be stricter, embed
+the website's public keys at build time and let the configuration accept only additional keys
+for tests (open point, see [development.md](development.md)).

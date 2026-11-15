@@ -1,5 +1,5 @@
-# Prüfkette aus docs/entwicklung.md ("Bauen und prüfen"), dazu bekannte Schwachstellen der Abhängigkeiten
-# und ein Probebau des Docker-Images.
+# Check pipeline from docs/development.md ("Building and checking"), plus known vulnerabilities in
+# the dependencies and a test build of the Docker image.
 name: CI
 
 on:
@@ -7,18 +7,18 @@ on:
     branches: [main]
   pull_request:
 
-# Die Prüfungen lesen nur; ein Pull Request aus einem Fork bekommt keine Schreibrechte.
+# The checks only read; a pull request from a fork gets no write permissions.
 permissions:
   contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Ein hängender Test darf keinen Runner sechs Stunden lang belegen.
+    # A hanging test must not occupy a runner for six hours.
     timeout-minutes: 45
     steps:
-      # Fremde Actions sind auf einen Commit gepinnt (ein Tag lässt sich verschieben); Dependabot
-      # schlägt Updates vor.
+      # Third-party actions are pinned to a commit (a tag can be moved); Dependabot proposes
+      # updates.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
@@ -28,21 +28,21 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      # --locked: der Bau nimmt genau Cargo.lock und scheitert, wenn er es ändern müsste.
+      # --locked: the build uses exactly Cargo.lock and fails if it would have to change it.
       - name: Rust
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked --no-fail-fast
 
-      # Gegenprobe der Ticket- und Lizenzvektoren mit PHP/libsodium (wie die Webseite).
-      - name: Testvektoren (PHP)
+      # Cross-check of the ticket and license vectors with PHP/libsodium (like the website).
+      - name: Test vectors (PHP)
         run: |
-          php -m | grep -qi '^sodium$' || { echo "PHP ohne sodium"; exit 1; }
+          php -m | grep -qi '^sodium$' || { echo "PHP without sodium"; exit 1; }
           php tools/php/verify_vectors.php testdata/tickets.json testdata/licenses.json
 
-  # Bekannte Schwachstellen in Cargo.lock. cargo-audit kommt in fester Fassung aus seinem eigenen
-  # Lock; es scheitert an Schwachstellen und warnt nur bei ungepflegten Crates.
+  # Known vulnerabilities in Cargo.lock. cargo-audit is installed in a fixed version from its own
+  # lock file; it fails on vulnerabilities and only warns about unmaintained crates.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -55,16 +55,16 @@ jobs:
         with:
           toolchain: stable
 
-      - name: cargo-audit installieren
+      - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
 
-      # RUSTSEC-2026-0459 (gebündeltes SQLite) ist bewertet und hingenommen, bis sqlx eine Fassung
-      # mit libsqlite3-sys >= 0.39 hat (docs/dependencies.md). Nur diese eine ID ist zugelassen;
-      # jeder andere Fund lässt den Job scheitern. Mit dem sqlx-Update die Ausnahme entfernen.
-      - name: Rust-Abhängigkeiten
+      # RUSTSEC-2026-0459 (bundled SQLite) has been assessed and accepted until sqlx has a version
+      # with libsqlite3-sys >= 0.39 (docs/dependencies.md). Only this one ID is allowed; any other
+      # finding fails the job. Remove the exception with the sqlx update.
+      - name: Rust dependencies
         run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0459
 
-  # Das Image muss bauen (amd64); veröffentlicht wird hier nichts.
+  # The image must build (amd64); nothing is published here.
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -73,7 +73,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Image bauen
+      - name: Build image
         env:
           DOCKER_BUILDKIT: "1"
         run: docker build -t hangar-team-server:ci .

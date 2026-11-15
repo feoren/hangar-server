@@ -1,6 +1,6 @@
-//! Schlichte Browserseiten (Gerät zulassen, Anmeldelink, Einladung) ohne JavaScript. Alle
-//! eingesetzten Werte sind maskiert; das Stylesheet kommt vom eigenen Ursprung (CSP
-//! `style-src 'self'`). Hell und dunkel folgen `prefers-color-scheme`.
+//! Plain browser pages (approve device, magic link, invitation) without JavaScript. All
+//! inserted values are escaped; the stylesheet comes from our own origin (CSP
+//! `style-src 'self'`). Light and dark follow `prefers-color-scheme`.
 
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -36,7 +36,7 @@ pub async fn stylesheet() -> Response {
     response
 }
 
-/// Sprache der Seite aus `Accept-Language`.
+/// Page language from `Accept-Language`.
 pub fn lang(headers: &HeaderMap, config: &Config) -> &'static str {
     pick(
         None,
@@ -50,7 +50,7 @@ pub fn t(headers: &HeaderMap, config: &Config) -> (&'static str, &'static String
     (lang, strings(lang))
 }
 
-/// Eine ganze Seite. `body` ist fertiges, schon maskiertes HTML.
+/// A complete page. `body` is finished, already escaped HTML.
 pub fn page(lang: &str, title: &str, body: &str, status: StatusCode) -> Response {
     let dir = if strings(lang).rtl { "rtl" } else { "ltr" };
     let html = format!(
@@ -61,7 +61,7 @@ pub fn page(lang: &str, title: &str, body: &str, status: StatusCode) -> Response
     (status, Html(html)).into_response()
 }
 
-/// Seite mit einer einzigen Meldung.
+/// Page with a single message.
 pub fn message(lang: &str, title: &str, text: &str, class: &str, status: StatusCode) -> Response {
     page(
         lang,
@@ -75,8 +75,8 @@ pub fn message(lang: &str, title: &str, text: &str, class: &str, status: StatusC
     )
 }
 
-/// Schreibende Browseranfragen nur vom eigenen Ursprung: `Origin` muss passen, ersatzweise
-/// `Sec-Fetch-Site: same-origin`. Ohne beides wird abgelehnt (Schutz vor Login-CSRF).
+/// Writing browser requests only from our own origin: `Origin` must match, alternatively
+/// `Sec-Fetch-Site: same-origin`. Without either the request is refused (protection against login CSRF).
 pub fn same_origin(headers: &HeaderMap, config: &Config) -> bool {
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
         return config.origin_allowed(origin)
@@ -99,8 +99,8 @@ pub fn session_cookie(config: &Config, token: &str, max_age_s: i64) -> HeaderVal
     cookie(config, cookie_name(config), token, max_age_s)
 }
 
-/// Cookie des Browsers, der einen Anmeldelink angefordert hat (bindet den Rücksprung mit
-/// Gerätecode an diesen Browser).
+/// Cookie of the browser that requested a magic link (binds the return with the
+/// device code to this browser).
 pub fn login_cookie_name(config: &Config) -> &'static str {
     if config.is_https() {
         "__Host-hangar_login"
@@ -127,7 +127,7 @@ pub fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-/// CSRF-Token einer Browsersitzung (Synchronizer Token, aus der Sitzung abgeleitet).
+/// CSRF token of a browser session (synchronizer token, derived from the session).
 pub fn csrf_token(config: &Config, session_id: &str) -> String {
     hmac_hex(&config.server_secret, &[b"csrf", session_id.as_bytes()])
 }
@@ -151,7 +151,7 @@ mod tests {
     use crate::signed::KeySet;
 
     #[test]
-    fn ursprungsprüfung() {
+    fn origin_check() {
         let config = Config::for_tests(IdentityMode::Local, KeySet::default());
         let mut h = HeaderMap::new();
         assert!(!same_origin(&h, &config));

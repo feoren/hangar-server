@@ -1,5 +1,5 @@
-//! Konfiguration aus Umgebungsvariablen (optional über `.env`). Vorlage: `.env.example`.
-//! Fehlt etwas Nötiges oder ist ein Wert ungültig, startet der Server nicht.
+//! Configuration from environment variables (optionally via `.env`). Template: `.env.example`.
+//! If something required is missing or a value is invalid, the server does not start.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,36 +10,36 @@ use crate::signed::{KeySet, KeySetError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityMode {
-    /// Offizieller Betrieb: Konten, Projekte und Plätze auf der Webseite; das Relay prüft nur
-    /// deren Tickets.
+    /// Official mode: accounts, projects and seats live on the website; the relay only verifies
+    /// its tickets.
     Official,
-    /// Selbstbetrieb: eigene Anmeldung, Teams, Einladungen, Lizenzprüfung; stellt selbst
-    /// Tickets im selben Format aus.
+    /// Self-hosting: built-in sign-in, teams, invitations, license check; issues tickets itself
+    /// in the same format.
     Local,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MailTransport {
     Smtp,
-    /// Mails als `.eml` unter `DATA_DIR/mail/` (Entwicklung).
+    /// Mails as `.eml` under `DATA_DIR/mail/` (development).
     Log,
-    /// Keine Mails; Einladungs- und Anmeldelinks gibt der Server an den Admin zurück.
+    /// No mails; the server returns invitation links and magic links to the admin.
     None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmtpTls {
-    /// TLS ab dem ersten Byte (Port 465).
+    /// TLS from the first byte (port 465).
     Smtps,
-    /// STARTTLS, Pflicht (Port 587).
+    /// STARTTLS, mandatory (port 587).
     Starttls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signup {
-    /// Nur bestehende Konten und eingeladene Adressen können sich anmelden.
+    /// Only existing accounts and invited addresses can sign in.
     Invite,
-    /// Jede Adresse kann ein Konto anlegen.
+    /// Any address can create an account.
     Open,
 }
 
@@ -64,8 +64,8 @@ impl std::fmt::Debug for SmtpConfig {
     }
 }
 
-/// Woher das Relay die Widerrufsliste holt. Ausgehende Anfragen gehen nur an genau diese
-/// Adresse (ohne Weiterleitungen).
+/// Where the relay fetches the revocation list from. Outgoing requests go only to exactly this
+/// address (no redirects).
 #[derive(Clone)]
 pub struct RevocationSource {
     pub url: String,
@@ -83,8 +83,8 @@ impl std::fmt::Debug for RevocationSource {
     }
 }
 
-/// `https://` mit Host und Pfad, ohne Zugangsdaten, Abfrage oder Fragment; `http://` nur zu
-/// `localhost` oder `127.0.0.1` (Entwicklung, Tests).
+/// `https://` with host and path, without credentials, query or fragment; `http://` only to
+/// `localhost` or `127.0.0.1` (development, tests).
 pub fn valid_revocation_url(url: &str) -> bool {
     let Some((scheme, rest)) = url.split_once("://") else {
         return false;
@@ -100,16 +100,16 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub database_url: String,
     pub identity: IdentityMode,
-    /// Öffentlicher Ursprung dieses Servers ohne Pfad, z. B. `https://team.example.org`.
+    /// Public origin of this server without path, e.g. `https://team.example.org`.
     pub public_url: String,
-    /// Ziel für Aufrufe der Startseite `/` im Browser (`ROOT_REDIRECT`), z. B. die Produktseite.
-    /// Leer = `/` antwortet mit 404. Nur `https://` (bzw. `http://` für localhost).
+    /// Target for browser requests to the start page `/` (`ROOT_REDIRECT`), e.g. the product page.
+    /// Empty = `/` answers with 404. Only `https://` (or `http://` for localhost).
     pub root_redirect: Option<String>,
     pub ticket_keys: KeySet,
-    /// Pflichtwert für `aud` in jedem Ticket. Offiziell `hangar-relay` (so stellt die Webseite
-    /// aus), im Selbstbetrieb der eigene Ursprung; `TICKET_AUDIENCE` überschreibt beides.
+    /// Required value for `aud` in every ticket. Official mode: `hangar-relay` (what the website
+    /// issues); self-hosting: our own origin. `TICKET_AUDIENCE` overrides both.
     pub ticket_audience: String,
-    /// Offizieller Betrieb: signierte Widerrufsliste der Webseite (`docs/revocation-format.md`).
+    /// Official mode: signed revocation list of the website (`docs/revocation-format.md`).
     pub revocation: Option<RevocationSource>,
     pub allowed_origins: Vec<String>,
     pub trust_proxy: bool,
@@ -117,17 +117,17 @@ pub struct Config {
     pub max_connections_per_member: usize,
     pub max_connections_per_ip: usize,
     pub connection_max_age_s: u64,
-    /// Frist für das erste gültige `hello` einer neuen Verbindung (Millisekunden).
+    /// Deadline for the first valid `hello` of a new connection (milliseconds).
     pub hello_timeout_ms: u64,
-    /// Frist für ein entferntes Gerät nach `device.removed` (oder nach seinem `hello`), sein
-    /// `memberlog.get` noch zu stellen; danach Close 4403 (Millisekunden).
+    /// Deadline for a removed device after `device.removed` (or after its `hello`) to still send
+    /// its `memberlog.get`; afterwards close 4403 (milliseconds).
     pub removed_grace_ms: u64,
     pub reservation_inactivity_s: u64,
     pub reservation_warn_s: u64,
     pub blob_quota_bytes: u64,
     pub transcript_retention_days: u64,
     pub log_json: bool,
-    // Selbstbetrieb
+    // Self-hosting
     pub server_secret: Vec<u8>,
     pub license_keys: KeySet,
     pub license_revoked: Vec<String>,
@@ -154,23 +154,23 @@ impl std::fmt::Debug for Config {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("{0} fehlt")]
+    #[error("{0} is missing")]
     Missing(&'static str),
-    #[error("{0} ist ungültig: {1}")]
+    #[error("{0} is invalid: {1}")]
     Invalid(&'static str, String),
     #[error("{0}: {1}")]
     Keys(&'static str, KeySetError),
 }
 
-/// Zielgruppe der Tickets der Webseite (`TEAM_TICKET_AUDIENCE` dort, Vorgabe `hangar-relay`).
+/// Audience of the website's tickets (`TEAM_TICKET_AUDIENCE` there, default `hangar-relay`).
 pub const DEFAULT_TICKET_AUDIENCE: &str = "hangar-relay";
 
-/// Ohne gültiges `hello` innerhalb dieser Frist schließt der Server die Verbindung; so
-/// belegen Verbindungen ohne Ticket keine Plätze.
+/// Without a valid `hello` within this deadline the server closes the connection, so
+/// connections without a ticket do not occupy seats.
 pub const DEFAULT_HELLO_TIMEOUT_MS: u64 = hangar_team_protocol::close::HELLO_TIMEOUT_SECS * 1000;
 
-/// So lange darf ein entferntes Gerät noch das Mitgliedschafts-Log lesen, damit die App ihre
-/// Entfernung am signierten Eintrag prüfen kann.
+/// How long a removed device may still read the membership log, so the app can verify its
+/// removal against the signed entry.
 pub const DEFAULT_REMOVED_GRACE_MS: u64 = 5_000;
 
 fn var(name: &str) -> Option<String> {
@@ -196,9 +196,9 @@ fn flag(name: &'static str, default: bool) -> Result<bool, ConfigError> {
     }
 }
 
-/// Prüft das Ziel von `ROOT_REDIRECT`: absolute URL mit `https://` (oder `http://` nur für
-/// localhost bzw. 127.0.0.1), nur ASCII (Unicode-Hosts als Punycode), ohne Leer- und
-/// Steuerzeichen, höchstens 2048 Zeichen.
+/// Validates the target of `ROOT_REDIRECT`: absolute URL with `https://` (or `http://` only for
+/// localhost or 127.0.0.1), ASCII only (Unicode hosts as Punycode), no whitespace or
+/// control characters, at most 2048 characters.
 pub fn parse_redirect(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.len() > 2048
@@ -224,7 +224,7 @@ pub fn parse_redirect(raw: &str) -> Option<String> {
     Some(raw.to_owned())
 }
 
-/// Ursprung ohne Pfad und ohne Schrägstrich am Ende; nur http(s).
+/// Origin without path and without trailing slash; http(s) only.
 pub fn normalize_origin(raw: &str) -> Option<String> {
     let raw = raw.trim().trim_end_matches('/');
     let rest = raw
@@ -276,7 +276,7 @@ impl Config {
         if identity == IdentityMode::Local && server_secret.len() < 32 {
             return Err(ConfigError::Invalid(
                 "SERVER_SECRET",
-                "mindestens 32 Zeichen".into(),
+                "at least 32 characters".into(),
             ));
         }
         let mail_transport = match var("MAIL_TRANSPORT").as_deref() {
@@ -328,7 +328,7 @@ impl Config {
                 if token.trim().len() < 32 {
                     return Err(ConfigError::Invalid(
                         "RELAY_REVOCATION_TOKEN",
-                        "mindestens 32 Zeichen".into(),
+                        "at least 32 characters".into(),
                     ));
                 }
                 Some(RevocationSource {
@@ -389,7 +389,7 @@ impl Config {
         })
     }
 
-    /// Konfiguration für Tests: alles lokal, keine Mails, Datenbank in einem eigenen Temp-Ordner.
+    /// Configuration for tests: everything local, no mails, database in its own temp directory.
     pub fn for_tests(identity: IdentityMode, ticket_keys: KeySet) -> Self {
         let data_dir =
             std::env::temp_dir().join(format!("hangar-team-test-{}", crate::util::random_id()));
@@ -414,7 +414,7 @@ impl Config {
             max_connections_per_ip: 200,
             connection_max_age_s: 600,
             hello_timeout_ms: DEFAULT_HELLO_TIMEOUT_MS,
-            // Kürzer als im Betrieb, damit die Tests den Ablauf der Frist nicht lange abwarten.
+            // Shorter than in production so the tests do not wait long for the deadline to expire.
             removed_grace_ms: 1_000,
             reservation_inactivity_s: 1800,
             reservation_warn_s: 300,
@@ -436,7 +436,7 @@ impl Config {
         self.public_url.starts_with("https://")
     }
 
-    /// Erlaubte Origins: der eigene Ursprung und die konfigurierten.
+    /// Allowed origins: our own origin and the configured ones.
     pub fn origin_allowed(&self, origin: &str) -> bool {
         let origin = origin.trim_end_matches('/').to_lowercase();
         origin == self.public_url || self.allowed_origins.contains(&origin)
@@ -448,25 +448,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ursprung() {
+    fn origin() {
         assert_eq!(
             normalize_origin("https://Team.Example.org/"),
             Some("https://team.example.org".into())
         );
-        assert_eq!(normalize_origin("https://a.org/pfad"), None);
+        assert_eq!(normalize_origin("https://a.org/path"), None);
         assert_eq!(normalize_origin("ftp://a.org"), None);
         assert_eq!(normalize_origin("https://user@a.org"), None);
     }
 
     #[test]
-    fn weiterleitung_der_startseite() {
+    fn root_redirect() {
         assert_eq!(
             parse_redirect("https://hangar.feoren.com/"),
             Some("https://hangar.feoren.com/".into())
         );
         assert_eq!(
-            parse_redirect("http://localhost:8000/pfad"),
-            Some("http://localhost:8000/pfad".into())
+            parse_redirect("http://localhost:8000/path"),
+            Some("http://localhost:8000/path".into())
         );
         assert_eq!(parse_redirect("http://example.org/"), None);
         assert_eq!(parse_redirect("javascript:alert(1)"), None);

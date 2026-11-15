@@ -1,9 +1,9 @@
-//! Einstieg: `hangar-team-server [serve|healthcheck|login-link <email>|create-team <email> <name>|
+//! Entry point: `hangar-team-server [serve|healthcheck|login-link <email>|create-team <email> <name>|
 //! invite <team> <email> [member|admin]|teams]`.
 //!
-//! Die Befehle außer `serve` und `healthcheck` sind für den Selbstbetrieb auf dem Host, etwa
-//! `docker compose run --rm teamserver invite Entwicklung anna@example.org`. Was ein Skript
-//! weiterverwendet (Link, Team-ID), steht als letzte Zeile auf stdout.
+//! The commands other than `serve` and `healthcheck` are for self-hosting on the host, e.g.
+//! `docker compose run --rm teamserver invite Development anna@example.org`. Whatever a script
+//! consumes further (link, team ID) is printed as the last line on stdout.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("Konfiguration: {error}");
+            eprintln!("configuration: {error}");
             return ExitCode::from(2);
         }
     };
@@ -51,7 +51,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("Laufzeit: {error}");
+            eprintln!("runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -63,14 +63,14 @@ fn main() -> ExitCode {
             "invite" => invite(config, &args[1..]).await,
             "teams" => teams(config).await,
             other => Err(format!(
-                "unbekannter Befehl {other:?} (serve, healthcheck, login-link, create-team, invite, teams)"
+                "unknown command {other:?} (serve, healthcheck, login-link, create-team, invite, teams)"
             )),
         }
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!(%error, "Abbruch");
+            tracing::error!(%error, "aborted");
             eprintln!("{error}");
             ExitCode::FAILURE
         }
@@ -85,7 +85,7 @@ async fn serve(config: Config) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("{bind}: {e}"))?;
-    tracing::info!(%bind, "Teamserver bereit");
+    tracing::info!(%bind, "team server ready");
     let shutdown = server.shutdown;
     let app = server
         .router
@@ -93,13 +93,13 @@ async fn serve(config: Config) -> Result<(), String> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             wait_for_signal().await;
-            tracing::info!("Beenden: Verbindungen werden geschlossen");
-            // Live-Verbindungen schließen sich mit 1012; die Clients verbinden sich neu.
+            tracing::info!("shutting down: closing connections");
+            // Live connections close with 1012; the clients reconnect.
             let _ = shutdown.send(true);
         })
         .await
         .map_err(|e| e.to_string())?;
-    tracing::info!("beendet");
+    tracing::info!("stopped");
     Ok(())
 }
 
@@ -124,12 +124,12 @@ async fn wait_for_signal() {
     }
 }
 
-/// Selbstbetrieb ohne Mail: einen einmaligen Anmeldelink auf der Konsole ausgeben.
+/// Self-hosting without mail: print a one-time magic link on the console.
 async fn login_link(config: Config, email: Option<String>) -> Result<(), String> {
     if config.identity != IdentityMode::Local {
-        return Err("login-link gibt es nur mit IDENTITY=local".into());
+        return Err("login-link is only available with IDENTITY=local".into());
     }
-    let email = email.ok_or("Aufruf: login-link <email>")?;
+    let email = email.ok_or("usage: login-link <email>")?;
     let db = hangar_team_server::db::connect(&config.database_url)
         .await
         .map_err(|e| e.to_string())?;
@@ -138,22 +138,22 @@ async fn login_link(config: Config, email: Option<String>) -> Result<(), String>
     Ok(())
 }
 
-/// Datenbank für die Befehle des Selbstbetriebs; mit IDENTITY=official gibt es sie nicht.
+/// Database for the self-hosting commands; with IDENTITY=official they are not available.
 async fn local_db(config: &Config, command: &str) -> Result<hangar_team_server::db::Db, String> {
     if config.identity != IdentityMode::Local {
-        return Err(format!("{command} gibt es nur mit IDENTITY=local"));
+        return Err(format!("{command} is only available with IDENTITY=local"));
     }
     hangar_team_server::db::connect(&config.database_url)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// `create-team <eigentümer-email> <name>`: Team anlegen, Konto des Eigentümers bei Bedarf.
+/// `create-team <owner-email> <name>`: create a team, and the owner's account if needed.
 async fn create_team(config: Config, args: &[String]) -> Result<(), String> {
     let (Some(email), Some(first)) = (args.first(), args.get(1)) else {
-        return Err("Aufruf: create-team <eigentümer-email> <name>".into());
+        return Err("usage: create-team <owner-email> <name>".into());
     };
-    // Ein Name mit Leerzeichen darf ohne Anführungszeichen kommen.
+    // A name containing spaces may be given without quotes.
     let name = std::iter::once(first.as_str())
         .chain(args[2..].iter().map(String::as_str))
         .collect::<Vec<_>>()
@@ -166,18 +166,18 @@ async fn create_team(config: Config, args: &[String]) -> Result<(), String> {
         &name,
     )
     .await?;
-    eprintln!("Team {name:?} angelegt, Eigentümer {email}. Einladen: invite {id} <email>");
+    eprintln!("team {name:?} created, owner {email}. To invite: invite {id} <email>");
     println!("{id}");
     Ok(())
 }
 
-/// `invite <team> <email> [member|admin]`: Einladungslink ausgeben (Team per ID oder Name).
+/// `invite <team> <email> [member|admin]`: print an invitation link (team by ID or name).
 async fn invite(config: Config, args: &[String]) -> Result<(), String> {
     let (Some(team), Some(email)) = (args.first(), args.get(1)) else {
-        return Err("Aufruf: invite <team-id oder name> <email> [member|admin]".into());
+        return Err("usage: invite <team-id or name> <email> [member|admin]".into());
     };
     if args.len() > 3 {
-        return Err("Aufruf: invite <team-id oder name> <email> [member|admin]; Teamnamen mit Leerzeichen in Anführungszeichen".into());
+        return Err("usage: invite <team-id or name> <email> [member|admin]; quote team names containing spaces".into());
     }
     let role = args.get(2).map_or("member", String::as_str);
     let db = local_db(&config, "invite").await?;
@@ -190,28 +190,28 @@ async fn invite(config: Config, args: &[String]) -> Result<(), String> {
         role,
     )
     .await?;
-    eprintln!("Einladung für {email} als {role}: einmal, 7 Tage, nur für diese Adresse.");
+    eprintln!("invitation for {email} as {role}: single use, 7 days, only for this address.");
     println!("{link}");
     Ok(())
 }
 
-/// `teams`: Teams mit ID, Name, Eigentümer, Mitgliedern und offenen Einladungen (Tabulator).
+/// `teams`: teams with ID, name, owner, members and open invitations (tab-separated).
 async fn teams(config: Config) -> Result<(), String> {
     let db = local_db(&config, "teams").await?;
     let lines = hangar_team_server::identity::teams::cli_teams(&db).await?;
     if lines.is_empty() {
-        eprintln!("Noch kein Team. Anlegen: create-team <eigentümer-email> <name>");
+        eprintln!("no team yet. To create one: create-team <owner-email> <name>");
     }
     for line in lines {
         println!(
-            "{}	{}	{}	{} Mitglieder	{} offene Einladungen",
+            "{}	{}	{}	{} members	{} open invitations",
             line.id, line.name, line.owner, line.members, line.open_invitations
         );
     }
     Ok(())
 }
 
-/// Für das distroless-Image (kein curl): `GET /health` auf dem eigenen Port.
+/// For the distroless image (no curl): `GET /health` on our own port.
 fn healthcheck() -> ExitCode {
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let port = bind
