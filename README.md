@@ -35,7 +35,7 @@ migrations/                 0001_relay.sql (Relay), 0002_identity.sql (Selbstbet
                             bis 0010_removed_device_log_index.sql (Log-Index der
                             Geräteentfernung, Frist des entfernten Geräts)
 src/
-  main.rs                   Befehle: serve, healthcheck, login-link
+  main.rs                   Befehle: serve, healthcheck, login-link, create-team, invite, teams
   lib.rs                    Zusammenbau (auch für die Tests)
   config.rs                 Umgebung/.env, Prüfung beim Start
   wire.rs                   Namen aus dem Protokoll-Crate der App (siehe unten)
@@ -283,9 +283,26 @@ Alle Schlüssel mit Erklärung in [.env.example](.env.example). Die wichtigsten:
    > etwa über den mitgelieferten Caddy (`Caddyfile`, Let's Encrypt) oder Caddy mit
    > `tls internal` und der eigenen CA auf den Rechnern im LAN; `PUBLIC_URL` beginnt dann mit
    > `https://`.
-3. Team anlegen, Personen per E-Mail-Adresse einladen. Ohne Mail gibt die API den
-   Einladungslink an den Admin zurück; er reicht ihn selbst weiter. Der Link gilt einmal, 7
-   Tage, nur für diese Adresse.
+3. Team anlegen und Personen einladen, am einfachsten auf dem Host (Hangar hat im Selbstbetrieb
+   keinen Einladen-Knopf):
+
+   ```sh
+   docker compose run --rm teamserver create-team admin@example.org Entwicklung
+   docker compose run --rm teamserver invite Entwicklung anna@example.org          # member
+   docker compose run --rm teamserver invite Entwicklung ben@example.org admin
+   docker compose run --rm teamserver teams                                         # Übersicht
+   ```
+
+   `create-team` legt das Konto des Eigentümers bei Bedarf an und gibt die Team-ID aus. `invite`
+   nimmt Team-ID oder genauen Namen (bei gleichen Namen nur die ID) und gibt den
+   Einladungslink aus; Mail geht dabei nie hinaus. Der Link gilt einmal, 7 Tage, nur für diese
+   Adresse; ein neuer Aufruf erneuert ihn und macht den alten ungültig. Wer ihn öffnet und
+   bestätigt, ist im Browser angemeldet und Mitglied; danach in Hangar dieselbe Serveradresse
+   eintragen, Anmelden, Code bestätigen. Die Platzgrenze prüft der Server beim Annehmen.
+   Was ein Skript weiterverwendet (Link, Team-ID), steht als letzte Zeile auf stdout.
+
+   Über die API geht es weiter mit `POST /v1/teams` und `POST /v1/teams/{team}/invitations`;
+   ohne Mail gibt die API den Link an den Admin zurück.
 4. Ab der vierten Person: Plätze auf hangar.feoren.com kaufen, das Lizenzdokument im Konto
    herunterladen und auf dem Server hinterlegen (`PUT /v1/license`). Plätze gelten für alle
    Teams dieses Eigentümers.

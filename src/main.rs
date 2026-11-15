@@ -1,4 +1,9 @@
-//! Einstieg: `hangar-team-server [serve|healthcheck|login-link <email>]`.
+//! Einstieg: `hangar-team-server [serve|healthcheck|login-link <email>|create-team <email> <name>|
+//! invite <team> <email> [member|admin]|teams]`.
+//!
+//! Die Befehle außer `serve` und `healthcheck` sind für den Selbstbetrieb auf dem Host, etwa
+//! `docker compose run --rm teamserver invite Entwicklung anna@example.org`. Was ein Skript
+//! weiterverwendet (Link, Team-ID), steht als letzte Zeile auf stdout.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -54,8 +59,11 @@ fn main() -> ExitCode {
         match command.as_str() {
             "serve" => serve(config).await,
             "login-link" => login_link(config, args.get(1).cloned()).await,
+            "create-team" => create_team(config, &args[1..]).await,
+            "invite" => invite(config, &args[1..]).await,
+            "teams" => teams(config).await,
             other => Err(format!(
-                "unbekannter Befehl {other:?} (serve, healthcheck, login-link)"
+                "unbekannter Befehl {other:?} (serve, healthcheck, login-link, create-team, invite, teams)"
             )),
         }
     });
@@ -127,6 +135,79 @@ async fn login_link(config: Config, email: Option<String>) -> Result<(), String>
         .map_err(|e| e.to_string())?;
     let link = hangar_team_server::identity::auth::admin_login_link(&db, &config, &email).await?;
     println!("{link}");
+    Ok(())
+}
+
+/// Datenbank für die Befehle des Selbstbetriebs; mit IDENTITY=official gibt es sie nicht.
+async fn local_db(config: &Config, command: &str) -> Result<hangar_team_server::db::Db, String> {
+    if config.identity != IdentityMode::Local {
+        return Err(format!("{command} gibt es nur mit IDENTITY=local"));
+    }
+    hangar_team_server::db::connect(&config.database_url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `create-team <eigentümer-email> <name>`: Team anlegen, Konto des Eigentümers bei Bedarf.
+async fn create_team(config: Config, args: &[String]) -> Result<(), String> {
+    let (Some(email), Some(first)) = (args.first(), args.get(1)) else {
+        return Err("Aufruf: create-team <eigentümer-email> <name>".into());
+    };
+    // Ein Name mit Leerzeichen darf ohne Anführungszeichen kommen.
+    let name = std::iter::once(first.as_str())
+        .chain(args[2..].iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let db = local_db(&config, "create-team").await?;
+    let id = hangar_team_server::identity::teams::cli_create_team(
+        &db,
+        &config.default_lang,
+        email,
+        &name,
+    )
+    .await?;
+    eprintln!("Team {name:?} angelegt, Eigentümer {email}. Einladen: invite {id} <email>");
+    println!("{id}");
+    Ok(())
+}
+
+/// `invite <team> <email> [member|admin]`: Einladungslink ausgeben (Team per ID oder Name).
+async fn invite(config: Config, args: &[String]) -> Result<(), String> {
+    let (Some(team), Some(email)) = (args.first(), args.get(1)) else {
+        return Err("Aufruf: invite <team-id oder name> <email> [member|admin]".into());
+    };
+    if args.len() > 3 {
+        return Err("Aufruf: invite <team-id oder name> <email> [member|admin]; Teamnamen mit Leerzeichen in Anführungszeichen".into());
+    }
+    let role = args.get(2).map_or("member", String::as_str);
+    let db = local_db(&config, "invite").await?;
+    let link = hangar_team_server::identity::teams::cli_invite(
+        &db,
+        &config.public_url,
+        &config.default_lang,
+        team,
+        email,
+        role,
+    )
+    .await?;
+    eprintln!("Einladung für {email} als {role}: einmal, 7 Tage, nur für diese Adresse.");
+    println!("{link}");
+    Ok(())
+}
+
+/// `teams`: Teams mit ID, Name, Eigentümer, Mitgliedern und offenen Einladungen (Tabulator).
+async fn teams(config: Config) -> Result<(), String> {
+    let db = local_db(&config, "teams").await?;
+    let lines = hangar_team_server::identity::teams::cli_teams(&db).await?;
+    if lines.is_empty() {
+        eprintln!("Noch kein Team. Anlegen: create-team <eigentümer-email> <name>");
+    }
+    for line in lines {
+        println!(
+            "{}	{}	{}	{} Mitglieder	{} offene Einladungen",
+            line.id, line.name, line.owner, line.members, line.open_invitations
+        );
+    }
     Ok(())
 }
 

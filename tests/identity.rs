@@ -1034,3 +1034,107 @@ async fn einladungen_zählen_je_adresse_für_die_ratenbegrenzung() {
     // 40 Adressen verbraucht; 20 weitere überschreiten die 50 je Stunde.
     assert_eq!(send(batch(3)).await, StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn befehle_create_team_invite_und_teams_auf_dem_host() {
+    use hangar_team_server::identity::teams::{cli_create_team, cli_invite, cli_teams};
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let db = &s.server.state.relay.db;
+    let public = &s.server.state.config.public_url;
+
+    assert!(cli_teams(db).await.unwrap().is_empty());
+    // Eigentümer ohne Konto: das Konto entsteht mit dem Team.
+    let team = cli_create_team(db, "de", " Chef@Example.org ", "Entwicklung")
+        .await
+        .unwrap();
+    assert!(team.starts_with("t_"));
+    assert!(cli_create_team(db, "de", "keine-adresse", "X")
+        .await
+        .is_err());
+    assert!(cli_create_team(db, "de", "chef@example.org", "  ")
+        .await
+        .is_err());
+    assert!(
+        cli_create_team(db, "de", "chef@example.org", &"x".repeat(81))
+            .await
+            .is_err()
+    );
+
+    // Rolle owner und Unsinn abgelehnt, unbekanntes Team mit Hinweis.
+    for role in ["owner", "root", ""] {
+        assert!(
+            cli_invite(db, public, "de", &team, "neu@example.org", role)
+                .await
+                .is_err(),
+            "{role}"
+        );
+    }
+    let unknown = cli_invite(db, public, "de", "Gibtsnicht", "neu@example.org", "member")
+        .await
+        .unwrap_err();
+    assert!(unknown.contains("teams"), "{unknown}");
+
+    // Team per Name; ein zweiter Aufruf erneuert die Einladung, der alte Link gilt nicht mehr.
+    let first = cli_invite(db, public, "de", "Entwicklung", "neu@example.org", "member")
+        .await
+        .unwrap();
+    let link = cli_invite(db, public, "de", &team, "Neu@example.org", "admin")
+        .await
+        .unwrap();
+    assert!(link.starts_with(&format!("{public}/invite/")), "{link}");
+    let old_path = first.trim_start_matches(public.as_str()).to_owned();
+    assert_eq!(
+        call(app, "GET", &old_path, &[], None).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let lines = cli_teams(db).await.unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].owner, "chef@example.org");
+    assert_eq!((lines[0].members, lines[0].open_invitations), (1, 1));
+
+    // Der Link meldet die Person an und lässt sie beitreten, wie eine Einladung aus der API.
+    let path = link.trim_start_matches(public.as_str()).to_owned();
+    let page = call(app, "GET", &path, &[], None).await;
+    assert!(page.body.contains("Entwicklung") && page.body.contains("neu@example.org"));
+    let joined = call(app, "POST", &path, &[("origin", ORIGIN)], Some(form(&[]))).await;
+    assert_eq!(joined.status, StatusCode::OK, "{}", joined.body);
+    assert!(joined.cookie.is_some(), "Browsersitzung für /device");
+    let lines = cli_teams(db).await.unwrap();
+    assert_eq!((lines[0].members, lines[0].open_invitations), (2, 0));
+    let again = cli_invite(db, public, "de", &team, "neu@example.org", "member")
+        .await
+        .unwrap_err();
+    assert!(again.contains("schon Mitglied"), "{again}");
+
+    // Die eingeladene Person sieht das Team als admin in der Konto-API der App.
+    let (token, _) = login(&s, "neu@example.org").await;
+    let me = call(
+        app,
+        "GET",
+        "/v1/me",
+        &[("authorization", &bearer(&token))],
+        None,
+    )
+    .await
+    .json();
+    assert_eq!(me["teams"][0]["id"], team.as_str(), "{me}");
+    assert_eq!(me["teams"][0]["role"], "admin", "{me}");
+
+    // Zwei Teams gleichen Namens: Name reicht nicht mehr, die ID schon.
+    let second = cli_create_team(db, "de", "chef@example.org", "Entwicklung")
+        .await
+        .unwrap();
+    let ambiguous = cli_invite(db, public, "de", "Entwicklung", "b@example.org", "member")
+        .await
+        .unwrap_err();
+    assert!(
+        ambiguous.contains(&team) && ambiguous.contains(&second),
+        "{ambiguous}"
+    );
+    assert!(
+        cli_invite(db, public, "de", &second, "b@example.org", "member")
+            .await
+            .is_ok()
+    );
+}

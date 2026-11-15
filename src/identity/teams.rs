@@ -29,7 +29,7 @@ use super::auth::{
 };
 use super::pages::{self, csrf_ok, csrf_token, hidden, message, page, same_origin, t};
 use super::{ApiError, ApiResult, Identity};
-use crate::db::begin_write;
+use crate::db::{begin_write, Db};
 use crate::http::ratelimit::Rule;
 use crate::http::AppState;
 use crate::license::{self, LicenseClaims, FREE_SEATS};
@@ -150,13 +150,20 @@ pub async fn create(identity: &Identity, user: &User, name: &str) -> ApiResult<S
     ) {
         return Err(ApiError::RATE_LIMITED);
     }
+    let id = insert_team(&identity.db, &user.id, &name).await?;
+    tracing::info!("Team angelegt");
+    Ok(id)
+}
+
+/// Team mit Eigentümer anlegen (API und Befehl `create-team`); `name` ist schon geprüft.
+async fn insert_team(db: &Db, owner_id: &str, name: &str) -> Result<String, sqlx::Error> {
     let id = format!("t_{}", random_id());
     let now = now_s();
-    let mut tx = begin_write(&identity.db).await?;
+    let mut tx = begin_write(db).await?;
     sqlx::query("INSERT INTO teams (id, name, owner_id, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
-        .bind(&name)
-        .bind(&user.id)
+        .bind(name)
+        .bind(owner_id)
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -164,12 +171,11 @@ pub async fn create(identity: &Identity, user: &User, name: &str) -> ApiResult<S
         "INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
     )
     .bind(&id)
-    .bind(&user.id)
+    .bind(owner_id)
     .bind(now)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    tracing::info!("Team angelegt");
     Ok(id)
 }
 
@@ -285,51 +291,10 @@ async fn send_invitation(
     role: Role,
     lang: &str,
 ) -> ApiResult<Value> {
-    let token = random_token();
-    let now = now_s();
-    let mut tx = begin_write(&identity.db).await?;
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM invitations WHERE team_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL")
-            .bind(team)
-            .bind(email)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let (id, status) = match existing {
-        Some(id) => {
-            sqlx::query("UPDATE invitations SET token_hash = ?, role = ?, expires_at = ?, sent_count = sent_count + 1, last_sent_at = ?, invited_by = ?, lang = ? WHERE id = ?")
-                .bind(token_hash(&token))
-                .bind(role.as_str())
-                .bind(now + INVITATION_TTL_S)
-                .bind(now)
-                .bind(&inviter.id)
-                .bind(lang)
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
-            (id, "renewed")
-        }
-        None => {
-            let id = format!("i_{}", random_id());
-            sqlx::query("INSERT INTO invitations (id, team_id, email, role, token_hash, invited_by, lang, created_at, expires_at, last_sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                .bind(&id)
-                .bind(team)
-                .bind(email)
-                .bind(role.as_str())
-                .bind(token_hash(&token))
-                .bind(&inviter.id)
-                .bind(lang)
-                .bind(now)
-                .bind(now + INVITATION_TTL_S)
-                .bind(now)
-                .execute(&mut *tx)
-                .await?;
-            (id, "invited")
-        }
-    };
-    tx.commit().await?;
+    let (id, status, token, expires_at) =
+        upsert_invitation(&identity.db, &inviter.id, team, email, role, lang).await?;
     let link = identity.url(&format!("/invite/{token}"));
-    let mut out =
-        json!({ "id": id, "email": email, "status": status, "expiresAt": now + INVITATION_TTL_S });
+    let mut out = json!({ "id": id, "email": email, "status": status, "expiresAt": expires_at });
     if identity.links_to_admin() {
         out["link"] = Value::String(link);
     } else {
@@ -345,6 +310,192 @@ async fn send_invitation(
         );
     }
     Ok(out)
+}
+
+/// Offene Einladung erneuern oder anlegen: (id, Status, Token, Ablauf). Der Token steht nur im
+/// Link, gespeichert wird sein Hash.
+async fn upsert_invitation(
+    db: &Db,
+    inviter_id: &str,
+    team: &str,
+    email: &str,
+    role: Role,
+    lang: &str,
+) -> Result<(String, &'static str, String, i64), sqlx::Error> {
+    let token = random_token();
+    let now = now_s();
+    let mut tx = begin_write(db).await?;
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM invitations WHERE team_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL")
+            .bind(team)
+            .bind(email)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (id, status) = match existing {
+        Some(id) => {
+            sqlx::query("UPDATE invitations SET token_hash = ?, role = ?, expires_at = ?, sent_count = sent_count + 1, last_sent_at = ?, invited_by = ?, lang = ? WHERE id = ?")
+                .bind(token_hash(&token))
+                .bind(role.as_str())
+                .bind(now + INVITATION_TTL_S)
+                .bind(now)
+                .bind(inviter_id)
+                .bind(lang)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            (id, "renewed")
+        }
+        None => {
+            let id = format!("i_{}", random_id());
+            sqlx::query("INSERT INTO invitations (id, team_id, email, role, token_hash, invited_by, lang, created_at, expires_at, last_sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                .bind(&id)
+                .bind(team)
+                .bind(email)
+                .bind(role.as_str())
+                .bind(token_hash(&token))
+                .bind(inviter_id)
+                .bind(lang)
+                .bind(now)
+                .bind(now + INVITATION_TTL_S)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            (id, "invited")
+        }
+    };
+    tx.commit().await?;
+    Ok((id, status, token, now + INVITATION_TTL_S))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Verwaltung auf dem Host (Befehle create-team, invite, teams; nur IDENTITY=local)
+//
+// Wer die Befehle aufruft, hat Zugriff auf den Server und seine Datenbank; deshalb ohne
+// Anmeldung und ohne Ratenbegrenzung. Die Regeln bleiben dieselben wie in der API: Name höchstens
+// 80 Zeichen, Einladung nur als admin oder member, Platzprüfung erst beim Annehmen.
+
+/// Ein Team, wie der Befehl `teams` es zeigt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamLine {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub members: i64,
+    pub open_invitations: i64,
+}
+
+/// `create-team <eigentümer-email> <name>`: legt das Konto des Eigentümers bei Bedarf an und gibt
+/// die Team-ID zurück.
+pub async fn cli_create_team(
+    db: &Db,
+    default_lang: &str,
+    owner_email: &str,
+    name: &str,
+) -> Result<String, String> {
+    let email = normalize_email(owner_email).ok_or("ungültige E-Mail-Adresse")?;
+    let name = clean_name(name).ok_or("Teamname fehlt oder ist länger als 80 Zeichen")?;
+    let owner = async {
+        let mut tx = begin_write(db).await?;
+        let id = find_or_create_user(&mut tx, &email, default_lang, now_s()).await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(id)
+    }
+    .await
+    .map_err(|e| e.to_string())?;
+    let id = insert_team(db, &owner, &name)
+        .await
+        .map_err(|e| e.to_string())?;
+    tracing::info!("Team angelegt (Befehl)");
+    Ok(id)
+}
+
+/// Team über seine ID oder seinen genauen Namen finden: (id, name, owner_id).
+async fn cli_find_team(db: &Db, team: &str) -> Result<(String, String, String), String> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, name, owner_id FROM teams WHERE id = ? OR name = ? ORDER BY created_at",
+    )
+    .bind(team)
+    .bind(team)
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(row) = rows.iter().find(|r| r.0 == team) {
+        return Ok(row.clone());
+    }
+    let mut rows = rows.into_iter();
+    match (rows.next(), rows.next()) {
+        (None, _) => Err(format!("kein Team {team:?} (Liste: teams)")),
+        (Some(row), None) => Ok(row),
+        (Some(first), Some(second)) => {
+            let ids: Vec<String> = [first, second]
+                .into_iter()
+                .chain(rows)
+                .map(|r| r.0)
+                .collect();
+            Err(format!(
+                "mehrere Teams heißen {team:?}, bitte die ID nehmen: {}",
+                ids.join(", ")
+            ))
+        }
+    }
+}
+
+/// `invite <team> <email> [member|admin]`: Einladung im Namen des Eigentümers, gibt den Link
+/// zurück (einmal, 7 Tage, nur für diese Adresse). Die Einladungsseite meldet die Person mit dem
+/// Link selbst an; eine Mail geht nicht hinaus.
+pub async fn cli_invite(
+    db: &Db,
+    public_url: &str,
+    default_lang: &str,
+    team: &str,
+    email: &str,
+    role: &str,
+) -> Result<String, String> {
+    let role = Role::parse(role)
+        .filter(|r| *r != Role::Owner)
+        .ok_or("Rolle nur member oder admin")?;
+    let email = normalize_email(email).ok_or("ungültige E-Mail-Adresse")?;
+    let (team, _, owner) = cli_find_team(db, team).await?;
+    let member: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = ? AND u.email = ?",
+    )
+    .bind(&team)
+    .bind(&email)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    if member.is_some() {
+        return Err(format!("{email} ist schon Mitglied"));
+    }
+    let (_, _, token, _) = upsert_invitation(db, &owner, &team, &email, role, default_lang)
+        .await
+        .map_err(|e| e.to_string())?;
+    tracing::info!("Einladung angelegt (Befehl)");
+    Ok(format!("{public_url}/invite/{token}"))
+}
+
+/// `teams`: alle Teams mit Eigentümer, Mitgliedern und offenen Einladungen.
+pub async fn cli_teams(db: &Db) -> Result<Vec<TeamLine>, String> {
+    let rows: Vec<(String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT t.id, t.name, u.email, \
+         (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id), \
+         (SELECT COUNT(*) FROM invitations i WHERE i.team_id = t.id AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > ?) \
+         FROM teams t JOIN users u ON u.id = t.owner_id ORDER BY t.created_at",
+    )
+    .bind(now_s())
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, owner, members, open_invitations)| TeamLine {
+            id,
+            name,
+            owner,
+            members,
+            open_invitations,
+        })
+        .collect())
 }
 
 fn can_manage(actor: Role, target: Role) -> bool {
