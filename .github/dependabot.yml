@@ -1,0 +1,23 @@
+# Schlägt Updates für die gepinnten Actions, die Rust-Abhängigkeiten aus Cargo.lock und die
+# Basis-Images im Dockerfile vor. Wöchentlich und mit wenigen offenen Pull Requests, damit jedes
+# Update prüfbar bleibt. Die Crates der App unter vendor/ sind Pfadabhängigkeiten und werden von
+# Hand übernommen (README, "Crates aktualisieren").
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

@@ -11,8 +11,8 @@ publish = false
 [dependencies]
 # Wire-Format, Keyed Hashes und Zustandsautomaten (Schritt C) sowie die Regeln der Ende-zu-Ende-
 # Verschlüsselung (Schritt E, Prüfung des Mitgliedschafts-Logs und der Schlüsselpakete). Beide
-# gehören der App (MIT) und liegen als unveränderte Kopien aus Commit b30b9d5 unter `vendor/`
-# (Herkunft je Crate in HERKUNFT.md); neue Fassung: README, Abschnitt "Protokoll-Crate der App".
+# gehören der App (MIT) und liegen als unveränderte Kopien aus Commit 79c68ca unter `vendor/`
+# (Herkunft je Crate in HERKUNFT.md); neue Fassung: README, Abschnitt "Crates aktualisieren".
 hangar-team-protocol = { path = "vendor/hangar-team-protocol" }
 hangar-team-crypto = { path = "vendor/hangar-team-crypto" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json", "form", "query", "matched-path"] }

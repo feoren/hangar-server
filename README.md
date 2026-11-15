@@ -1,5 +1,16 @@
 # Hangar-Teamserver
 
+[![CI](https://github.com/feoren/hangar-team-server/actions/workflows/ci.yml/badge.svg)](https://github.com/feoren/hangar-team-server/actions/workflows/ci.yml)
+[![License: Elastic 2.0](https://img.shields.io/badge/license-Elastic%202.0-blue)](LICENSE)
+
+> **In English:** the team server for [Hangar](https://github.com/feoren/hangar), the desktop app
+> for running AI coding agents as a team. It relays live presence, task reservations, file claims
+> and end-to-end encrypted notes between teammates over one WebSocket, and can run self-hosted
+> with its own accounts and invitations. One Rust binary (axum, tokio, SQLite), shipped as a
+> Docker image behind Caddy. The server only stores and forwards opaque data; all cryptography
+> lives in the app. The documentation below is in German. Hosted service:
+> [hangar.feoren.com](https://hangar.feoren.com). Security reports: see [SECURITY.md](SECURITY.md).
+
 Server für die Zusammenarbeit in Hangar (Schritt D des Plans "Team service version 1", dazu
 die Serverteile von C und E). Ein Rust-Binary: axum 0.8, tokio, WebSocket als einziger
 Live-Kanal, SQLite im WAL-Modus über sqlx, Docker-Image mit Caddy davor.
@@ -77,14 +88,15 @@ Das Relay hält und leitet keine Schlüssel ab; es prüft nur Signaturen, Rechte
 
 Wenn die App einen neuen Stand committet:
 
-1. Commit-Hash im App-Repository nachsehen:
-   `git -C E:/Seafile/Repository/Lokal/hangar log -1 --format=%H -- crates/hangar-team-protocol crates/hangar-team-crypto`
-   (Branch beachten; derzeit `feat/agent-workflow`).
+1. Commit-Hash im App-Repository nachsehen (Klon von https://github.com/feoren/hangar, hier
+   neben diesem Repository als `../hangar`):
+   `git -C ../hangar log -1 --format=%H -- crates/hangar-team-protocol crates/hangar-team-crypto`
+   (Branch beachten).
 2. Beide Kopien ersetzen, ohne `Cargo.lock`:
    ```sh
    rm -rf vendor/hangar-team-protocol vendor/hangar-team-crypto
    mkdir -p vendor
-   git -C E:/Seafile/Repository/Lokal/hangar archive <hash> crates/hangar-team-protocol crates/hangar-team-crypto | tar -x -C vendor --strip-components=1
+   git -C ../hangar archive <hash> crates/hangar-team-protocol crates/hangar-team-crypto | tar -x -C vendor --strip-components=1
    rm -f vendor/*/Cargo.lock
    ```
    Ohne Git: die Ordner `crates/hangar-team-protocol` und `crates/hangar-team-crypto` aus dem
@@ -156,7 +168,7 @@ Für den offiziellen Dienst unter `team-hangar.feoren.com` auf einem Strato V-Se
 
 ### Image auf den Server bringen
 
-Das Protokoll-Crate liegt als feste Kopie in `vendor/` (siehe "Protokoll-Crate der App"); der
+Die Crates der App liegen als feste Kopie in `vendor/` (siehe "Crates der App"); der
 Bau braucht also weder das App-Repository noch GitHub, nur crates.io für die übrigen
 Abhängigkeiten.
 
@@ -349,8 +361,8 @@ Fehler der Routen außerhalb von `/api/v1`: `{"error":"<code>"}` mit passendem S
 
 ## Offen
 
-- Docker-Image: nach jedem neuen Stand des Protokoll-Crates die Kopie in `vendor/` erneuern (siehe
-  "Protokoll-Crate aktualisieren").
+- Docker-Image: nach jedem neuen Stand der Crates der App die Kopien in `vendor/` erneuern (siehe
+  "Crates aktualisieren (von Hand)").
 - Externe Krypto-Prüfung des E2E-Verfahrens (App, Schritt E).
 - Offizielle öffentliche Lizenzschlüssel beim Bau einbetten (statt nur Konfiguration), damit
   Selbstbetreiber sich keine eigenen Lizenzen ausstellen können.

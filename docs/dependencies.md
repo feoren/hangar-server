@@ -44,4 +44,6 @@ anderer Seitengröße öffnet. Angriffsweg nur lokal: der Server öffnet ausschl
 eigene Datei im eigenen Volume. Wer dort schreiben kann, hat den Server ohnehin. Folge für den
 Betrieb: nur eigene Sicherungen zurückspielen, nie eine fremde `-wal`-Datei mitkopieren
 (`sqlite3 .backup` erzeugt keine). Behebung, sobald sqlx eine Version mit `libsqlite3-sys`
->= 0.39 veröffentlicht; bis dahin bewusst hingenommen (nicht per Ausnahme unterdrückt).
+>= 0.39 veröffentlicht; bis dahin bewusst hingenommen. Lokal meldet `cargo audit` den Fund
+weiter; nur die CI (`.github/workflows/ci.yml`) lässt genau diese ID zu, damit neue Funde
+nicht hinter einem dauerhaft roten Job verschwinden. Mit dem sqlx-Update dort entfernen.

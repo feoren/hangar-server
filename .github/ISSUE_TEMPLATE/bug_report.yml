@@ -1,0 +1,62 @@
+name: Bug report
+description: Something in the team server does not work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please write in English or German.
+        Security problems do not belong here; report them privately (see the link on the "New issue" page).
+        Problems in the desktop app belong in https://github.com/feoren/hangar.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A short description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up -d
+        2. docker compose run --rm teamserver invite Team anna@example.org
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: "The `version` field of `GET /health`."
+      placeholder: 0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: identity
+    attributes:
+      label: Mode
+      options:
+        - IDENTITY=local (self-hosted)
+        - IDENTITY=official
+    validations:
+      required: true
+  - type: input
+    id: hangar-version
+    attributes:
+      label: Hangar version
+      description: Optional. "Shown under Settings > Help > About Hangar."
+      placeholder: 0.7.0-370
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Optional. Output of `docker compose logs teamserver`. Remove tokens, keys, e-mail addresses and anything else private before posting.
+      render: text

@@ -1,0 +1,79 @@
+# Prüfkette aus dem README ("Bauen und prüfen"), dazu bekannte Schwachstellen der Abhängigkeiten
+# und ein Probebau des Docker-Images.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Die Prüfungen lesen nur; ein Pull Request aus einem Fork bekommt keine Schreibrechte.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Ein hängender Test darf keinen Runner sechs Stunden lang belegen.
+    timeout-minutes: 45
+    steps:
+      # Fremde Actions sind auf einen Commit gepinnt (ein Tag lässt sich verschieben); Dependabot
+      # schlägt Updates vor.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # --locked: der Bau nimmt genau Cargo.lock und scheitert, wenn er es ändern müsste.
+      - name: Rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked --no-fail-fast
+
+      # Gegenprobe der Ticket- und Lizenzvektoren mit PHP/libsodium (wie die Webseite).
+      - name: Testvektoren (PHP)
+        run: |
+          php -m | grep -qi '^sodium$' || { echo "PHP ohne sodium"; exit 1; }
+          php tools/php/verify_vectors.php testdata/tickets.json testdata/licenses.json
+
+  # Bekannte Schwachstellen in Cargo.lock. cargo-audit kommt in fester Fassung aus seinem eigenen
+  # Lock; es scheitert an Schwachstellen und warnt nur bei ungepflegten Crates.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: cargo-audit installieren
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # RUSTSEC-2026-0459 (gebündeltes SQLite) ist bewertet und hingenommen, bis sqlx eine Fassung
+      # mit libsqlite3-sys >= 0.39 hat (docs/dependencies.md). Nur diese eine ID ist zugelassen;
+      # jeder andere Fund lässt den Job scheitern. Mit dem sqlx-Update die Ausnahme entfernen.
+      - name: Rust-Abhängigkeiten
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0459
+
+  # Das Image muss bauen (amd64); veröffentlicht wird hier nichts.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Image bauen
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build -t hangar-team-server:ci .
