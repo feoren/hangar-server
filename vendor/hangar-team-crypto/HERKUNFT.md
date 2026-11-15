@@ -7,5 +7,5 @@ Unveränderte Kopie von `crates/hangar-team-crypto` aus dem App-Repository
 `ac7bdb122ac087284a9cb9c0a9e84a9020aa32d7` auf `main`. Lizenz: siehe `LICENSE` (MIT).
 Entfernt wurde nur das `Cargo.lock` der Kopie (der Teamserver hat sein eigenes).
 
-Hier nichts ändern. Neue Fassung übernehmen: siehe README des Teamservers,
-Abschnitt "Crates aktualisieren (von Hand)".
+Hier nichts ändern. Neue Fassung übernehmen: siehe
+`docs/entwicklung.md`, Abschnitt "Crates aktualisieren (von Hand)".

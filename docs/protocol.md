@@ -239,4 +239,4 @@ Webseite und wendet sie auf laufende Verbindungen an.
   Projekte, `relay-ticket`), gleich der Webseite: [account-api.md](account-api.md). Die App
   braucht damit nur die Basis `<PUBLIC_URL>/api/v1`; die Adresse dieses Live-Kanals steht im
   Ticket (`relay_url`, `ws`/`wss` aus `PUBLIC_URL`). Verwaltung (Teams, Einladungen, Lizenz)
-  unter `/v1/...`, siehe README.
+  unter `/v1/...`, siehe http-api.md.

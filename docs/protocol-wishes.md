@@ -1,7 +1,7 @@
 # Wünsche an das Protokoll-Crate der App
 
 Für die App-Sitzung, die `hangar-team-protocol` und `hangar-team-crypto` pflegt. Der
-Teamserver nutzt beide als unveränderte Kopien aus `79c68ca` (`vendor/`, siehe README);
+Teamserver nutzt beide als unveränderte Kopien aus `79c68ca` (`vendor/`, siehe entwicklung.md);
 `src/wire.rs` reicht nur noch Namen weiter. Die früheren Wünsche (E2E-Nachrichten, `member.role_changed`,
 `offline`, `ticket.renew`, Close-Codes, Rechte-Helfer, `key.wrapped`, Holder in `WrappedKey`) hat
 das Crate umgesetzt. Nach b30b9d5 offen gebliebene Fragen, mit der App-Sitzung am 2026-11-09

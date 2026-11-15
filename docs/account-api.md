@@ -53,7 +53,7 @@ der Webseite: `invalid_client` kommt hier mit 400 statt 401; Hangar wertet beide
 
 **Nicht vorhanden:** `invite_url` in `/projects` fehlt, weil der Selbstbetrieb keine
 Browserseite zum Einladen hat; Hangar zeigt den Einladen-Knopf dann nicht. Eingeladen wird über
-`POST /v1/teams/{team}/invitations` (README). `/devices` (Geräteschlüssel) ist auch auf der
+`POST /v1/teams/{team}/invitations` ([http-api.md](http-api.md)). `/devices` (Geräteschlüssel) ist auch auf der
 Webseite nur reserviert und fehlt hier.
 
 ## Tokens und Sitzungen

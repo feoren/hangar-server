@@ -1,7 +1,7 @@
 //! Hangar-Teamserver: Relay für die Live-Zusammenarbeit (offizieller Betrieb und
 //! Selbstbetrieb) und eine schlanke eigene Identität für den Selbstbetrieb.
 //!
-//! Aufbau und Betrieb: `README.md`; Protokoll: `docs/protocol.md`; Sicherheit:
+//! Aufbau: `docs/entwicklung.md`, Betrieb: `docs/betrieb.md`; Protokoll: `docs/protocol.md`; Sicherheit:
 //! `docs/security.md`.
 
 #![forbid(unsafe_code)]

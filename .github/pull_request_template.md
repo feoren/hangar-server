@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] The check suite from the README ("Bauen und prüfen") is green.
+- [ ] The check suite from [docs/entwicklung.md](https://github.com/feoren/hangar-team-server/blob/main/docs/entwicklung.md) ("Bauen und prüfen") is green.
 - [ ] New behavior is covered by tests.
 - [ ] Nothing under `vendor/` was changed by hand.
 - [ ] New mail texts are in all 12 languages.

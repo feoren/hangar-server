@@ -1,4 +1,4 @@
-# Prüfkette aus dem README ("Bauen und prüfen"), dazu bekannte Schwachstellen der Abhängigkeiten
+# Prüfkette aus docs/entwicklung.md ("Bauen und prüfen"), dazu bekannte Schwachstellen der Abhängigkeiten
 # und ein Probebau des Docker-Images.
 name: CI
 

@@ -103,4 +103,4 @@ kann dort einen eigenen Schlüssel eintragen und sich selbst Lizenzen ausstellen
 lässt sich das bei Quelltext in fremder Hand nicht verhindern; die Elastic License 2.0 verbietet
 es ("move, change, disable, or circumvent the license key functionality"). Wer das härter
 will, bettet die öffentlichen Schlüssel der Webseite beim Bau ein und lässt die Konfiguration
-nur zusätzliche Schlüssel für Tests zu (offener Punkt, siehe README).
+nur zusätzliche Schlüssel für Tests zu (offener Punkt, siehe entwicklung.md).
