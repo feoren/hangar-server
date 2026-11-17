@@ -90,6 +90,17 @@ Image: `docker build -t hangar-team-server .`; for amd64 and arm64:
 `docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-team-server:<version> --push .`
 (static musl binary, distroless, user `nonroot`).
 
+## Releasing
+
+1. Raise `version` in `Cargo.toml` (and the placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`),
+   commit, push, wait for CI.
+2. Tag and push: `git tag v0.4.0 && git push github v0.4.0`.
+3. The workflow `Release image` (`.github/workflows/release.yml`) checks that the tag matches
+   `Cargo.toml`, builds amd64 and arm64 and pushes `ghcr.io/feoren/hangar-team-server:<version>`.
+   No `latest` tag.
+4. Only before the first release: in the package settings on GitHub, set the visibility to
+   public so that `docker pull` works without signing in.
+
 
 ## Open items
 
