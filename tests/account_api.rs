@@ -9,10 +9,10 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use common::*;
-use hangar_team_server::config::{Config, IdentityMode};
-use hangar_team_server::signed::KeySet;
-use hangar_team_server::util::now_s;
-use hangar_team_server::wire::ServerMessage;
+use hangar_server::config::{Config, IdentityMode};
+use hangar_server::signed::KeySet;
+use hangar_server::util::now_s;
+use hangar_server::wire::ServerMessage;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -146,7 +146,7 @@ fn local() -> Config {
 /// Browser session via an admin magic link; returns the cookie.
 async fn browser(s: &TestServer, email: &str) -> String {
     let app = &s.server.router;
-    let link = hangar_team_server::identity::auth::admin_login_link(
+    let link = hangar_server::identity::auth::admin_login_link(
         &s.server.state.relay.db,
         &s.server.state.config,
         email,

@@ -8,7 +8,7 @@ Strato V-Server, and the full configuration. The short path is in the [README](.
 1. Create `.env` from `.env.example`: `PUBLIC_URL`, `TEAM_DOMAIN`, keys, and with
    `IDENTITY=local` also `SERVER_SECRET` and mail.
 2. Point the DNS of `TEAM_DOMAIN` to the host, open ports 80 and 443.
-3. `docker compose up -d --build`. Caddy obtains the certificate; the team server listens only
+3. `docker compose up -d --build`. Caddy obtains the certificate; the server listens only
    inside the Compose network.
 4. Check: `curl https://<domain>/health` returns `{"status":"ok",...}`.
 
@@ -37,7 +37,7 @@ For the official service at `team-hangar.feoren.com` on a Strato V-Server with D
 - Ports 80 and 443 (TCP, plus 443/UDP for HTTP/3) open: in the Strato firewall in the customer
   area (server login, firewall/security) **and**, if active, in `ufw`
   (`ufw allow 80/tcp`, `ufw allow 443/tcp`, `ufw allow 443/udp`). SSH with keys only.
-  Port 8080 of the team server stays closed; only Caddy is reachable from outside.
+  Port 8080 of the server stays closed; only Caddy is reachable from outside.
 - DNS: `A` (and `AAAA` for IPv6) for `team-hangar.feoren.com` pointing to the server's IP. Caddy
   can only obtain the certificate once the name resolves.
 - From the website: the relay's bearer token (`RELAY_REVOCATION_TOKEN`) and the public signing
@@ -55,8 +55,8 @@ Then either copy the whole repository to the server (`git clone` or `rsync`) and
 build the image locally and transfer it:
 
 ```sh
-docker build -t hangar-team-server:<version> .
-docker save hangar-team-server:<version> | ssh <server> docker load
+docker build -t hangar-server:<version> .
+docker save hangar-server:<version> | ssh <server> docker load
 ```
 
 (in the second case, remove `build: .` from `docker-compose.yml` and set `image:` to this name;
@@ -94,7 +94,7 @@ docker compose up -d --build     # with a preloaded image: docker compose up -d
 ```sh
 curl -fsS https://team-hangar.feoren.com/health           # {"status":"ok","version":"..."}
 docker compose ps                                          # both services "healthy"/"running"
-docker compose logs -f --tail=100 teamserver               # JSON lines, "team server ready"
+docker compose logs -f --tail=100 server               # JSON lines, "server ready"
 ```
 
 The log must not contain the warning `REVOCATION_URL missing`; errors while fetching the
@@ -112,12 +112,18 @@ docker image prune -f
 Migrations run on startup. Connections are closed with 1012, and the app reconnects with its
 cursor.
 
+**Coming from `hangar-team-server` (0.4.0 and earlier):** the project, the binary and the image
+were renamed to `hangar-server`, and the Compose service `teamserver` is now `server`. Keep the
+directory you cloned into, so the data volume keeps its name, and add `--remove-orphans` once:
+`docker compose up -d --build --remove-orphans`. Admin commands are now
+`docker compose run --rm server ...`.
+
 ### Backing up the data volume
 
 While running, use SQLite's online backup (consistent even during writes):
 
 ```sh
-docker run --rm -v hangar-team-server_team-data:/data -v /root/backup:/backup \
+docker run --rm -v hangar-server_team-data:/data -v /root/backup:/backup \
   keinos/sqlite3 sqlite3 /data/hangar-team.db ".backup '/backup/team-$(date +%F).db'"
 ```
 
@@ -167,7 +173,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    the server offers the same account API as hangar.feoren.com
    ([docs/account-api.md](account-api.md)); the ticket itself names the live channel
    `wss://<host>/v1/live`. The `/device` page asks for the email address. With `SIGNUP=invite`
-   and no mail: run `docker compose run --rm teamserver login-link admin@example.org` on the host
+   and no mail: run `docker compose run --rm server login-link admin@example.org` on the host
    and open the link. Connected devices are listed at `<PUBLIC_URL>/account/devices` (Hangar
    links to the page) and can be disconnected there.
 
@@ -180,10 +186,10 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    self-hosting):
 
    ```sh
-   docker compose run --rm teamserver create-team admin@example.org Engineering
-   docker compose run --rm teamserver invite Engineering anna@example.org          # member
-   docker compose run --rm teamserver invite Engineering ben@example.org admin
-   docker compose run --rm teamserver teams                                         # overview
+   docker compose run --rm server create-team admin@example.org Engineering
+   docker compose run --rm server invite Engineering anna@example.org          # member
+   docker compose run --rm server invite Engineering ben@example.org admin
+   docker compose run --rm server teams                                         # overview
    ```
 
    `create-team` creates the owner's account if needed and prints the team ID. `invite` takes
@@ -200,7 +206,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    your account and place it on the server, most easily on the host:
 
    ```sh
-   docker compose run --rm -T teamserver license - < hangar-license-2026-11-17.txt
+   docker compose run --rm -T server license - < hangar-license-2026-11-17.txt
    ```
 
    The command reads the file from stdin (`-`) or from a path inside the container, verifies it

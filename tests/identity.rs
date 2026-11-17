@@ -8,13 +8,11 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use common::*;
 use ed25519_dalek::SigningKey;
-use hangar_team_server::config::{Config, IdentityMode};
-use hangar_team_server::license::LicenseClaims;
-use hangar_team_server::signed::{self, KeySet, LICENSE_CONTEXT};
-use hangar_team_server::util::{b64, now_s};
-use hangar_team_server::wire::{
-    ClientMessage, Epoch, ErrorCode, KeyRotate, ServerMessage, WrappedKey,
-};
+use hangar_server::config::{Config, IdentityMode};
+use hangar_server::license::LicenseClaims;
+use hangar_server::signed::{self, KeySet, LICENSE_CONTEXT};
+use hangar_server::util::{b64, now_s};
+use hangar_server::wire::{ClientMessage, Epoch, ErrorCode, KeyRotate, ServerMessage, WrappedKey};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -141,13 +139,10 @@ async fn login(s: &TestServer, email: &str) -> (String, String) {
     .await;
     assert_eq!(pending.json()["error"], "authorization_pending");
 
-    let link = hangar_team_server::identity::auth::admin_login_link(
-        &s.server.state.relay.db,
-        config,
-        email,
-    )
-    .await
-    .unwrap();
+    let link =
+        hangar_server::identity::auth::admin_login_link(&s.server.state.relay.db, config, email)
+            .await
+            .unwrap();
     let path = link.trim_start_matches(ORIGIN);
     assert_eq!(
         call(app, "GET", path, &[], None).await.status,
@@ -764,7 +759,7 @@ async fn magic_link_cannot_be_requested_without_mail_and_reveals_nothing() {
 #[tokio::test]
 async fn invitation_mail_via_log_transport() {
     let mut config = local_config();
-    config.mail_transport = hangar_team_server::config::MailTransport::Log;
+    config.mail_transport = hangar_server::config::MailTransport::Log;
     let dir = config.data_dir.join("mail");
     let s = start(config).await;
     let app = &s.server.router;
@@ -819,7 +814,7 @@ async fn next_mail(dir: &std::path::Path, seen: usize) -> String {
 #[tokio::test]
 async fn device_code_in_magic_link_only_applies_in_requesting_browser() {
     let mut config = local_config();
-    config.mail_transport = hangar_team_server::config::MailTransport::Log;
+    config.mail_transport = hangar_server::config::MailTransport::Log;
     let dir = config.data_dir.join("mail");
     let s = start(config).await;
     let app = &s.server.router;
@@ -1032,7 +1027,7 @@ async fn invitations_count_per_address_for_rate_limit() {
 
 #[tokio::test]
 async fn host_commands_create_team_invite_and_teams() {
-    use hangar_team_server::identity::teams::{cli_create_team, cli_invite, cli_teams};
+    use hangar_server::identity::teams::{cli_create_team, cli_invite, cli_teams};
     let s = start(local_config()).await;
     let app = &s.server.router;
     let db = &s.server.state.relay.db;
@@ -1143,7 +1138,7 @@ async fn host_commands_create_team_invite_and_teams() {
 
 #[tokio::test]
 async fn host_command_license_stores_for_the_named_account() {
-    use hangar_team_server::identity::teams::cli_install_license;
+    use hangar_server::identity::teams::cli_install_license;
     let s = start(local_config()).await;
     let app = &s.server.router;
     let db = &s.server.state.relay.db;

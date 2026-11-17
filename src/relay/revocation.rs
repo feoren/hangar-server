@@ -275,7 +275,7 @@ impl Poller {
             .no_proxy()
             .timeout(TIMEOUT)
             .connect_timeout(Duration::from_secs(5))
-            .user_agent(concat!("hangar-team-server/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("hangar-server/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("HTTP client: {e}"))?;
         Ok(Poller {

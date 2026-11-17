@@ -2,7 +2,7 @@
 
 A ticket is the short-lived proof with which the app opens a live connection to a team. In
 official mode it is issued by the website hangar.feoren.com (account, project, role and seat are
-decided there), in self-hosting by the team server's own identity. The app passes it on
+decided there), in self-hosting by the server's own identity. The app passes it on
 unchanged in `hello.ticket`; only the relay verifies it.
 
 ## Structure

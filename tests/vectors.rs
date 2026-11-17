@@ -7,10 +7,10 @@
 use std::path::PathBuf;
 
 use ed25519_dalek::SigningKey;
-use hangar_team_server::license::{self, LicenseError};
-use hangar_team_server::signed::{self, KeySet, SignedError, LICENSE_CONTEXT, TICKET_CONTEXT};
-use hangar_team_server::ticket::{self, TicketError};
-use hangar_team_server::util::{b64, hex};
+use hangar_server::license::{self, LicenseError};
+use hangar_server::signed::{self, KeySet, SignedError, LICENSE_CONTEXT, TICKET_CONTEXT};
+use hangar_server::ticket::{self, TicketError};
+use hangar_server::util::{b64, hex};
 use serde_json::{json, Value};
 
 /// Secret key from RFC 8032, section 7.1, test 1: publicly known, for tests only.
@@ -374,8 +374,8 @@ fn rfc8032_key() {
 /// signs, `revocation::verify` must accept or reject as specified there.
 #[test]
 fn website_revocation_list() {
-    use hangar_team_server::relay::revocation::{self, Revocation, RevocationError};
-    use hangar_team_server::ticket::Role;
+    use hangar_server::relay::revocation::{self, Revocation, RevocationError};
+    use hangar_server::ticket::Role;
 
     let stored: Value = serde_json::from_str(
         &std::fs::read_to_string(path("revocations-website.json")).expect("website vector"),

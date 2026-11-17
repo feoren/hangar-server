@@ -1,5 +1,5 @@
 [package]
-name = "hangar-team-server"
+name = "hangar-server"
 version = "0.4.0"
 description = "Relay and self-hosting identity of the Hangar team service"
 edition = "2021"

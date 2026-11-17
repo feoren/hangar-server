@@ -1,4 +1,4 @@
-//! Hangar team server: relay for live collaboration (official mode and
+//! Hangar server: relay for live collaboration (official mode and
 //! self-hosting) and a lean built-in identity for self-hosting.
 //!
 //! Architecture: `docs/development.md`, operations: `docs/operations.md`; protocol: `docs/protocol.md`;

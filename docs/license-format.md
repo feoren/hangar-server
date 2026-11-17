@@ -5,7 +5,7 @@ sells seats and issues a signed document after purchase; the owner uploads it to
 server (`PUT /v1/license`). The server verifies it only with public keys from its configuration
 (`LICENSE_PUBLIC_KEYS`), offline.
 
-In official mode there is no license check in the team server: there, the website decides
+In official mode there is no license check in the server: there, the website decides
 about the seat and reports it in the ticket (`seat_ok`).
 
 ## Model: seats per account

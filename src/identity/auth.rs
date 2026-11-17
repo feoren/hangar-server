@@ -391,7 +391,7 @@ pub async fn request_magic_link(
     Ok(())
 }
 
-/// For `hangar-team-server login-link <email>`: link without mail for the person at the server.
+/// For `hangar-server login-link <email>`: link without mail for the person at the server.
 pub async fn admin_login_link(db: &Db, config: &Config, raw_email: &str) -> Result<String, String> {
     let email = normalize_email(raw_email).ok_or("invalid email address")?;
     let token = create_magic_link(db, &email, "/device", ADMIN_LINK_TTL_S, None)

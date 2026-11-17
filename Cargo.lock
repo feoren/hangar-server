@@ -723,6 +723,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "hangar-server"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "dotenvy",
+ "ed25519-dalek 2.2.0",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hangar-team-crypto",
+ "hangar-team-protocol",
+ "hmac 0.12.1",
+ "http-body-util",
+ "lettre",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hangar-team-crypto"
 version = "0.1.0"
 dependencies = [
@@ -751,36 +781,6 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "zeroize",
-]
-
-[[package]]
-name = "hangar-team-server"
-version = "0.4.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "dotenvy",
- "ed25519-dalek 2.2.0",
- "futures-util",
- "getrandom 0.3.4",
- "hangar-team-crypto",
- "hangar-team-protocol",
- "hmac 0.12.1",
- "http-body-util",
- "lettre",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "subtle",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "tower",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,12 +1,12 @@
-# Running on a VPS or Docker host: team server behind Caddy (TLS via ACME).
+# Running on a VPS or Docker host: Hangar server behind Caddy (TLS via ACME).
 # Beforehand: create .env from .env.example and set TEAM_DOMAIN, PUBLIC_URL and the keys.
 #   docker compose up -d --build
-# Only Caddy is reachable from outside (80/443); the team server listens only inside the Compose network.
+# Only Caddy is reachable from outside (80/443); the server listens only inside the Compose network.
 
 services:
-  teamserver:
+  server:
     build: .
-    image: hangar-team-server:local
+    image: hangar-server:local
     restart: unless-stopped
     env_file: .env
     environment:
@@ -33,7 +33,7 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - teamserver
+      - server
     ports:
       - "80:80"
       - "443:443"

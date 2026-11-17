@@ -76,4 +76,4 @@ jobs:
       - name: Build image
         env:
           DOCKER_BUILDKIT: "1"
-        run: docker build -t hangar-team-server:ci .
+        run: docker build -t hangar-server:ci .

@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
-use hangar_team_server::config::{Config, IdentityMode};
-use hangar_team_server::signed::{self, KeySet, TICKET_CONTEXT};
-use hangar_team_server::ticket::{Role, TicketClaims};
-use hangar_team_server::util::{b64, now_s, random_id};
-use hangar_team_server::wire::{
+use hangar_server::config::{Config, IdentityMode};
+use hangar_server::signed::{self, KeySet, TICKET_CONTEXT};
+use hangar_server::ticket::{Role, TicketClaims};
+use hangar_server::util::{b64, now_s, random_id};
+use hangar_server::wire::{
     self, Ciphertext, ClientFrame, ClientMessage, Cursor, DeviceId, Hello, Holder, MemberId, OpId,
     ProtoRange, ServerFrame, ServerMessage, SessionKey, TeamId, Ticket,
 };
@@ -57,14 +57,12 @@ pub fn session(s: &str) -> SessionKey {
 
 pub struct TestServer {
     pub addr: SocketAddr,
-    pub server: hangar_team_server::Server,
+    pub server: hangar_server::Server,
 }
 
 pub async fn start(mut config: Config) -> TestServer {
     config.max_connections_per_member = 16;
-    let server = hangar_team_server::build(config)
-        .await
-        .expect("server starts");
+    let server = hangar_server::build(config).await.expect("server starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = server
@@ -266,6 +264,9 @@ pub fn code_of(code: CloseCode) -> u16 {
 // ---------------------------------------------------------------------------------------------
 // End-to-end: real device keys and signed log entries (hangar-team-crypto)
 
+use hangar_server::wire::{
+    DeviceKeys, DeviceRemove, KeyRotate, KeyWrap, MemberLogAppend, UnixMillis,
+};
 use hangar_team_crypto::entropy::OsEntropy;
 use hangar_team_crypto::epoch::TeamSecret;
 use hangar_team_crypto::identity::DeviceIdentity;
@@ -273,9 +274,6 @@ use hangar_team_crypto::memberlog::{
     DeviceEntry, Endorsement, EntryBody, EntryKind, LogVerifier, TeamState,
 };
 use hangar_team_crypto::rotation::{plan_rotation, wrap_for_device};
-use hangar_team_server::wire::{
-    DeviceKeys, DeviceRemove, KeyRotate, KeyWrap, MemberLogAppend, UnixMillis,
-};
 
 /// A log entry that is never valid (for checks that fail earlier).
 pub fn dummy_log() -> MemberLogAppend {
@@ -317,7 +315,7 @@ pub struct Log {
 }
 
 pub fn now() -> UnixMillis {
-    UnixMillis(hangar_team_server::util::now_ms())
+    UnixMillis(hangar_server::util::now_ms())
 }
 
 impl Log {
@@ -354,7 +352,7 @@ impl Log {
         &self,
         issuer: &Dev,
         new: &Dev,
-        role: hangar_team_server::wire::Role,
+        role: hangar_server::wire::Role,
     ) -> MemberLogAppend {
         self.next(
             issuer,
@@ -428,19 +426,19 @@ impl Log {
     /// Applies an entry the relay has accepted (same checks as there).
     pub fn accept(&mut self, append: &MemberLogAppend, sender: &Holder) {
         self.verifier
-            .admit(append, sender, hangar_team_server::wire::Role::Owner)
+            .admit(append, sender, hangar_server::wire::Role::Owner)
             .expect("locally valid");
     }
 
     pub fn accept_rotation(&mut self, rotate: &KeyRotate, sender: &Holder) {
         self.verifier
-            .admit_rotation(rotate, sender, hangar_team_server::wire::Role::Owner)
+            .admit_rotation(rotate, sender, hangar_server::wire::Role::Owner)
             .expect("locally valid");
     }
 
     pub fn accept_removal(&mut self, remove: &DeviceRemove, sender: &Holder) {
         self.verifier
-            .admit_device_remove(remove, sender, hangar_team_server::wire::Role::Owner)
+            .admit_device_remove(remove, sender, hangar_server::wire::Role::Owner)
             .expect("locally valid");
     }
 }

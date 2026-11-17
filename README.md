@@ -1,6 +1,6 @@
-# Hangar Team Server
+# Hangar Server
 
-[![CI](https://github.com/feoren/hangar-team-server/actions/workflows/ci.yml/badge.svg)](https://github.com/feoren/hangar-team-server/actions/workflows/ci.yml)
+[![CI](https://github.com/feoren/hangar-server/actions/workflows/ci.yml/badge.svg)](https://github.com/feoren/hangar-server/actions/workflows/ci.yml)
 [![License: Elastic 2.0](https://img.shields.io/badge/license-Elastic%202.0-blue)](LICENSE)
 
 The server for teamwork in [Hangar](https://github.com/feoren/hangar), the desktop app for AI
@@ -24,8 +24,8 @@ bundled Caddy obtains the certificate automatically.
 **1. Download and create the settings**
 
 ```sh
-git clone https://github.com/feoren/hangar-team-server.git
-cd hangar-team-server
+git clone https://github.com/feoren/hangar-server.git
+cd hangar-server
 cp .env.example .env
 ```
 
@@ -51,9 +51,9 @@ curl https://team.example.org/health      # returns {"status":"ok",...}
 **4. Create a team and invite people**
 
 ```sh
-docker compose run --rm teamserver create-team you@example.org Engineering
-docker compose run --rm teamserver invite Engineering anna@example.org
-docker compose run --rm teamserver teams                  # overview
+docker compose run --rm server create-team you@example.org Engineering
+docker compose run --rm server invite Engineering anna@example.org
+docker compose run --rm server teams                  # overview
 ```
 
 `invite` prints an invitation link. Send it to the person; it can be used once and is valid for
@@ -63,13 +63,13 @@ docker compose run --rm teamserver teams                  # overview
 
 In Hangar, enter `https://team.example.org/api/v1` as the server address, click sign in and
 confirm the code in the browser. Without a mail server, you get the magic link for the browser
-with `docker compose run --rm teamserver login-link you@example.org`.
+with `docker compose run --rm server login-link you@example.org`.
 
 ## Good to know
 
 - **Seats:** Up to 3 people are free. For more, buy seats on
   [hangar.feoren.com](https://hangar.feoren.com), download the license file in your account
-  and install it with `docker compose run --rm -T teamserver license - < hangar-license-2026-11-17.txt`.
+  and install it with `docker compose run --rm -T server license - < hangar-license-2026-11-17.txt`.
 - **Backups:** All data lives in the Docker volume `team-data`. Back it up regularly as described
   in [docs/operations.md](docs/operations.md).
 - **Updates:** `git pull`, then `docker compose up -d --build`. The database is migrated

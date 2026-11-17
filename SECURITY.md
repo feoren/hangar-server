@@ -1,6 +1,6 @@
 # Security Policy
 
-The team server holds accounts, sessions and invitations in self-hosted mode and relays the
+The server holds accounts, sessions and invitations in self-hosted mode and relays the
 end-to-end encrypted data of teams, so security reports are taken seriously.
 
 ## Reporting a vulnerability

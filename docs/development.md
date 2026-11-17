@@ -86,8 +86,8 @@ php tools/php/verify_vectors.php testdata/tickets.json testdata/licenses.json
 
 Rust stable (tested with 1.99.1), edition 2021.
 
-Image: `docker build -t hangar-team-server .`; for amd64 and arm64:
-`docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-team-server:<version> --push .`
+Image: `docker build -t hangar-server .`; for amd64 and arm64:
+`docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-server:<version> --push .`
 (static musl binary, distroless, user `nonroot`).
 
 ## Releasing
@@ -96,7 +96,7 @@ Image: `docker build -t hangar-team-server .`; for amd64 and arm64:
    commit, push, wait for CI.
 2. Tag and push: `git tag v0.4.0 && git push github v0.4.0`.
 3. The workflow `Release image` (`.github/workflows/release.yml`) checks that the tag matches
-   `Cargo.toml`, builds amd64 and arm64 and pushes `ghcr.io/feoren/hangar-team-server:<version>`.
+   `Cargo.toml`, builds amd64 and arm64 and pushes `ghcr.io/feoren/hangar-server:<version>`.
    No `latest` tag.
 4. Only before the first release: in the package settings on GitHub, set the visibility to
    public so that `docker pull` works without signing in.

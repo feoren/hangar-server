@@ -1,8 +1,8 @@
-//! Entry point: `hangar-team-server [serve|healthcheck|login-link <email>|create-team <email> <name>|
+//! Entry point: `hangar-server [serve|healthcheck|login-link <email>|create-team <email> <name>|
 //! invite <team> <email> [member|admin]|teams|license <file>]`.
 //!
 //! The commands other than `serve` and `healthcheck` are for self-hosting on the host, e.g.
-//! `docker compose run --rm teamserver invite Development anna@example.org`. Whatever a script
+//! `docker compose run --rm server invite Development anna@example.org`. Whatever a script
 //! consumes further (link, team ID) is printed as the last line on stdout.
 
 use std::io::{Read, Write};
@@ -10,7 +10,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use hangar_team_server::config::{Config, IdentityMode};
+use hangar_server::config::{Config, IdentityMode};
 use tracing_subscriber::EnvFilter;
 
 fn init_logging(json: bool) {
@@ -80,13 +80,13 @@ fn main() -> ExitCode {
 
 async fn serve(config: Config) -> Result<(), String> {
     let bind = config.bind;
-    let server = hangar_team_server::build(config)
+    let server = hangar_server::build(config)
         .await
         .map_err(|e| e.to_string())?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("{bind}: {e}"))?;
-    tracing::info!(%bind, "team server ready");
+    tracing::info!(%bind, "server ready");
     let shutdown = server.shutdown;
     let app = server
         .router
@@ -131,20 +131,20 @@ async fn login_link(config: Config, email: Option<String>) -> Result<(), String>
         return Err("login-link is only available with IDENTITY=local".into());
     }
     let email = email.ok_or("usage: login-link <email>")?;
-    let db = hangar_team_server::db::connect(&config.database_url)
+    let db = hangar_server::db::connect(&config.database_url)
         .await
         .map_err(|e| e.to_string())?;
-    let link = hangar_team_server::identity::auth::admin_login_link(&db, &config, &email).await?;
+    let link = hangar_server::identity::auth::admin_login_link(&db, &config, &email).await?;
     println!("{link}");
     Ok(())
 }
 
 /// Database for the self-hosting commands; with IDENTITY=official they are not available.
-async fn local_db(config: &Config, command: &str) -> Result<hangar_team_server::db::Db, String> {
+async fn local_db(config: &Config, command: &str) -> Result<hangar_server::db::Db, String> {
     if config.identity != IdentityMode::Local {
         return Err(format!("{command} is only available with IDENTITY=local"));
     }
-    hangar_team_server::db::connect(&config.database_url)
+    hangar_server::db::connect(&config.database_url)
         .await
         .map_err(|e| e.to_string())
 }
@@ -160,13 +160,9 @@ async fn create_team(config: Config, args: &[String]) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(" ");
     let db = local_db(&config, "create-team").await?;
-    let id = hangar_team_server::identity::teams::cli_create_team(
-        &db,
-        &config.default_lang,
-        email,
-        &name,
-    )
-    .await?;
+    let id =
+        hangar_server::identity::teams::cli_create_team(&db, &config.default_lang, email, &name)
+            .await?;
     eprintln!("team {name:?} created, owner {email}. To invite: invite {id} <email>");
     println!("{id}");
     Ok(())
@@ -182,7 +178,7 @@ async fn invite(config: Config, args: &[String]) -> Result<(), String> {
     }
     let role = args.get(2).map_or("member", String::as_str);
     let db = local_db(&config, "invite").await?;
-    let link = hangar_team_server::identity::teams::cli_invite(
+    let link = hangar_server::identity::teams::cli_invite(
         &db,
         &config.public_url,
         &config.default_lang,
@@ -199,7 +195,7 @@ async fn invite(config: Config, args: &[String]) -> Result<(), String> {
 /// `teams`: teams with ID, name, owner, members and open invitations (tab-separated).
 async fn teams(config: Config) -> Result<(), String> {
     let db = local_db(&config, "teams").await?;
-    let lines = hangar_team_server::identity::teams::cli_teams(&db).await?;
+    let lines = hangar_server::identity::teams::cli_teams(&db).await?;
     if lines.is_empty() {
         eprintln!("no team yet. To create one: create-team <owner-email> <name>");
     }
@@ -227,8 +223,8 @@ async fn install_license(config: Config, path: Option<String>) -> Result<(), Str
     };
     let db = local_db(&config, "license").await?;
     let installed =
-        hangar_team_server::identity::teams::cli_install_license(&db, &config, &document).await?;
-    let days = (installed.exp - hangar_team_server::util::now_s()).max(0) / 86_400;
+        hangar_server::identity::teams::cli_install_license(&db, &config, &document).await?;
+    let days = (installed.exp - hangar_server::util::now_s()).max(0) / 86_400;
     eprintln!(
         "license stored for {}: {} seats, valid for {days} more days.",
         installed.email, installed.seats

@@ -6,9 +6,9 @@ mod common;
 
 use common::*;
 use ed25519_dalek::SigningKey;
-use hangar_team_server::config::{Config, IdentityMode};
-use hangar_team_server::ticket::Role;
-use hangar_team_server::wire::*;
+use hangar_server::config::{Config, IdentityMode};
+use hangar_server::ticket::Role;
+use hangar_server::wire::*;
 
 fn h(b: u8) -> KeyedHash {
     KeyedHash::from_bytes([b; 32])

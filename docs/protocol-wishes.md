@@ -1,7 +1,7 @@
 # Requests to the app's protocol crate
 
 For the app session that maintains `hangar-team-protocol` and `hangar-team-crypto`. The
-team server uses both as unmodified copies from `79c68ca` (`vendor/`, see [development.md](development.md));
+server uses both as unmodified copies from `79c68ca` (`vendor/`, see [development.md](development.md));
 `src/wire.rs` only re-exports names. The earlier requests (E2E messages, `member.role_changed`,
 `offline`, `ticket.renew`, close codes, permission helpers, `key.wrapped`, holder in `WrappedKey`) have
 been implemented by the crate. Questions left open after b30b9d5, decided together with the app session on

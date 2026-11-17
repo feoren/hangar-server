@@ -1,7 +1,7 @@
-# Hangar team server: static musl binary in a distroless image.
+# Hangar server: static musl binary in a distroless image.
 #
-# Build (one platform):     docker build -t hangar-team-server .
-# Build (amd64 and arm64):  docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-team-server:<version> --push .
+# Build (one platform):     docker build -t hangar-server .
+# Build (amd64 and arm64):  docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/hangar-server:<version> --push .
 #   Each platform builds natively in the Alpine image (under QEMU for the foreign architecture:
 #   slow, but without a cross toolchain for SQLite and ring).
 #
@@ -19,11 +19,11 @@ COPY vendor ./vendor
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \
- && cp target/release/hangar-team-server /hangar-team-server \
+ && cp target/release/hangar-server /hangar-server \
  && mkdir -p /data-empty
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
-COPY --from=build /hangar-team-server /usr/local/bin/hangar-team-server
+COPY --from=build /hangar-server /usr/local/bin/hangar-server
 # The data volume belongs to the user nonroot (65532) so that SQLite and the ticket key can be
 # written.
 COPY --from=build --chown=65532:65532 /data-empty /data
@@ -34,6 +34,6 @@ VOLUME ["/data"]
 EXPOSE 8080
 USER nonroot:nonroot
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["/usr/local/bin/hangar-team-server", "healthcheck"]
-ENTRYPOINT ["/usr/local/bin/hangar-team-server"]
+  CMD ["/usr/local/bin/hangar-server", "healthcheck"]
+ENTRYPOINT ["/usr/local/bin/hangar-server"]
 CMD ["serve"]

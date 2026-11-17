@@ -11,15 +11,13 @@ use axum::routing::get;
 use axum::Router;
 use common::*;
 use ed25519_dalek::SigningKey;
-use hangar_team_server::config::{Config, IdentityMode, RevocationSource};
-use hangar_team_server::relay::revocation::{PollError, Poller};
-use hangar_team_server::relay::team::close;
-use hangar_team_server::signed::{self, REVOKE_CONTEXT};
-use hangar_team_server::ticket::Role;
-use hangar_team_server::util::now_s;
-use hangar_team_server::wire::{
-    ClientMessage, Epoch, ErrorCode, KeyRotate, ServerMessage, WrappedKey,
-};
+use hangar_server::config::{Config, IdentityMode, RevocationSource};
+use hangar_server::relay::revocation::{PollError, Poller};
+use hangar_server::relay::team::close;
+use hangar_server::signed::{self, REVOKE_CONTEXT};
+use hangar_server::ticket::Role;
+use hangar_server::util::now_s;
+use hangar_server::wire::{ClientMessage, Epoch, ErrorCode, KeyRotate, ServerMessage, WrappedKey};
 use serde_json::{json, Value};
 
 const TOKEN: &str = "relay-token-relay-token-relay-token-1234";
@@ -260,7 +258,7 @@ async fn role_change_without_role_requires_new_ticket() {
 /// (previously: admin for up to `CONNECTION_MAX_AGE_SECS`).
 #[tokio::test]
 async fn hoarded_ticket_does_not_restore_the_old_role() {
-    use hangar_team_server::wire::{Ticket, TicketRenew};
+    use hangar_server::wire::{Ticket, TicketRenew};
 
     let mock: Shared = Arc::default();
     let url = website(mock.clone()).await;

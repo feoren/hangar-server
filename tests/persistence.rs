@@ -3,10 +3,10 @@
 mod common;
 
 use common::*;
-use hangar_team_server::config::{Config, IdentityMode};
-use hangar_team_server::ticket::Role;
-use hangar_team_server::util::now_ms;
-use hangar_team_server::wire::*;
+use hangar_server::config::{Config, IdentityMode};
+use hangar_server::ticket::Role;
+use hangar_server::util::now_ms;
+use hangar_server::wire::*;
 
 fn h(b: u8) -> KeyedHash {
     KeyedHash::from_bytes([b; 32])
@@ -267,7 +267,7 @@ async fn client_at_the_stored_head_needs_no_snapshot() {
 /// `after`, and for removals predating migration 0010 (`log_index` NULL).
 #[tokio::test]
 async fn removed_device_log_ends_at_the_removing_entry() {
-    use hangar_team_server::relay::store;
+    use hangar_server::relay::store;
     let s = start_official().await;
     let db = &s.server.state.relay.db;
     sqlx::query("INSERT INTO relay_teams (id, stream, created_at) VALUES ('z', 's', 0)")

@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in the team server does not work as it should.
+description: Something in the server does not work as it should.
 labels: [bug]
 body:
   - type: markdown
@@ -21,7 +21,7 @@ body:
       label: Steps to reproduce
       placeholder: |
         1. docker compose up -d
-        2. docker compose run --rm teamserver invite Team anna@example.org
+        2. docker compose run --rm server invite Team anna@example.org
         3. ...
     validations:
       required: true
@@ -58,5 +58,5 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Optional. Output of `docker compose logs teamserver`. Remove tokens, keys, e-mail addresses and anything else private before posting.
+      description: Optional. Output of `docker compose logs server`. Remove tokens, keys, e-mail addresses and anything else private before posting.
       render: text

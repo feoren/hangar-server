@@ -5,11 +5,11 @@
 mod common;
 
 use common::*;
+use hangar_server::config::{Config, IdentityMode};
+use hangar_server::relay::team::close;
+use hangar_server::ticket::Role;
+use hangar_server::wire::{Role as LogRole, *};
 use hangar_team_crypto::memberlog::LogVerifier;
-use hangar_team_server::config::{Config, IdentityMode};
-use hangar_team_server::relay::team::close;
-use hangar_team_server::ticket::Role;
-use hangar_team_server::wire::{Role as LogRole, *};
 
 fn code(frame: &ServerFrame) -> Option<ErrorCode> {
     match &frame.message {
