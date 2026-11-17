@@ -77,3 +77,88 @@ jobs:
         env:
           DOCKER_BUILDKIT: "1"
         run: docker build -t hangar-server:ci .
+
+      # The Compose file must stay valid, keep the volume name of existing installations and
+      # name the same default version as Cargo.toml.
+      - name: Compose file
+        run: |
+          sh tools/check-versions.sh
+          printf 'PUBLIC_URL=https://team.example.org\nSERVER_SECRET=ci\n' > /tmp/ci.env
+          docker compose --env-file /tmp/ci.env config -q
+          docker compose --env-file /tmp/ci.env -f docker-compose.yml -f docker-compose.build.yml config -q
+          docker compose --env-file /tmp/ci.env config --volumes | grep -qx team-data
+
+  # install.sh on a real Linux host: both ways, each run twice (the second run is an update and
+  # must keep the settings), plus a download with a wrong checksum.
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Lint
+        run: |
+          shellcheck -x install.sh tests/install/caddyfile.sh tools/check-versions.sh
+          sh tests/install/caddyfile.sh
+
+      - name: Build image and binary
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          docker build -t "ghcr.io/feoren/hangar-server:$version" .
+          docker build --target binary --output type=local,dest=/tmp/bin .
+          mv /tmp/bin/hangar-server /tmp/bin/hangar-server-x86_64-linux-musl
+          (cd /tmp/bin && sha256sum hangar-server-x86_64-linux-musl > SHA256SUMS)
+
+      - name: Docker way
+        run: |
+          run() {
+            sudo HANGAR_MODE=docker HANGAR_DOMAIN=team.example.org HANGAR_EMAIL=ci@example.org \
+              HANGAR_COMPOSE_FILE="$PWD/docker-compose.yml" sh install.sh
+          }
+          run
+          before=$(sudo grep '^SERVER_SECRET=' /opt/hangar-server/.env)
+          run
+          after=$(sudo grep '^SERVER_SECRET=' /opt/hangar-server/.env)
+          [ "$before" = "$after" ]
+          cd /opt/hangar-server
+          sudo docker compose run --rm -T server teams | grep -q 'Team'
+          sudo docker compose down
+
+      - name: Native way
+        run: |
+          run() {
+            sudo HANGAR_MODE=native HANGAR_DOMAIN=team.example.org HANGAR_EMAIL=ci@example.org \
+              HANGAR_SKIP_CADDY=1 HANGAR_BINARY=/tmp/bin/hangar-server-x86_64-linux-musl \
+              HANGAR_SUMS="${1:-/tmp/bin/SHA256SUMS}" HANGAR_VERSION="${2:-$VERSION}" sh install.sh
+          }
+          sudo mv /opt/hangar-server /opt/hangar-server-docker
+          # A busy port stops the installation before anything is installed.
+          python3 -m http.server 8080 --bind 127.0.0.1 > /dev/null 2>&1 &
+          busy=$!
+          sleep 1
+          if run; then echo "a busy port 8080 was accepted"; exit 1; fi
+          [ ! -e /usr/local/lib/hangar-server ]
+          kill "$busy"
+          sleep 1
+          run
+          before=$(sudo grep '^SERVER_SECRET=' /etc/hangar-server/.env)
+          run
+          after=$(sudo grep '^SERVER_SECRET=' /etc/hangar-server/.env)
+          [ "$before" = "$after" ]
+          curl -fsS http://127.0.0.1:8080/health
+          sudo hangar-server teams | grep -q 'Team'
+          # An unfinished installation (no marker) is continued: same secret, still one team.
+          sudo rm /etc/hangar-server/.install-complete
+          run > /tmp/resume.log
+          grep -q 'continuing the unfinished installation' /tmp/resume.log
+          [ "$(sudo grep '^SERVER_SECRET=' /etc/hangar-server/.env)" = "$before" ]
+          [ "$(sudo hangar-server teams | grep -c 'Team')" = 1 ]
+          sudo test -e /etc/hangar-server/.install-complete
+          awk '{ c = substr($1, 1, 1) == "0" ? "1" : "0"; print c substr($0, 2) }' /tmp/bin/SHA256SUMS > /tmp/bad-sums
+          if run /tmp/bad-sums 9.9.9; then echo "a wrong checksum was accepted"; exit 1; fi
+          [ "$(readlink /usr/local/lib/hangar-server/current)" = "hangar-server-$VERSION" ]

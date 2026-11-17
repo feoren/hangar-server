@@ -1,28 +1,100 @@
 # Operations
 
-Detailed guide for running the server with Docker: in general, for the official service on a
-Strato V-Server, and the full configuration. The short path is in the [README](../README.md).
+Detailed guide for running the server: the three ways to install it, operation, the official
+service on a Strato V-Server, and the full configuration. The short path is in the
+[README](../README.md).
 
-## Running (VPS or Docker host)
+## Ways to run it
 
-1. Create `.env` from `.env.example`: `PUBLIC_URL`, `TEAM_DOMAIN`, keys, and with
-   `IDENTITY=local` also `SERVER_SECRET` and mail.
-2. Point the DNS of `TEAM_DOMAIN` to the host, open ports 80 and 443.
-3. `docker compose up -d --build`. Caddy obtains the certificate; the server listens only
-   inside the Compose network.
-4. Check: `curl https://<domain>/health` returns `{"status":"ok",...}`.
+Every release `vX.Y.Z` publishes the image `ghcr.io/feoren/hangar-server:X.Y.Z` (amd64, arm64)
+and, on the GitHub release page, `install.sh`, `docker-compose.yml`, the static binaries
+`hangar-server-x86_64-linux-musl` and `hangar-server-aarch64-linux-musl`, and `SHA256SUMS`.
 
-- **Data:** one volume `team-data` (`/data`): `hangar-team.db` (+ `-wal`, `-shm`), when
-  self-hosting also `ticket-signing.key`, and with `MAIL_TRANSPORT=log` the `mail/` folder.
-- **Backups:** `sqlite3 /data/hangar-team.db ".backup /backup/team.db"` or a volume snapshot
-  with the container stopped; back up `ticket-signing.key` as well. Reservations, the log
-  position, undelivered `notify` messages and blocked devices are stored in the database and
-  survive restarts; claims do not (clients resend them after `welcome`).
+### Install script (empty Linux server)
+
+```sh
+curl -fsSL https://github.com/feoren/hangar-server/releases/latest/download/install.sh | sudo sh
+```
+
+It asks for the domain, your e-mail address and the way (`docker` or `native`), generates
+`SERVER_SECRET`, starts the server, creates the first team and prints the sign-in link. Options
+after `sh -s --`: `--docker`, `--native`, `--version X.Y.Z`. Unattended: `HANGAR_DOMAIN`,
+`HANGAR_EMAIL`, `HANGAR_TEAM`, `HANGAR_MODE`, `HANGAR_YES=1` (install Docker or Caddy without
+asking), `HANGAR_SKIP_CADDY=1` (native, own reverse proxy), `HANGAR_PORT` (native, local port,
+default 8080). Running it again updates to the script's version and keeps settings and data. If
+a first installation stops halfway (port in use, no network), fix the cause and run it again: it
+continues with the same settings and creates the team only once. Values in `.env` that contain
+`$`, `\` or `"` belong in single quotes, so that systemd and the admin command read them alike.
+
+| | Docker way | Native way |
+| --- | --- | --- |
+| Files | `/opt/hangar-server/` (`.env`, `docker-compose.yml`) | `/etc/hangar-server/.env`, binary in `/usr/local/lib/hangar-server/` |
+| Data | volume `hangar-server_team-data` | `/var/lib/hangar-server` |
+| HTTPS | Caddy container | Caddy from its apt repository (`/etc/caddy/hangar-server.caddy`); a customised `Caddyfile` only gets an `import` line |
+| Admin commands | `cd /opt/hangar-server && docker compose run --rm server teams` | `sudo hangar-server teams` |
+| Logs | `docker compose logs -f server` | `journalctl -u hangar-server -f` |
+| Restart | `docker compose restart server` | `systemctl restart hangar-server` |
+
+The native service runs as the system user `hangar-server`, listens on `127.0.0.1:8080` only and
+is hardened by systemd (`ProtectSystem=strict`, `NoNewPrivileges`, 512 MiB memory limit). If ports
+80 and 443 already belong to another web server, the script leaves Caddy out and prints what the
+reverse proxy needs: upstream `http://127.0.0.1:8080`, WebSocket upgrades on `/v1/live`, long
+timeouts, `X-Forwarded-For`.
+
+Removing a native installation: `systemctl disable --now hangar-server`, then delete
+`/etc/systemd/system/hangar-server.service`, `/usr/local/bin/hangar-server`,
+`/usr/local/lib/hangar-server`, `/etc/hangar-server`, `/etc/caddy/hangar-server.caddy` (and its
+`import` line), the user `hangar-server` and, only if the data is no longer needed,
+`/var/lib/hangar-server`.
+
+### Docker Compose or Portainer stack
+
+`docker-compose.yml` is self-contained: the published image plus Caddy, whose configuration is
+part of the file. It needs only `PUBLIC_URL` and `SERVER_SECRET`, from a `.env` next to it or as
+stack variables in Portainer:
+
+```sh
+curl -fsSLO https://github.com/feoren/hangar-server/releases/latest/download/docker-compose.yml
+printf 'PUBLIC_URL=https://team.example.org\nSERVER_SECRET=%s\n' "$(openssl rand -hex 32)" > .env
+chmod 600 .env
+docker compose up -d
+```
+
+`PUBLIC_URL` has no trailing slash, since Caddy uses it as the site address. Docker Compose 2.24
+or newer is needed (inline `configs`, optional `env_file`). The DNS name must point to the host
+and ports 80 and 443 must be free; the server listens only inside the Compose network. Further settings from [.env.example](../.env.example) go into the
+same `.env`. `HANGAR_VERSION` in `.env` pins another image version. To build from this checkout
+instead: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
+Swarm (`docker stack deploy`) does not support the inline configuration.
+
+### Image only (own reverse proxy)
+
+For Plesk, Portainer containers, a NAS or any host with HTTPS already in place:
+
+```sh
+docker run -d --name hangar-server --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 -v hangar-data:/data \
+  -e IDENTITY=local -e PUBLIC_URL=https://team.example.org \
+  -e SERVER_SECRET="$(openssl rand -hex 32)" -e TRUST_PROXY=true \
+  ghcr.io/feoren/hangar-server:<version>
+```
+
+Point the proxy at `http://127.0.0.1:8080` with WebSocket upgrades and long timeouts. Admin
+commands: `docker exec hangar-server hangar-server teams`.
+
+## Operation
+
+- **Data:** `hangar-team.db` (+ `-wal`, `-shm`), when self-hosting also `ticket-signing.key`,
+  and with `MAIL_TRANSPORT=log` the `mail/` folder, all in `DATA_DIR` (`/data` in the image).
+- **Backups:** `sqlite3 <DATA_DIR>/hangar-team.db ".backup /backup/team.db"` or a snapshot with
+  the server stopped; back up `ticket-signing.key` as well. Reservations, the log position,
+  undelivered `notify` messages and blocked devices are stored in the database and survive
+  restarts; claims do not (clients resend them after `welcome`).
 - **Migrations** run automatically on startup (`sqlx migrate`, embedded).
 - **Shutdown:** SIGTERM closes live connections with 1012; the app reconnects.
-- **Logs:** JSON on stdout (`docker compose logs`), fine-grained control via `RUST_LOG`.
+- **Logs:** JSON on stdout, fine-grained control via `RUST_LOG`.
 - **Monitoring:** `/health` from outside (uptime monitor) and `HEALTHCHECK` in the image.
-- **Memory:** limited to 512 MiB in Compose (200 connections with up to 1 MiB read buffer each,
+- **Memory:** limited to 512 MiB (200 connections with up to 1 MiB read buffer each,
   docs/protocol.md); unused teams are unloaded after 10 min.
 
 ## Running on a Strato V-Server
@@ -51,16 +123,14 @@ The app's crates are kept as a fixed copy in `vendor/` (see [development.md](dev
 the build needs neither the app repository nor GitHub, only crates.io for the remaining
 dependencies.
 
-Then either copy the whole repository to the server (`git clone` or `rsync`) and build there, or
-build the image locally and transfer it:
+Normally the server pulls the published image `ghcr.io/feoren/hangar-server:<version>`; only
+`docker-compose.yml` and `.env` belong on the server. Without access to ghcr.io, build the image
+locally and transfer it under the same name:
 
 ```sh
-docker build -t hangar-server:<version> .
-docker save hangar-server:<version> | ssh <server> docker load
+docker build -t ghcr.io/feoren/hangar-server:<version> .
+docker save ghcr.io/feoren/hangar-server:<version> | ssh <server> docker load
 ```
-
-(in the second case, remove `build: .` from `docker-compose.yml` and set `image:` to this name;
-`Caddyfile`, `docker-compose.yml` and `.env` still belong on the server).
 
 ### Setup and start
 
@@ -73,7 +143,8 @@ In `.env`, at least:
 
 ```
 PUBLIC_URL=https://team-hangar.feoren.com
-TEAM_DOMAIN=team-hangar.feoren.com
+# Not used in official mode, but the Compose file asks for it: any random value.
+SERVER_SECRET=<openssl rand -hex 32>
 IDENTITY=official
 TICKET_AUDIENCE=hangar-relay
 TICKET_PUBLIC_KEYS=<kid>:<base64url>[,<kid2>:<base64url>]
@@ -86,7 +157,7 @@ LOG_FORMAT=json
 Then:
 
 ```sh
-docker compose up -d --build     # with a preloaded image: docker compose up -d
+docker compose up -d
 ```
 
 ### Checking
@@ -104,8 +175,8 @@ problems (certificate) are shown by `docker compose logs caddy`.
 ### Updates
 
 ```sh
-git pull                                   # or transfer and load a new image
-docker compose up -d --build               # rebuilds and replaces the container
+# new version: HANGAR_VERSION=<version> in .env, or the docker-compose.yml of the release
+docker compose pull && docker compose up -d --remove-orphans
 docker image prune -f
 ```
 
@@ -114,16 +185,17 @@ cursor.
 
 **Coming from `hangar-team-server` (0.4.0 and earlier):** the project, the binary and the image
 were renamed to `hangar-server`, and the Compose service `teamserver` is now `server`. Keep the
-directory you cloned into, so the data volume keeps its name, and add `--remove-orphans` once:
-`docker compose up -d --build --remove-orphans`. Admin commands are now
-`docker compose run --rm server ...`.
+directory you cloned into, so the data volume keeps its name. The Compose file now pulls the
+published image and carries the Caddy configuration itself: `TEAM_DOMAIN` and `Caddyfile` are no
+longer used, and `PUBLIC_URL` and `SERVER_SECRET` must be in `.env`. Then
+`docker compose up -d --remove-orphans`. Admin commands are now `docker compose run --rm server ...`.
 
 ### Backing up the data volume
 
 While running, use SQLite's online backup (consistent even during writes):
 
 ```sh
-docker run --rm -v hangar-server_team-data:/data -v /root/backup:/backup \
+docker run --rm -v <project>_team-data:/data -v /root/backup:/backup \
   keinos/sqlite3 sqlite3 /data/hangar-team.db ".backup '/backup/team-$(date +%F).db'"
 ```
 
@@ -157,7 +229,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
 | `ROOT_REDIRECT` | optional: target for browser requests to `/` (308), e.g. `https://hangar.feoren.com/`; empty = 404 |
 | `TICKET_PUBLIC_KEYS` | `kid:base64url` of the ticket issuers; required with `official` |
 | `TICKET_AUDIENCE` | required value for `aud`; empty = `hangar-relay` (official) or `PUBLIC_URL` (local) |
-| `LICENSE_PUBLIC_KEYS` | the website's keys for license documents (self-hosting) |
+| `LICENSE_PUBLIC_KEYS` | the website's keys for license documents (self-hosting); empty = the built-in key of hangar.feoren.com |
 | `SERVER_SECRET` | at least 32 characters (self-hosting) |
 | `MAIL_TRANSPORT` | `smtp`, `log`, `none` |
 | `TRUST_PROXY` | `true` only behind your own Caddy |
@@ -179,11 +251,11 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
 
    > **TLS is mandatory outside your own machine.** Hangar accepts `http`/`ws` only for
    > `127.0.0.1`, `localhost` and `[::1]`. On a LAN or the internet, the server needs a
-   > certificate, for example via the bundled Caddy (`Caddyfile`, Let's Encrypt) or Caddy with
+   > certificate, for example via the bundled Caddy (Let's Encrypt) or Caddy with
    > `tls internal` and your own CA on the machines in the LAN; `PUBLIC_URL` then starts with
    > `https://`.
 3. Create a team and invite people, most easily on the host (Hangar has no invite button when
-   self-hosting):
+   self-hosting; native way: `sudo hangar-server` instead of `docker compose run --rm server`):
 
    ```sh
    docker compose run --rm server create-team admin@example.org Engineering

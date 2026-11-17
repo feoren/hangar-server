@@ -12,7 +12,7 @@ app talks to the website. Code: `src/identity/api.rs` (HTTP), services in `src/i
 ## Transport
 
 - **TLS:** Hangar accepts `http` and `ws` only for `127.0.0.1`, `localhost` and `[::1]`. On a LAN
-  or on the internet the server needs TLS, for example through Caddy (`Caddyfile`; on a LAN `tls internal` with
+  or on the internet the server needs TLS, for example through Caddy (as in `docker-compose.yml`; on a LAN `tls internal` with
   its own CA installed on the machines). `PUBLIC_URL` then starts with `https://`, `relay_url` with
   `wss://`.
 - **Input:** `application/x-www-form-urlencoded` or `application/json` (flat object),

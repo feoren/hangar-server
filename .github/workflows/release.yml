@@ -5,6 +5,9 @@
 #
 # The arm64 half is compiled under QEMU (see Dockerfile): slow, but without a cross toolchain.
 # There is deliberately no "latest" tag; installations name an exact version.
+#
+# The same build also yields the static binaries; they go to a GitHub release together with
+# SHA256SUMS, install.sh and docker-compose.yml (README, "Set up your own server").
 name: Release image
 
 on:
@@ -19,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -36,6 +39,7 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version"
             exit 1
           fi
+          sh tools/check-versions.sh
           echo "version=$tag" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hangar-server" >> "$GITHUB_OUTPUT"
 
@@ -63,3 +67,25 @@ jobs:
             org.opencontainers.image.licenses=Elastic-2.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The binary stage of the same Dockerfile, served from the cache of the image build.
+      - name: Binaries
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: binary
+          outputs: type=local,dest=out
+          cache-from: type=gha
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          cp out/linux_amd64/hangar-server dist/hangar-server-x86_64-linux-musl
+          cp out/linux_arm64/hangar-server dist/hangar-server-aarch64-linux-musl
+          cp install.sh docker-compose.yml dist/
+          (cd dist && sha256sum hangar-server-* install.sh docker-compose.yml > SHA256SUMS)
+          cat dist/SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

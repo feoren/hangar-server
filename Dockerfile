@@ -22,6 +22,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/hangar-server /hangar-server \
  && mkdir -p /data-empty
 
+# Only the static binary, for the release downloads (native install without Docker):
+#   docker buildx build --target binary --output type=local,dest=out .
+FROM scratch AS binary
+COPY --from=build /hangar-server /hangar-server
+
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /hangar-server /usr/local/bin/hangar-server
 # The data volume belongs to the user nonroot (65532) so that SQLite and the ticket key can be

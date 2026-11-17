@@ -236,6 +236,16 @@ pub fn normalize_origin(raw: &str) -> Option<String> {
     Some(raw.to_lowercase())
 }
 
+/// Keys for license documents: `raw` (`LICENSE_PUBLIC_KEYS`) or, when empty, the official
+/// website's key.
+pub fn license_keys_from(raw: &str) -> Result<KeySet, ConfigError> {
+    let raw = match raw.trim() {
+        "" => crate::license::OFFICIAL_LICENSE_KEYS,
+        set => set,
+    };
+    KeySet::parse(raw).map_err(|e| ConfigError::Keys("LICENSE_PUBLIC_KEYS", e))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let data_dir = PathBuf::from(var("DATA_DIR").unwrap_or_else(|| "/data".into()));
@@ -368,8 +378,7 @@ impl Config {
             transcript_retention_days: number("TRANSCRIPT_RETENTION_DAYS", 90)?,
             log_json: var("LOG_FORMAT").as_deref() != Some("pretty"),
             server_secret,
-            license_keys: KeySet::parse(&var("LICENSE_PUBLIC_KEYS").unwrap_or_default())
-                .map_err(|e| ConfigError::Keys("LICENSE_PUBLIC_KEYS", e))?,
+            license_keys: license_keys_from(&var("LICENSE_PUBLIC_KEYS").unwrap_or_default())?,
             license_revoked: var("LICENSE_REVOKED")
                 .unwrap_or_default()
                 .split(',')
@@ -484,5 +493,20 @@ Set-Cookie: x"
         assert_eq!(parse_redirect("https://bücher.example/"), None);
         assert_eq!(parse_redirect(r"https://a.org\@evil.example/"), None);
         assert_eq!(parse_redirect("http://localhost.evil.example/"), None);
+    }
+
+    #[test]
+    fn license_keys_default_to_official() {
+        for raw in ["", "  "] {
+            let keys = license_keys_from(raw).unwrap();
+            assert!(keys.kids().any(|kid| kid == "prod-20261109"), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn license_keys_env_replaces_default() {
+        let keys = license_keys_from("t1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        assert!(keys.kids().any(|kid| kid == "t1"));
+        assert!(!keys.kids().any(|kid| kid == "prod-20261109"));
     }
 }

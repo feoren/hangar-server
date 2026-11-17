@@ -11,6 +11,9 @@ use thiserror::Error;
 use crate::signed::{self, KeySet, SignedError, LICENSE_CONTEXT};
 use crate::util::{is_id, is_opaque, normalize_email};
 
+/// Public key of the official website (hangar.feoren.com, `GET /api/v1/keys`) that signs license
+/// documents. Used when `LICENSE_PUBLIC_KEYS` is empty; a non-empty value replaces it.
+pub const OFFICIAL_LICENSE_KEYS: &str = "prod-20261109:7pwgqsy67kGFeqcHXk-59mFmkXESTE4xt33Y9bxwuJc";
 /// Seats without a license (Free): three people.
 pub const FREE_SEATS: u32 = 3;
 /// Longest license document.

@@ -1,15 +1,26 @@
-# Running on a VPS or Docker host: Hangar server behind Caddy (TLS via ACME).
-# Beforehand: create .env from .env.example and set TEAM_DOMAIN, PUBLIC_URL and the keys.
-#   docker compose up -d --build
-# Only Caddy is reachable from outside (80/443); the server listens only inside the Compose network.
+# Hangar server behind Caddy (HTTPS via Let's Encrypt), one file, no other files needed.
+#
+# Docker Compose:   put this file and a .env with PUBLIC_URL and SERVER_SECRET into a folder, then
+#                   docker compose up -d
+# Portainer stack:  paste this file and set PUBLIC_URL and SERVER_SECRET as environment variables.
+#
+# PUBLIC_URL is https://<domain> without a trailing slash. The domain must point to this host, and
+# ports 80 and 443 must be free. Only Caddy is reachable from outside; the server listens only
+# inside the Compose network. Needs Docker Compose 2.24 or newer.
+# Further settings (mail, limits): see .env.example; they go into the same .env.
+# Building from source instead of the published image: docker-compose.build.yml.
 
 services:
   server:
-    build: .
-    image: hangar-server:local
+    image: ghcr.io/feoren/hangar-server:${HANGAR_VERSION:-0.5.0}
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL, e.g. https://team.example.org}
+      SERVER_SECRET: ${SERVER_SECRET:?set SERVER_SECRET, e.g. from openssl rand -hex 32}
+      IDENTITY: ${IDENTITY:-local}
       DATA_DIR: /data
       BIND_ADDR: 0.0.0.0:8080
       # Caddy appends the client address to X-Forwarded-For; that is the only reason we trust it.
@@ -38,12 +49,29 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
-    environment:
-      TEAM_DOMAIN: ${TEAM_DOMAIN:?TEAM_DOMAIN missing in .env}
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+
+# Caddy: TLS 1.2+ with automatic certificates; WebSocket is passed through without extra
+# configuration. The server sets security headers itself (including HSTS); Caddy only removes its
+# own identification. Access logs stay off: paths like /invite/<token> and /auth/magic/<token>
+# carry secrets.
+configs:
+  caddyfile:
+    content: |
+      ${PUBLIC_URL} {
+      	encode zstd gzip
+      	header -Server
+      	reverse_proxy server:8080 {
+      		# Long-lived WebSocket connections; the server pings every 25 s.
+      		stream_timeout 24h
+      		stream_close_delay 5s
+      	}
+      }
 
 volumes:
   team-data:

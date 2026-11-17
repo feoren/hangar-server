@@ -28,7 +28,9 @@ tests/                      relay.rs, identity.rs, account_api.rs, vectors.rs (i
 testdata/                   test vectors for tickets and licenses
 tools/php/verify_vectors.php  cross-check of the vectors with PHP/libsodium
 docs/                       formats, protocol, wishes for the protocol crate, security, dependencies
-Dockerfile, docker-compose.yml, Caddyfile, .env.example
+Dockerfile, docker-compose.yml (+ docker-compose.build.yml), .env.example
+install.sh                  install script (Docker and native), tests in tests/install/
+tools/check-versions.sh     default versions in install.sh, docker-compose.yml, README = Cargo.toml
 ```
 
 ### The app's crates (protocol and crypto)
@@ -92,14 +94,20 @@ Image: `docker build -t hangar-server .`; for amd64 and arm64:
 
 ## Releasing
 
-1. Raise `version` in `Cargo.toml` (and the placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`),
+1. Raise `version` in `Cargo.toml`, `DEFAULT_VERSION` in `install.sh`, `HANGAR_VERSION` in
+   `docker-compose.yml` and the image tag in `README.md` (all checked by
+   `tools/check-versions.sh`), plus the placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`;
    commit, push, wait for CI.
-2. Tag and push: `git tag v0.4.0 && git push github v0.4.0`.
+2. Tag and push: `git tag v0.5.0 && git push github v0.5.0`.
 3. The workflow `Release image` (`.github/workflows/release.yml`) checks that the tag matches
    `Cargo.toml`, builds amd64 and arm64 and pushes `ghcr.io/feoren/hangar-server:<version>`.
-   No `latest` tag.
-4. Only before the first release: in the package settings on GitHub, set the visibility to
-   public so that `docker pull` works without signing in.
+   No `latest` tag. From the same build it takes the static binaries and creates the GitHub
+   release with `hangar-server-x86_64-linux-musl`, `hangar-server-aarch64-linux-musl`,
+   `install.sh`, `docker-compose.yml` and `SHA256SUMS`; `releases/latest/download/...` then
+   points to them.
+4. Only before the first release under a package name (`hangar-server` since 0.5.0): in the
+   package settings on GitHub, set the visibility to public so that `docker pull` works without
+   signing in.
 
 
 ## Open items
@@ -107,8 +115,8 @@ Image: `docker build -t hangar-server .`; for amd64 and arm64:
 - Docker image: after every new state of the app's crates, renew the copies in `vendor/` (see
   "Updating the crates (by hand)").
 - External crypto audit of the E2E scheme (app, step E).
-- Embed the official public license keys at build time (instead of configuration only) so that
-  self-hosters cannot issue their own licenses.
+- The official license key is built in as the default, but `LICENSE_PUBLIC_KEYS` can still
+  replace it, so self-hosters could issue their own licenses.
 - Account deletion, data export, ownership transfer (self-hosting).
 - Passkeys and OIDC; merge queue and further steps of G.
 - Multiple nodes (Postgres, shared rate limiting).
