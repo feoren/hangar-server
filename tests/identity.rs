@@ -1140,3 +1140,62 @@ async fn host_commands_create_team_invite_and_teams() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn host_command_license_stores_for_the_named_account() {
+    use hangar_team_server::identity::teams::cli_install_license;
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let db = &s.server.state.relay.db;
+    let config = &s.server.state.config;
+    let valid_until = now_s() + 30 * 86_400;
+
+    let foreign = license(
+        5,
+        "chef@example.org",
+        valid_until,
+        &SigningKey::from_bytes(&[1; 32]),
+    );
+    let error = cli_install_license(db, config, &foreign).await.unwrap_err();
+    assert!(error.starts_with("invalid license"), "{error}");
+    let expired = license(5, "chef@example.org", now_s() - 1, &license_key());
+    let error = cli_install_license(db, config, &expired).await.unwrap_err();
+    assert!(error.contains("expired"), "{error}");
+
+    // No account yet: the command creates it; surrounding whitespace from the file is ignored.
+    let doc = license(5, "chef@example.org", valid_until, &license_key());
+    let installed = cli_install_license(db, config, &format!("\n{doc}\r\n"))
+        .await
+        .unwrap();
+    assert_eq!(
+        (installed.email.as_str(), installed.seats, installed.exp),
+        ("chef@example.org", 5, valid_until)
+    );
+    // Running it again with the same file is harmless.
+    assert!(cli_install_license(db, config, &doc).await.is_ok());
+
+    let (token, _) = login(&s, "chef@example.org").await;
+    let stored = call(
+        app,
+        "GET",
+        "/v1/license",
+        &[("authorization", &bearer(&token))],
+        None,
+    )
+    .await;
+    assert_eq!(stored.json()["effectiveSeats"], 5, "{}", stored.body);
+
+    // The same license ID cannot move to a second account through the API.
+    let (other, _) = login(&s, "other@example.org").await;
+    let taken = call(
+        app,
+        "PUT",
+        "/v1/license",
+        &[("authorization", &bearer(&other))],
+        json_body(
+            json!({ "document": license(5, "other@example.org", valid_until, &license_key()) }),
+        ),
+    )
+    .await;
+    assert_eq!(taken.json()["error"], "license_in_use", "{}", taken.body);
+}

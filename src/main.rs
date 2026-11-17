@@ -1,5 +1,5 @@
 //! Entry point: `hangar-team-server [serve|healthcheck|login-link <email>|create-team <email> <name>|
-//! invite <team> <email> [member|admin]|teams]`.
+//! invite <team> <email> [member|admin]|teams|license <file>]`.
 //!
 //! The commands other than `serve` and `healthcheck` are for self-hosting on the host, e.g.
 //! `docker compose run --rm teamserver invite Development anna@example.org`. Whatever a script
@@ -62,8 +62,9 @@ fn main() -> ExitCode {
             "create-team" => create_team(config, &args[1..]).await,
             "invite" => invite(config, &args[1..]).await,
             "teams" => teams(config).await,
+            "license" => install_license(config, args.get(1).cloned()).await,
             other => Err(format!(
-                "unknown command {other:?} (serve, healthcheck, login-link, create-team, invite, teams)"
+                "unknown command {other:?} (serve, healthcheck, login-link, create-team, invite, teams, license)"
             )),
         }
     });
@@ -208,6 +209,31 @@ async fn teams(config: Config) -> Result<(), String> {
             line.id, line.name, line.owner, line.members, line.open_invitations
         );
     }
+    Ok(())
+}
+
+/// `license <file>`: store a license file from the website for the account it names. In the
+/// container the file must be readable there, e.g. in the data volume or piped in with `-`.
+async fn install_license(config: Config, path: Option<String>) -> Result<(), String> {
+    let path = path.ok_or("usage: license <file> (or - for stdin)")?;
+    let document = if path == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| format!("stdin: {e}"))?;
+        text
+    } else {
+        std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?
+    };
+    let db = local_db(&config, "license").await?;
+    let installed =
+        hangar_team_server::identity::teams::cli_install_license(&db, &config, &document).await?;
+    let days = (installed.exp - hangar_team_server::util::now_s()).max(0) / 86_400;
+    eprintln!(
+        "license stored for {}: {} seats, valid for {days} more days.",
+        installed.email, installed.seats
+    );
+    println!("{}", installed.email);
     Ok(())
 }
 

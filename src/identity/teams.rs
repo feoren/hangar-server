@@ -1069,23 +1069,82 @@ pub async fn license_put(
         ));
     }
     let mut tx = begin_write(&identity.db).await?;
-    let holder: Option<String> = sqlx::query_scalar("SELECT user_id FROM licenses WHERE lid = ?")
-        .bind(&claims.lid)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if holder.is_some_and(|h| h != user.id) {
+    if !store_license(&mut tx, &user.id, &claims.lid, &document).await? {
         return Err(conflict("license_in_use"));
     }
-    sqlx::query("INSERT INTO licenses (user_id, lid, document, uploaded_at) VALUES (?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET lid = excluded.lid, document = excluded.document, uploaded_at = excluded.uploaded_at")
-        .bind(&user.id)
-        .bind(&claims.lid)
-        .bind(&document)
-        .bind(now_s())
-        .execute(&mut *tx)
-        .await?;
     tx.commit().await?;
     tracing::info!(seats = claims.seats, "license stored");
     Ok(Json(license_json(Some(&claims))))
+}
+
+/// Stores the license document for the account and replaces its previous one. Returns `false`
+/// without writing when another account already holds this license ID.
+async fn store_license(
+    tx: &mut crate::db::Tx,
+    user_id: &str,
+    lid: &str,
+    document: &str,
+) -> Result<bool, sqlx::Error> {
+    let holder: Option<String> = sqlx::query_scalar("SELECT user_id FROM licenses WHERE lid = ?")
+        .bind(lid)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if holder.is_some_and(|h| h != user_id) {
+        return Ok(false);
+    }
+    sqlx::query("INSERT INTO licenses (user_id, lid, document, uploaded_at) VALUES (?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET lid = excluded.lid, document = excluded.document, uploaded_at = excluded.uploaded_at")
+        .bind(user_id)
+        .bind(lid)
+        .bind(document)
+        .bind(now_s())
+        .execute(&mut **tx)
+        .await?;
+    Ok(true)
+}
+
+/// Result of `license <file>`: for whom the license was stored and what it grants.
+#[derive(Debug)]
+pub struct InstalledLicense {
+    pub email: String,
+    pub seats: u32,
+    pub exp: i64,
+}
+
+/// `license <file>`: verifies a license document (as downloaded from the website) and stores it
+/// for the account of the address it names, creating that account if needed. Same checks as
+/// `PUT /v1/license`, without a signed-in user.
+pub async fn cli_install_license(
+    db: &Db,
+    config: &crate::config::Config,
+    document: &str,
+) -> Result<InstalledLicense, String> {
+    if config.license_keys.is_empty() {
+        return Err("LICENSE_PUBLIC_KEYS is not set; the license cannot be verified".into());
+    }
+    let document = document.trim();
+    let claims = license::verify(document, &config.license_keys, &config.license_revoked)
+        .map_err(|error| format!("invalid license: {error}"))?;
+    if !claims.active(now_s()) {
+        return Err("the license has expired".into());
+    }
+    let email = normalize_email(&claims.email).ok_or("the license names no valid email address")?;
+    let mut tx = begin_write(db).await.map_err(|e| e.to_string())?;
+    let user = find_or_create_user(&mut tx, &email, &config.default_lang, now_s())
+        .await
+        .map_err(|e| e.to_string())?;
+    if !store_license(&mut tx, &user, &claims.lid, document)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Err("this license is already stored for another account".into());
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    tracing::info!(seats = claims.seats, "license stored (command)");
+    Ok(InstalledLicense {
+        email,
+        seats: claims.seats,
+        exp: claims.exp,
+    })
 }
 
 pub async fn license_delete(

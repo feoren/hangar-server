@@ -12,7 +12,7 @@ migrations/                 0001_relay.sql (relay), 0002_identity.sql (self-host
                             through 0010_removed_device_log_index.sql (log index of the
                             device removal, grace period of the removed device)
 src/
-  main.rs                   commands: serve, healthcheck, login-link, create-team, invite, teams
+  main.rs                   commands: serve, healthcheck, login-link, create-team, invite, teams, license
   lib.rs                    wiring (also for the tests)
   config.rs                 environment/.env, validation on startup
   wire.rs                   names from the app's protocol crate (see below)

@@ -197,5 +197,14 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    Via the API, the same is done with `POST /v1/teams` and `POST /v1/teams/{team}/invitations`;
    without mail, the API returns the link to the admin.
 4. From the fourth person on: buy seats on hangar.feoren.com, download the license document in
-   your account and place it on the server (`PUT /v1/license`). Seats apply to all teams of this
-   owner.
+   your account and place it on the server, most easily on the host:
+
+   ```sh
+   docker compose run --rm -T teamserver license - < hangar-license-2026-11-17.txt
+   ```
+
+   The command reads the file from stdin (`-`) or from a path inside the container, verifies it
+   against `LICENSE_PUBLIC_KEYS`, creates the account of the address named in the license if
+   needed and stores the license for it; running it again with a new file replaces the old one.
+   Via the API, the signed-in owner does the same with `PUT /v1/license`. Seats apply to all
+   teams of this owner.

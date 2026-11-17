@@ -5,9 +5,11 @@
 #   Each platform builds natively in the Alpine image (under QEMU for the foreign architecture:
 #   slow, but without a cross toolchain for SQLite and ring).
 #
-# Pin the base images by digest before a release (`rust:1-alpine@sha256:...`).
+# The base images are pinned by digest (multi-platform index) so that a release build is
+# reproducible; Dependabot proposes new digests. To update by hand:
+#   docker buildx imagetools inspect rust:1-alpine   (first "Digest:" line)
 
-FROM rust:1-alpine AS build
+FROM rust:1-alpine@sha256:2cccd8b212b37dad15a555589c1b6787da4ab913fe24d8a9b2d99d3498869409 AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -20,7 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/hangar-team-server /hangar-team-server \
  && mkdir -p /data-empty
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /hangar-team-server /usr/local/bin/hangar-team-server
 # The data volume belongs to the user nonroot (65532) so that SQLite and the ticket key can be
 # written.

@@ -68,7 +68,8 @@ with `docker compose run --rm teamserver login-link you@example.org`.
 ## Good to know
 
 - **Seats:** Up to 3 people are free. For more, buy seats on
-  [hangar.feoren.com](https://hangar.feoren.com) and place the license document on the server.
+  [hangar.feoren.com](https://hangar.feoren.com), download the license file in your account
+  and install it with `docker compose run --rm -T teamserver license - < hangar-license-2026-11-17.txt`.
 - **Backups:** All data lives in the Docker volume `team-data`. Back it up regularly as described
   in [docs/operations.md](docs/operations.md).
 - **Updates:** `git pull`, then `docker compose up -d --build`. The database is migrated
