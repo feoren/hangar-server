@@ -695,3 +695,84 @@ async fn storing_encrypted_content() {
     };
     assert_eq!(content.data.as_str(), "YWJj");
 }
+
+#[tokio::test]
+async fn removal_from_one_team_leaves_the_other_teams_of_the_connection_alone() {
+    let s = start(grace_config(300)).await;
+    let (log, _alice, _a, bob, mut b, phone, mut p) = team_with_phone(&s).await;
+    // The same connection also joins team `u`, where bob-phone stays a member.
+    let welcome = p
+        .hello("u", ticket("bob", "u", Role::Member), "bob-phone", None)
+        .await;
+    assert!(
+        matches!(welcome.message, ServerMessage::Welcome(_)),
+        "{:?}",
+        welcome.message
+    );
+    let removal = log.remove_device(&bob, &phone.holder);
+    assert!(is_ack(
+        &b.request("t", ClientMessage::DeviceRemove(removal.clone()))
+            .await
+    ));
+    p.until(|f| matches!(f.message, ServerMessage::DeviceRemoved(_)))
+        .await;
+    let presence = || {
+        ClientMessage::PresenceSet(PresenceSet {
+            state: PresenceState::Active,
+            status: None,
+        })
+    };
+    // During the grace period of `t`: `t` only answers memberlog.get, `u` works as usual.
+    assert_eq!(
+        code(&p.request("t", presence()).await),
+        Some(ErrorCode::Forbidden)
+    );
+    let answer = p.request("u", presence()).await;
+    assert!(is_ack(&answer), "{:?}", answer.message);
+    let pong = {
+        let op = p.op();
+        p.send(&op, None, ClientMessage::Ping).await;
+        p.answer(&op).await
+    };
+    assert!(is_ack(&pong), "{:?}", pong.message);
+    // After the grace period only `t` is left; the connection stays open and active in `u`.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let answer = p.request("u", reserve_task(11)).await;
+    assert!(is_ack(&answer), "{:?}", answer.message);
+    assert_eq!(p.closed, None);
+    assert_eq!(
+        code(&p.request("t", presence()).await),
+        Some(ErrorCode::Forbidden),
+        "no longer joined to t"
+    );
+}
+
+#[tokio::test]
+async fn last_log_page_of_one_team_keeps_the_connection_in_the_other_team() {
+    let s = start(grace_config(5_000)).await;
+    let (log, _alice, _a, bob, mut b, phone, mut p) = team_with_phone(&s).await;
+    let welcome = p
+        .hello("u", ticket("bob", "u", Role::Member), "bob-phone", None)
+        .await;
+    assert!(matches!(welcome.message, ServerMessage::Welcome(_)));
+    let removal = log.remove_device(&bob, &phone.holder);
+    assert!(is_ack(
+        &b.request("t", ClientMessage::DeviceRemove(removal.clone()))
+            .await
+    ));
+    p.until(|f| matches!(f.message, ServerMessage::DeviceRemoved(_)))
+        .await;
+    let page = entries_of(
+        p.request("t", ClientMessage::MemberLogGet(MemberLogGet { after: 0 }))
+            .await,
+    );
+    assert!(!page.more);
+    // Only `t` is left right after the last page; `u` stays, no 4403.
+    let answer = p.request("u", reserve_task(12)).await;
+    assert!(is_ack(&answer), "{:?}", answer.message);
+    assert_eq!(p.closed, None);
+    assert_eq!(
+        code(&p.request("t", reserve_task(12)).await),
+        Some(ErrorCode::Forbidden)
+    );
+}

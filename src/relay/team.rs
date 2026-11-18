@@ -60,6 +60,9 @@ pub mod close {
 #[derive(Debug, Clone)]
 pub enum Outgoing {
     Text(Utf8Bytes),
+    /// The catch-up of a `hello` (welcome and replay, or snapshot and welcome) as one entry of
+    /// the queue, so it cannot overflow it (see `outbox`).
+    Batch(Vec<Utf8Bytes>),
     Close(u16, &'static str),
 }
 
@@ -71,9 +74,10 @@ pub struct Subscriber {
     pub tx: super::outbox::Outbox,
     /// Triggered when the connection can no longer keep up (queue full).
     pub kick: Arc<Notify>,
-    /// Triggered when a log entry took the device out of the team: the connection starts the
-    /// grace period during which it may only send `memberlog.get`.
-    pub removed: Arc<Notify>,
+    /// Gets the team's ID when a log entry took the device out of the team: the connection
+    /// starts the grace period for this team, during which it may only send `memberlog.get`
+    /// here; its other teams are not affected.
+    pub removed: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 /// A connection of a removed device in its grace period: no member, no presence, no receiver of
@@ -679,14 +683,16 @@ impl Team {
                 .collect::<Vec<_>>()),
             Replay::Resync(reason) => Err(reason),
         };
+        // Replay (up to `REPLAY_WINDOW` events) and snapshot can exceed the outgoing queue's
+        // frame limit. They go in as a single entry, still under the team lock: no live event
+        // gets in between or ahead, and the writer hands the frames over one by one.
+        let mut catch_up = Vec::new();
         match replay {
             Ok(events) => {
-                let text = self.frame(Some(op), None, welcome);
-                self.send(conn, text);
+                catch_up.extend(self.frame(Some(op), None, welcome));
                 for (seq, message) in events {
                     let message = self.personalize(db, &holder, message).await?;
-                    let text = self.frame(None, Some(seq), message);
-                    self.send(conn, text);
+                    catch_up.extend(self.frame(None, Some(seq), message));
                 }
             }
             Err(reason) => {
@@ -695,15 +701,15 @@ impl Team {
                     head: self.log.head(),
                     reason,
                 });
-                let text = self.frame(Some(op), None, resync);
-                self.send(conn, text);
+                catch_up.extend(self.frame(Some(op), None, resync));
                 for message in self.snapshot() {
-                    let text = self.frame(None, None, message);
-                    self.send(conn, text);
+                    catch_up.extend(self.frame(None, None, message));
                 }
-                let text = self.frame(Some(op), None, welcome);
-                self.send(conn, text);
+                catch_up.extend(self.frame(Some(op), None, welcome));
             }
+        }
+        if let Some(sub) = self.subscribers.get(&conn) {
+            sub.tx.try_send(Outgoing::Batch(catch_up));
         }
         let mut events = Vec::new();
         match seen {
@@ -888,7 +894,7 @@ impl Team {
             .collect();
         for conn in gone {
             if let Some(sub) = self.subscribers.remove(&conn) {
-                sub.removed.notify_one();
+                let _ = sub.removed.send(self.id.clone());
                 self.departing.insert(
                     conn,
                     Departing {

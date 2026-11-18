@@ -26,7 +26,7 @@ describes how the relay runs it. Open requests to the crate:
   short default limits residual risks (hoarded tickets, missed revocations) until the app's
   `ticket.renew` is in effect everywhere.
 - Close codes: 1008 (`CLOSE_HELLO_TIMEOUT`), 1012 restart, 1013 reading too slowly
-  (queue of 512 frames full), 4401 (`CLOSE_ROLE_CHANGED`: new ticket required), 4403
+  (outgoing queue of 512 frames or 4 MiB full), 4401 (`CLOSE_ROLE_CHANGED`: new ticket required), 4403
   (`CLOSE_REMOVED`: removed, device removed, no seat, ticket invalid; for a removed
   device only after its grace period, see `device.remove`), 4404 (`CLOSE_TEAM_DELETED`: team
   deleted).
@@ -35,7 +35,10 @@ describes how the relay runs it. Open requests to the crate:
 
 An idle connection needs a few dozen KiB (WebSocket buffers start at 16 KiB). Every connection
 can hold a frame of up to 1 MiB in its read buffer, and its outgoing queue is limited to 512
-frames and 4 MiB; a client that does not read fast enough is closed with 1013. Plan about 2 MiB
+frames and 4 MiB; a client that does not read fast enough is closed with 1013. The catch-up
+after a `hello` (replay or snapshot, see below) goes into the queue as a single entry and does
+not count against these limits: it is bounded by the replay window or the team's state and comes
+once per joined team, so a client with a long replay is not closed before it could read. Plan about 2 MiB
 per connection plus 64 MiB for the process: with the default of 200 connections that fits the
 Compose limit of 512 MiB. If you raise `MAX_CONNECTIONS`, raise the memory limit in the same
 proportion; at startup the server reads the cgroup memory limit and warns when
@@ -69,6 +72,9 @@ devices). One connection can sign in to several teams, but belongs to exactly on
 - **Snapshot**: `resync_required`, then `member.joined`, `task.reserved` per hold (plus
   `reservation.expiring` and `task.release_requested` where they apply), `presence.update`, and finally
   `welcome`.
+- Replay and snapshot are queued in one piece under the team lock, whatever their length (up to
+  the 2048 events of the window): no live event comes before or in between, and `welcome` is
+  never dropped. Live events follow afterwards.
 - A removed member only gets back in with a ticket issued after the removal
   (`iat` later than the revocation).
 
@@ -161,11 +167,15 @@ relay does not close immediately:
   reservations, and with a `seq` the app would see a gap
   (`SessionEnd::Gap`) and abort before verifying the log.
 - After that a grace period runs (`Config::removed_grace_ms`, 5 s, not configurable through the
-  environment). During it the relay only answers `memberlog.get`, with entries after `after` up to
+  environment). During it the relay only answers `memberlog.get` for this team, with entries after `after` up to
   and including the removing entry (`relay_removed_devices.log_index`); the device never gets later entries
-  (new members, devices, epochs). Everything else, including `ping` and
-  `hello`, is answered with `err forbidden` and nothing is written.
-- After the last page (`more: false`) or when the grace period ends: close 4403.
+  (new members, devices, epochs). Everything else for this team is answered with
+  `err forbidden` and nothing is written.
+- The grace period applies per team: other teams the same connection has joined keep working
+  as usual. Only while every joined team is in its grace period are frames without a team
+  (`ping`) and `hello` for further teams also answered with `err forbidden`.
+- After the last page (`more: false`) or when the grace period ends, the connection leaves the
+  team; close 4403 only when no other team is left on it.
 - If the connection was already gone: a later `hello` from this device with a valid ticket gets
   only `welcome` (stream, head, epoch; no snapshot, no replay, no join events,
   no `see_member`) and then the same grace period. This applies only to a connection without another team and

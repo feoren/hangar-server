@@ -3,6 +3,8 @@
 //! A frame limit alone is not enough: a client that asks for large answers (`blob.get`,
 //! `memberlog.get` pages of up to 1 MiB) and stops reading would otherwise pile up hundreds of
 //! MiB. Whoever exceeds either limit is kicked (close 1013) and catches up via its cursor.
+//! The catch-up after `hello` (replay or snapshot) is a single entry (`Outgoing::Batch`) and
+//! does not count against the byte limit, so a long one does not kick the client right away.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -16,10 +18,13 @@ pub const QUEUE_FRAMES: usize = 512;
 /// Outgoing bytes per connection before it counts as too slow: a few of the largest frames.
 pub const QUEUE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Bytes counted against `QUEUE_BYTES`. The catch-up of a `hello` (`Batch`) does not count: it
+/// is bounded by the replay window or the team's state, comes once per joined team, and must
+/// not kick a client before it has read anything.
 fn size(out: &Outgoing) -> usize {
     match out {
         Outgoing::Text(text) => text.len(),
-        Outgoing::Close(..) => 0,
+        Outgoing::Batch(_) | Outgoing::Close(..) => 0,
     }
 }
 
@@ -118,6 +123,17 @@ mod tests {
         assert!(out.try_send(text(1)));
         assert!(!out.try_send(text(1)));
         assert!(kick.notified().now_or_never().is_some());
+    }
+
+    #[tokio::test]
+    async fn catch_up_is_one_entry_without_bytes() {
+        let kick = Arc::new(Notify::new());
+        let (out, mut inbox) = with_limits(kick.clone(), 2, 10);
+        let frames = vec![Utf8Bytes::from("x".repeat(10)); 5];
+        assert!(out.try_send(Outgoing::Batch(frames)));
+        assert!(out.try_send(text(10)), "the batch takes no byte budget");
+        assert!(kick.notified().now_or_never().is_none());
+        assert!(matches!(inbox.recv().await, Some(Outgoing::Batch(f)) if f.len() == 5));
     }
 
     #[tokio::test]

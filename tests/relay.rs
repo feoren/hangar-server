@@ -674,3 +674,189 @@ async fn handover_without_note_also_in_snapshot() {
     assert_eq!(r.holder.member, member("bob"));
     assert_eq!(r.note, Some(own));
 }
+
+/// A distinct task hash per number (more than 256 tasks).
+fn task_no(n: u16) -> KeyedHash {
+    let mut bytes = [0u8; 32];
+    bytes[..2].copy_from_slice(&n.to_be_bytes());
+    bytes[31] = 0xAA;
+    KeyedHash::from_bytes(bytes)
+}
+
+/// Sends `message` and reads up to its reply; `last` follows the highest `seq` seen.
+async fn request_tracking(
+    c: &mut Client,
+    team: &str,
+    message: ClientMessage,
+    last: &mut Option<Cursor>,
+) -> ServerFrame {
+    let op = c.op();
+    c.send(&op, Some(team), message).await;
+    loop {
+        let f = c.recv().await.expect("reply");
+        if let (Some(seq), Some(cursor)) = (f.seq, last.as_mut()) {
+            if seq > cursor.seq {
+                cursor.seq = seq;
+            }
+        }
+        if f.id.as_ref().map(|i| i.as_str()) == Some(op.as_str())
+            && !matches!(f.message, ServerMessage::ResyncRequired(_))
+        {
+            return f;
+        }
+    }
+}
+
+/// Joins with a cursor (replay instead of snapshot) and keeps it up to date.
+async fn join_tracking(
+    s: &TestServer,
+    team: &str,
+    member: &str,
+    last: &mut Option<Cursor>,
+) -> Client {
+    let mut c = Client::connect(s.addr).await;
+    let op = c.op();
+    c.send(
+        &op,
+        Some(team),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket(member, team, Role::Member)).unwrap(),
+            device: device(&format!("{member}-device")),
+            proto: ProtoRange::CURRENT,
+            last_seq: last.clone(),
+        }),
+    )
+    .await;
+    loop {
+        let f = c.recv().await.expect("welcome");
+        if let (Some(seq), Some(cursor)) = (f.seq, last.as_mut()) {
+            if seq > cursor.seq {
+                cursor.seq = seq;
+            }
+        }
+        if let ServerMessage::Welcome(w) = &f.message {
+            if f.id.as_ref().map(|i| i.as_str()) == Some(op.as_str()) {
+                if last.is_none() {
+                    *last = Some(Cursor {
+                        stream: w.stream.clone(),
+                        seq: w.head,
+                    });
+                }
+                return c;
+            }
+        }
+    }
+}
+
+/// The reply to a `ping` arrives and the connection is still open.
+async fn still_open(c: &mut Client) {
+    let op = c.op();
+    c.send(&op, None, ClientMessage::Ping).await;
+    let pong = c.answer(&op).await;
+    assert!(is_ack(&pong), "{:?}", pong.message);
+    assert_eq!(c.closed, None);
+}
+
+#[tokio::test]
+async fn replay_longer_than_the_outgoing_queue_arrives_complete() {
+    let s = start_official().await;
+    // 600 logged events: reserve and release, a few connections in a row (rate limit per
+    // connection), each joining with its cursor.
+    let mut last = None;
+    for batch in 0..6u16 {
+        let mut c = join_tracking(&s, "t", "alice", &mut last).await;
+        for n in batch * 50..(batch + 1) * 50 {
+            let r = request_tracking(&mut c, "t", reserve(task_no(n)), &mut last).await;
+            assert!(is_ack(&r), "{:?}", r.message);
+            let release = ClientMessage::TaskRelease(TaskRef { task: task_no(n) });
+            let r = request_tracking(&mut c, "t", release, &mut last).await;
+            assert!(is_ack(&r), "{:?}", r.message);
+        }
+        c.close().await;
+    }
+    let stream = last.expect("cursor").stream;
+
+    // Cursor 0 of the stream: welcome, then every event in order, without 1013.
+    let mut c = Client::connect(s.addr).await;
+    let w = c
+        .hello(
+            "t",
+            ticket("bob", "t", Role::Member),
+            "bob-device",
+            Some(Cursor {
+                stream,
+                seq: Seq(0),
+            }),
+        )
+        .await;
+    let ServerMessage::Welcome(w) = w.message else {
+        panic!("no welcome: {:?}", w.message)
+    };
+    assert!(w.head.0 >= 600, "head {:?}", w.head);
+    let mut expected = 1;
+    while expected <= w.head.0 {
+        let f = c.recv().await.unwrap_or_else(|| {
+            panic!(
+                "replay ended at {expected} of {:?}, close {:?}",
+                w.head, c.closed
+            )
+        });
+        if let Some(seq) = f.seq {
+            assert_eq!(seq.0, expected, "in order, without gaps");
+            expected += 1;
+        }
+    }
+    still_open(&mut c).await;
+}
+
+#[tokio::test]
+async fn snapshot_larger_than_the_outgoing_queue_ends_with_welcome() {
+    let s = start_official().await;
+    // 20 members with 32 holds each (the crate's limit per member): 640 `task.reserved` in
+    // the snapshot. Holds stay while their holders are offline.
+    let mut last = None;
+    for m in 0..20u16 {
+        let name = format!("member{m}");
+        let mut c = join_tracking(&s, "t", &name, &mut last).await;
+        for n in m * 32..(m + 1) * 32 {
+            let r = request_tracking(&mut c, "t", reserve(task_no(n)), &mut last).await;
+            assert!(is_ack(&r), "{:?}", r.message);
+        }
+        c.close().await;
+    }
+
+    // Without a cursor: resync_required, the snapshot, finally welcome; no 1013.
+    let mut c = Client::connect(s.addr).await;
+    let op = c.op();
+    c.send(
+        &op,
+        Some("t"),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket("observer", "t", Role::Member)).unwrap(),
+            device: device("observer-device"),
+            proto: ProtoRange::CURRENT,
+            last_seq: None,
+        }),
+    )
+    .await;
+    let first = c.recv().await.expect("resync_required");
+    assert!(
+        matches!(first.message, ServerMessage::ResyncRequired(_)),
+        "{:?}",
+        first.message
+    );
+    let mut held = 0;
+    loop {
+        let f = c
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("snapshot ended after {held} holds, close {:?}", c.closed));
+        match &f.message {
+            ServerMessage::TaskReserved(_) => held += 1,
+            ServerMessage::Welcome(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(held, 640);
+    still_open(&mut c).await;
+}

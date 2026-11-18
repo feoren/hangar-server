@@ -3,11 +3,13 @@
 //! and per client address, maximum age (a new ticket is needed afterwards).
 //!
 //! A removed device (`device.removed`, or its `hello` after the block) gets a short grace period
-//! (`Relay::removed_grace`, default 5 s) during which the connection only gets answers to
-//! `memberlog.get`, with entries up to the one that removed it; everything else is rejected with
-//! `err forbidden` and writes nothing. After the last page or when the grace period expires,
-//! close 4403. This way the app verifies its removal against the signed entry and comes back with
-//! a new device ID.
+//! (`Relay::removed_grace`, default 5 s) per team: in that team the connection only gets answers
+//! to `memberlog.get`, with entries up to the one that removed it; everything else for that team
+//! is rejected with `err forbidden` and writes nothing. Other teams of the connection are not
+//! affected. After the last page or when the grace period expires, the connection leaves that
+//! team; close 4403 only when no team is left (while every team is in its grace period, frames
+//! without a team such as `ping` are rejected as well). This way the app verifies its removal
+//! against the signed entry and comes back with a new device ID.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,8 +19,8 @@ use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgr
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures_util::{FutureExt, SinkExt, StreamExt};
-use tokio::sync::{Mutex, Notify};
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::outbox::{outbox, Outbox};
 use super::team::{close, Joined as JoinOutcome, Outgoing, Subscriber, Team};
@@ -105,6 +107,26 @@ struct Joined {
     team: Arc<Mutex<Team>>,
     /// When the ticket for this team was last checked (`hello` or `ticket.renew`).
     ticket_at: Instant,
+    /// End of the grace period after the device was removed from this team (see module docs).
+    departing: Option<Instant>,
+}
+
+/// Starts the grace period of `team` (once; a second removal does not extend it).
+fn start_grace(joined: &mut HashMap<String, Joined>, team: &str, grace: Duration) {
+    if let Some(entry) = joined.get_mut(team) {
+        entry
+            .departing
+            .get_or_insert_with(|| Instant::now() + grace);
+    }
+}
+
+/// The connection leaves a team (closed, grace period over, last log page read).
+async fn leave(relay: &Relay, conn: u64, entry: Joined) {
+    let mut guard = entry.team.lock().await;
+    if let Err(failure) = guard.leave(&relay.db, conn, now_ms()).await {
+        tracing::error!(error = %failure, "leaving the team failed");
+    }
+    relay.forward_attention(&mut guard);
 }
 
 fn text(id: Option<OpId>, team: Option<TeamId>, message: ServerMessage) -> Option<Outgoing> {
@@ -138,7 +160,8 @@ async fn run(
     let (mut sink, mut stream) = socket.split();
     let kick = Arc::new(Notify::new());
     let (tx, mut rx) = outbox(kick.clone());
-    let removed = Arc::new(Notify::new());
+    // Teams that removed this device; the team sends its ID (see `Team::drop_device`).
+    let (removed, mut removed_rx) = mpsc::unbounded_channel::<String>();
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -148,6 +171,14 @@ async fn run(
                 next = rx.recv() => match next {
                     Some(Outgoing::Text(t)) => {
                         if sink.send(Message::Text(t)).await.is_err() { break; }
+                    }
+                    Some(Outgoing::Batch(frames)) => {
+                        let mut sent = Ok(());
+                        for t in frames {
+                            sent = sink.feed(Message::Text(t)).await;
+                            if sent.is_err() { break; }
+                        }
+                        if sent.is_err() || sink.flush().await.is_err() { break; }
                     }
                     Some(Outgoing::Close(code, reason)) => {
                         let _ = sink.send(Message::Close(Some(CloseFrame { code, reason: Utf8Bytes::from_static(reason) }))).await;
@@ -171,8 +202,6 @@ async fn run(
         at: Instant::now(),
     };
     let mut bad = 0u32;
-    // Grace period of a removed device (see module docs); `Some`: only `memberlog.get` left.
-    let mut departing: Option<Instant> = None;
     let close: Option<(u16, &'static str)> = loop {
         // Maximum age per team since the last checked ticket; `ticket.renew` restarts it.
         let oldest = joined
@@ -192,8 +221,9 @@ async fn run(
                 None => std::future::pending::<()>().await,
             }
         };
+        let grace = joined.values().filter_map(|j| j.departing).min();
         let grace_deadline = async move {
-            match departing {
+            match grace {
                 Some(until) => tokio::time::sleep_until(until.into()).await,
                 None => std::future::pending::<()>().await,
             }
@@ -203,9 +233,26 @@ async fn run(
             _ = kick.notified() => break Some((1013, "slow consumer")),
             _ = tokio::time::sleep(age_left) => break Some((close::CLOSE_ROLE_CHANGED, "ticket renewal")),
             _ = hello_deadline => break Some((close::CLOSE_HELLO_TIMEOUT, "hello required")),
-            _ = grace_deadline => break Some((close::CLOSE_REMOVED, "device removed")),
-            _ = removed.notified(), if departing.is_none() => {
-                departing = Some(Instant::now() + relay.removed_grace);
+            _ = grace_deadline => {
+                // The connection leaves only the teams whose grace period is over.
+                let now = Instant::now();
+                let over: Vec<String> = joined
+                    .iter()
+                    .filter(|(_, j)| j.departing.is_some_and(|until| until <= now))
+                    .map(|(team, _)| team.clone())
+                    .collect();
+                for team in over {
+                    if let Some(entry) = joined.remove(&team) {
+                        leave(&relay, conn, entry).await;
+                    }
+                }
+                if joined.is_empty() {
+                    break Some((close::CLOSE_REMOVED, "device removed"));
+                }
+                continue;
+            }
+            Some(team) = removed_rx.recv() => {
+                start_grace(&mut joined, &team, relay.removed_grace);
                 continue;
             }
             _ = shutdown.changed() => break Some((1012, "restart")),
@@ -247,21 +294,24 @@ async fn run(
         let op = frame.id;
         let team_id = frame.team;
         // If the removal arrived together with this frame, `select!` does not reliably pick it
-        // first: an already triggered `removed` takes precedence over the frame.
-        if departing.is_none() && removed.notified().now_or_never().is_some() {
-            departing = Some(Instant::now() + relay.removed_grace);
+        // first: an already reported removal takes precedence over the frame.
+        while let Ok(team) = removed_rx.try_recv() {
+            start_grace(&mut joined, &team, relay.removed_grace);
         }
-        if departing.is_some() {
-            // During the grace period: only `memberlog.get` of the team that removed the device.
+        let departing = team_id
+            .as_ref()
+            .and_then(|t| joined.get(t.as_str()))
+            .filter(|j| j.departing.is_some())
+            .map(|j| j.team.clone());
+        let only_departing = !joined.is_empty() && joined.values().all(|j| j.departing.is_some());
+        if departing.is_some() || only_departing {
+            // During the grace period of this team (or of every team): only `memberlog.get` of
+            // a team that removed the device.
             let ClientMessage::MemberLogGet(get) = frame.message else {
                 send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
                 continue;
             };
-            let entry = team_id
-                .as_ref()
-                .and_then(|t| joined.get(t.as_str()))
-                .map(|j| j.team.clone());
-            let Some(team) = entry else {
+            let (Some(team), Some(id)) = (departing, team_id.clone()) else {
                 send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
                 continue;
             };
@@ -271,7 +321,15 @@ async fn run(
                 .departing_log_get(&relay.db, conn, &op, get.after)
                 .await;
             match answered {
-                Ok(Some(true)) => break Some((close::CLOSE_REMOVED, "device removed")),
+                Ok(Some(true)) => {
+                    // Last page: the connection leaves only this team.
+                    if let Some(entry) = joined.remove(id.as_str()) {
+                        leave(&relay, conn, entry).await;
+                    }
+                    if joined.is_empty() {
+                        break Some((close::CLOSE_REMOVED, "device removed"));
+                    }
+                }
                 Ok(Some(false)) => {}
                 Ok(None) => send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden))),
                 Err(failure) => {
@@ -370,9 +428,9 @@ async fn run(
                 };
                 match result {
                     Ok(Ok(outcome)) => {
-                        if outcome == JoinOutcome::Departing {
-                            departing = Some(Instant::now() + relay.removed_grace);
-                        } else {
+                        let departing = (outcome == JoinOutcome::Departing)
+                            .then(|| Instant::now() + relay.removed_grace);
+                        if departing.is_none() {
                             tracing::info!(conn, "device joined");
                         }
                         joined.insert(
@@ -380,6 +438,7 @@ async fn run(
                             Joined {
                                 team,
                                 ticket_at: Instant::now(),
+                                departing,
                             },
                         );
                     }
@@ -477,11 +536,7 @@ async fn run(
     };
 
     for (_, entry) in joined.drain() {
-        let mut guard = entry.team.lock().await;
-        if let Err(failure) = guard.leave(&relay.db, conn, now_ms()).await {
-            tracing::error!(error = %failure, "leaving the team failed");
-        }
-        relay.forward_attention(&mut guard);
+        leave(&relay, conn, entry).await;
     }
     if let Some(member) = member {
         relay.release_member(&member);
