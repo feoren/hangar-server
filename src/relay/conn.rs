@@ -18,8 +18,9 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{FutureExt, SinkExt, StreamExt};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{Mutex, Notify};
 
+use super::outbox::{outbox, Outbox};
 use super::team::{close, Joined as JoinOutcome, Outgoing, Subscriber, Team};
 use super::{Relay, RenewRefused};
 use crate::http::{AppState, ClientIp};
@@ -31,8 +32,6 @@ use crate::wire::{
 
 pub const PING_INTERVAL: Duration = Duration::from_secs(25);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Outgoing frames per connection before it counts as too slow.
-const QUEUE: usize = 512;
 const BURST: f64 = 120.0;
 const PER_SECOND: f64 = 30.0;
 const MAX_BAD_FRAMES: u32 = 20;
@@ -62,8 +61,12 @@ pub async fn upgrade(
     }
     let relay = state.relay.clone();
     let shutdown = state.shutdown.clone();
+    // Small buffers: tungstenite reserves 128 KiB per connection by default, which alone fills
+    // 512 MiB at a few thousand idle connections. Large frames still grow them as needed.
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
+        .read_buffer_size(16 * 1024)
+        .write_buffer_size(16 * 1024)
         .on_failed_upgrade({
             let relay = relay.clone();
             let ip_key = ip_key.clone();
@@ -115,9 +118,10 @@ fn text(id: Option<OpId>, team: Option<TeamId>, message: ServerMessage) -> Optio
     .map(|t| Outgoing::Text(Utf8Bytes::from(t)))
 }
 
-fn send(tx: &mpsc::Sender<Outgoing>, out: Option<Outgoing>) {
+fn send(tx: &Outbox, out: Option<Outgoing>) {
     if let Some(out) = out {
-        let _ = tx.try_send(out);
+        // A full queue kicks the connection (see `outbox`).
+        tx.try_send(out);
     }
 }
 
@@ -132,8 +136,8 @@ async fn run(
 ) {
     let conn = relay.next_conn();
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<Outgoing>(QUEUE);
     let kick = Arc::new(Notify::new());
+    let (tx, mut rx) = outbox(kick.clone());
     let removed = Arc::new(Notify::new());
 
     let writer = tokio::spawn(async move {
@@ -483,11 +487,7 @@ async fn run(
         relay.release_member(&member);
     }
     if let Some((code, reason)) = close {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
-            tx.send(Outgoing::Close(code, reason)),
-        )
-        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), tx.close(code, reason)).await;
     }
     drop(tx);
     // A peer that no longer reads does not hold the writer forever.

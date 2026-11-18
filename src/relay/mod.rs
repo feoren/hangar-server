@@ -3,6 +3,7 @@
 //! identity decides those before issuing a ticket.
 
 pub mod conn;
+pub mod outbox;
 pub mod revocation;
 pub mod store;
 pub mod team;

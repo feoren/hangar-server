@@ -1,6 +1,6 @@
 #!/bin/sh
-# Fails when the default version in docker-compose.yml, install.sh or the README differs from
-# Cargo.toml.
+# Fails when the default version in docker-compose.yml, install.sh, the README or the bug report
+# template differs from Cargo.toml.
 # Run from the repository root; a missing file is skipped.
 set -eu
 
@@ -21,7 +21,10 @@ if [ -f docker-compose.yml ]; then
   check docker-compose.yml "$(sed -n 's/.*HANGAR_VERSION:-\([^}]*\)}.*/\1/p' docker-compose.yml | head -n 1)"
 fi
 if [ -f README.md ]; then
-  check README.md "$(sed -n 's|.*ghcr.io/feoren/hangar-server:\([0-9][0-9.]*[0-9]\).*|\1|p' README.md | head -n 1)"
+  check README.md "$(sed -n 's|.*ghcr.io/feoren/hangar-server:\([0-9][0-9A-Za-z.-]*[0-9A-Za-z]\).*|\1|p' README.md | head -n 1)"
+fi
+if [ -f .github/ISSUE_TEMPLATE/bug_report.yml ]; then
+  check bug_report.yml "$(sed -n 's/^ *placeholder: \([0-9][0-9A-Za-z.-]*\)$/\1/p' .github/ISSUE_TEMPLATE/bug_report.yml | head -n 1)"
 fi
 if [ -f install.sh ]; then
   check install.sh "$(sed -n 's/^DEFAULT_VERSION=\([0-9][^ ]*\)$/\1/p' install.sh | head -n 1)"

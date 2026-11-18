@@ -885,8 +885,10 @@ pub struct InviteForm {
     csrf: Option<String>,
 }
 
-/// POST: accept. Without a browser session, the link from the mail proves control of the
-/// invited address's mailbox (like a magic link) and signs that address in.
+/// POST: accept. Without a browser session, the link may sign in only an address that has no
+/// account yet, and only once it has joined: without mail the inviter receives the link, so it
+/// proves nothing about the mailbox of an existing account (that would let any account take
+/// over any other). An existing account signs in first and then opens the link again.
 pub async fn invite_accept_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -916,7 +918,7 @@ pub async fn invite_accept_page(
             StatusCode::NOT_FOUND,
         );
     };
-    let mut cookie = None;
+    let mut new_account = false;
     let user = match browser_user(identity, &headers).await {
         Ok(Some(user)) => {
             if !csrf_ok(&identity.config, &user.session_id, form.csrf.as_deref()) {
@@ -931,18 +933,30 @@ pub async fn invite_accept_page(
             (user.id, user.email)
         }
         Ok(None) => {
-            let now = now_s();
+            let existing: Result<Option<i64>, sqlx::Error> =
+                sqlx::query_scalar("SELECT 1 FROM users WHERE email = ?")
+                    .bind(&email)
+                    .fetch_optional(&identity.db)
+                    .await;
+            match existing {
+                Ok(Some(_)) => {
+                    let mut response = super::auth::sign_in_page(identity, lang, title, "/device");
+                    *response.status_mut() = StatusCode::FORBIDDEN;
+                    return response;
+                }
+                Ok(None) => {}
+                Err(error) => return ApiError::from(error).into_response(),
+            }
             let created = async {
                 let mut tx = begin_write(&identity.db).await?;
-                let id = find_or_create_user(&mut tx, &email, lang, now).await?;
-                let token = start_browser_session(&mut tx, &id, now).await?;
+                let id = find_or_create_user(&mut tx, &email, lang, now_s()).await?;
                 tx.commit().await?;
-                Ok::<_, sqlx::Error>((id, token))
+                Ok::<_, sqlx::Error>(id)
             }
             .await;
             match created {
-                Ok((id, token)) => {
-                    cookie = Some(token);
+                Ok(id) => {
+                    new_account = true;
                     (id, email.clone())
                 }
                 Err(error) => return ApiError::from(error).into_response(),
@@ -951,6 +965,21 @@ pub async fn invite_accept_page(
         Err(error) => return error.into_response(),
     };
     let outcome = accept(identity, &token, &user.0, &user.1).await;
+    // The session of a new account starts only once it has joined.
+    let mut cookie = None;
+    if new_account && matches!(outcome, Ok(Accept::Joined { .. })) {
+        let started = async {
+            let mut tx = begin_write(&identity.db).await?;
+            let token = start_browser_session(&mut tx, &user.0, now_s()).await?;
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(token)
+        }
+        .await;
+        match started {
+            Ok(token) => cookie = Some(token),
+            Err(error) => return ApiError::from(error).into_response(),
+        }
+    }
     let mut response = match outcome {
         Ok(Accept::Joined { name, .. }) => message(
             lang,

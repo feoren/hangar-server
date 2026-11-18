@@ -33,11 +33,13 @@ describes how the relay runs it. Open requests to the crate:
 
 ## Memory per connection
 
-Every connection can hold a frame of up to 1 MiB in its read buffer. The worst case is therefore
-`MAX_CONNECTIONS × 1 MiB`: with the default of 200 that is 200 MiB, plus outgoing
-queues and the team state. That is why the Compose limit is set to 512 MiB. If you
-raise `MAX_CONNECTIONS`, raise the memory limit in the same proportion (rule of thumb: 2 MiB per
-connection). Real frames are usually a few KiB; the large case is a `claim.set` with 1000
+An idle connection needs a few dozen KiB (WebSocket buffers start at 16 KiB). Every connection
+can hold a frame of up to 1 MiB in its read buffer, and its outgoing queue is limited to 512
+frames and 4 MiB; a client that does not read fast enough is closed with 1013. Plan about 2 MiB
+per connection plus 64 MiB for the process: with the default of 200 connections that fits the
+Compose limit of 512 MiB. If you raise `MAX_CONNECTIONS`, raise the memory limit in the same
+proportion; at startup the server reads the cgroup memory limit and warns when
+`MAX_CONNECTIONS` does not fit. Real frames are usually a few KiB; the large case is a `claim.set` with 1000
 files and detail, or a `blob.put`.
 
 ## Frames

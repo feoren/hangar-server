@@ -18,7 +18,31 @@ permissions:
   contents: read
 
 jobs:
+  # Nothing is published unless the tagged commit passes the tests and the dependency audit
+  # (same rules as ci.yml), even if the tag was pushed while CI was red.
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Tests
+        run: cargo test --locked --no-fail-fast
+
+      # RUSTSEC-2026-0459: assessed and accepted, see docs/dependencies.md and ci.yml.
+      - name: Dependency audit
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0459
+
   image:
+    needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:

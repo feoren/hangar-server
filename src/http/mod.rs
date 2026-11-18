@@ -192,7 +192,9 @@ impl ClientIp {
 }
 
 /// Client address: direct, or behind our own proxy (Caddy) the last entry of
-/// `X-Forwarded-For`, which the proxy itself appended.
+/// `X-Forwarded-For`, which the proxy itself appended. With several header lines the last line
+/// counts: a proxy that appends a line instead of extending the header must not let the line the
+/// client sent win.
 pub fn client_ip(
     headers: &HeaderMap,
     peer: Option<&ConnectInfo<SocketAddr>>,
@@ -200,7 +202,9 @@ pub fn client_ip(
 ) -> Option<IpAddr> {
     if trust_proxy {
         if let Some(ip) = headers
-            .get("x-forwarded-for")
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.rsplit(',').next())
             .and_then(|v| v.trim().parse().ok())
@@ -214,6 +218,24 @@ pub fn client_ip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarded_for_uses_the_last_entry_of_the_last_header_line() {
+        let mut headers = HeaderMap::new();
+        // The client sends its own line; the proxy appends a second line with the real address.
+        headers.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        headers.append("x-forwarded-for", "198.51.100.7".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers, None, true),
+            Some("198.51.100.7".parse().unwrap())
+        );
+        let mut joined = HeaderMap::new();
+        joined.insert("x-forwarded-for", "10.0.0.1, 198.51.100.8".parse().unwrap());
+        assert_eq!(
+            client_ip(&joined, None, true),
+            Some("198.51.100.8".parse().unwrap())
+        );
+    }
 
     #[test]
     fn rate_key_groups_ipv6_per_64() {

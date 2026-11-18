@@ -341,3 +341,41 @@ async fn removed_device_log_ends_at_the_removing_entry() {
         .unwrap()
         .is_empty());
 }
+
+/// When the team state was last written, read directly from the database.
+async fn stored_at(s: &TestServer, team: &str) -> i64 {
+    sqlx::query_scalar("SELECT updated_at FROM relay_team_state WHERE team_id = ?")
+        .bind(team)
+        .fetch_one(&s.server.state.relay.db)
+        .await
+        .unwrap()
+}
+
+/// Performance: intents that change nothing (a heartbeat without held tasks, a refused
+/// request) do not rewrite the whole team state (book, notes, fsync).
+#[tokio::test]
+async fn intents_without_changes_do_not_rewrite_the_team_state() {
+    let s = start_official().await;
+    let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
+    let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
+    assert!(is_ack(&a.request("t", reserve(h(7))).await));
+    let before = stored_at(&s, "t").await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    for _ in 0..5 {
+        let reply = b
+            .request(
+                "t",
+                ClientMessage::Heartbeat(Heartbeat { tasks: Vec::new() }),
+            )
+            .await;
+        assert!(is_ack(&reply), "{reply:?}");
+        // Bob cannot take Alice's task: refused, nothing changes.
+        let refused = b.request("t", reserve(h(7))).await;
+        assert!(code(&refused).is_some(), "{refused:?}");
+    }
+    assert_eq!(
+        stored_at(&s, "t").await,
+        before,
+        "no write without a change"
+    );
+}

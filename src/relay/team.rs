@@ -21,7 +21,7 @@ use hangar_team_protocol::reservation::{
     ReservationEvent, ReservationState,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::Notify;
 
 use super::store::{self, BlobPut, EpochChange, MemberSeen};
 use crate::db::Db;
@@ -68,7 +68,7 @@ pub enum Outgoing {
 pub struct Subscriber {
     pub holder: Holder,
     pub role: Role,
-    pub tx: mpsc::Sender<Outgoing>,
+    pub tx: super::outbox::Outbox,
     /// Triggered when the connection can no longer keep up (queue full).
     pub kick: Arc<Notify>,
     /// Triggered when a log entry took the device out of the team: the connection starts the
@@ -83,7 +83,7 @@ pub struct Subscriber {
 #[derive(Debug, Clone)]
 struct Departing {
     holder: Holder,
-    tx: mpsc::Sender<Outgoing>,
+    tx: super::outbox::Outbox,
     until: u64,
 }
 
@@ -318,10 +318,8 @@ impl Team {
     fn send(&mut self, conn: u64, text: Option<Utf8Bytes>) {
         let Some(text) = text else { return };
         if let Some(sub) = self.subscribers.get(&conn) {
-            if sub.tx.try_send(Outgoing::Text(text)).is_err() {
-                // Whoever cannot keep up is disconnected and catches up via cursor.
-                sub.kick.notify_one();
-            }
+            // Whoever cannot keep up is kicked by the outbox and catches up via cursor.
+            sub.tx.try_send(Outgoing::Text(text));
         }
     }
 
@@ -508,7 +506,7 @@ impl Team {
                 text = self.frame(None, None, message.clone());
             }
             if let Some(text) = &text {
-                let _ = departing.tx.try_send(Outgoing::Text(text.clone()));
+                departing.tx.try_send(Outgoing::Text(text.clone()));
             }
         }
     }
@@ -531,7 +529,7 @@ impl Team {
         let page = MemberLogEntries::page(entries);
         let done = !page.more;
         if let Some(text) = self.frame(Some(op), None, ServerMessage::MemberLogEntries(page)) {
-            let _ = departing.tx.try_send(Outgoing::Text(text));
+            departing.tx.try_send(Outgoing::Text(text));
         }
         if done {
             self.departing.remove(&conn);
@@ -639,7 +637,7 @@ impl Team {
                 epoch: self.book.epoch(),
             });
             if let Some(text) = self.frame(Some(op), None, welcome) {
-                let _ = sub.tx.try_send(Outgoing::Text(text));
+                sub.tx.try_send(Outgoing::Text(text));
             }
             self.departing.insert(
                 conn,
@@ -838,7 +836,7 @@ impl Team {
             .collect();
         for conn in gone {
             if let Some(sub) = self.subscribers.remove(&conn) {
-                let _ = sub.tx.try_send(Outgoing::Close(code, reason));
+                sub.tx.try_send(Outgoing::Close(code, reason));
             }
         }
     }
@@ -951,12 +949,11 @@ impl Team {
     /// Closes all connections (team deleted).
     pub fn close_all(&mut self) {
         for (_, sub) in self.subscribers.drain() {
-            let _ = sub
-                .tx
+            sub.tx
                 .try_send(Outgoing::Close(close::CLOSE_TEAM_DELETED, "team deleted"));
         }
         for (_, departing) in self.departing.drain() {
-            let _ = departing
+            departing
                 .tx
                 .try_send(Outgoing::Close(close::CLOSE_TEAM_DELETED, "team deleted"));
         }
@@ -1082,7 +1079,11 @@ impl Team {
         let now = at.0;
         let book = |team: &mut Team, intent: Intent| {
             let (events, refused) = team.book.apply(&who, intent, at).into_events();
-            team.dirty = true;
+            // An intent without events changed nothing that must be saved (refused, or a
+            // heartbeat without held tasks); saving would rewrite the whole state for nothing.
+            if !events.is_empty() {
+                team.dirty = true;
+            }
             (
                 team.book_messages(events),
                 Some(refused.map_or(Ok(ack()), |r| Err(rejection(&r, at)))),

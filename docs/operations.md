@@ -234,7 +234,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
 | `MAIL_TRANSPORT` | `smtp`, `log`, `none` |
 | `TRUST_PROXY` | `true` only behind your own Caddy |
 | `REVOCATION_URL`, `RELAY_REVOCATION_TOKEN` | official: signed revocation list from the website, every 15 s ([docs/revocation-format.md](revocation-format.md)) |
-| `MAX_CONNECTIONS`, `MAX_CONNECTIONS_PER_IP` | default 200 and 200; plan for about 2 MiB of memory per connection |
+| `MAX_CONNECTIONS`, `MAX_CONNECTIONS_PER_IP` | default 200 and 20; plan for about 2 MiB of memory per connection plus 64 MiB, the server warns at startup when the memory limit does not fit |
 
 
 ## Self-hosting step by step
@@ -267,10 +267,12 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    `create-team` creates the owner's account if needed and prints the team ID. `invite` takes
    the team ID or the exact name (only the ID if names are identical) and prints the invitation
    link; no mail is ever sent in this case. The link can be used once, is valid for 7 days and
-   only for this address; calling it again renews the link and invalidates the old one. Whoever
-   opens and confirms it is signed in in the browser and becomes a member; then enter the same
-   server address in Hangar, sign in, confirm the code. The server checks the seat limit on
-   acceptance. Whatever a script uses further (link, team ID) is the last line on stdout.
+   only for this address; calling it again renews the link and invalidates the old one. For an
+   address without an account, opening and confirming it joins the team and signs that address
+   in in the browser; then enter the same server address in Hangar, sign in, confirm the code.
+   An address that already has an account must be signed in first (in the browser, or without
+   mail via `login-link`) and then opens the link again: since the inviter gets the link, it
+   never signs in an existing account. The server checks the seat limit on acceptance. Whatever a script uses further (link, team ID) is the last line on stdout.
 
    Via the API, the same is done with `POST /v1/teams` and `POST /v1/teams/{team}/invitations`;
    without mail, the API returns the link to the admin.

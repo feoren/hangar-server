@@ -12,7 +12,7 @@
 
 services:
   server:
-    image: ghcr.io/feoren/hangar-server:${HANGAR_VERSION:-0.5.0}
+    image: ghcr.io/feoren/hangar-server:${HANGAR_VERSION:-0.5.1}
     restart: unless-stopped
     env_file:
       - path: .env
@@ -52,6 +52,11 @@ services:
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile
+    # Caddy only needs to bind ports 80 and 443.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - caddy-data:/data
       - caddy-config:/config

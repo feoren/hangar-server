@@ -236,6 +236,41 @@ pub fn normalize_origin(raw: &str) -> Option<String> {
     Some(raw.to_lowercase())
 }
 
+/// Memory the process needs besides its connections (teams, database, buffers).
+const MEMORY_RESERVE: u64 = 64 * 1024 * 1024;
+/// Memory to plan per live connection (docs/protocol.md, "Memory per connection").
+const MEMORY_PER_CONNECTION: u64 = 2 * 1024 * 1024;
+
+/// Connections that fit into `limit` bytes of memory.
+pub fn connections_for_memory(limit: u64) -> u64 {
+    limit.saturating_sub(MEMORY_RESERVE) / MEMORY_PER_CONNECTION
+}
+
+/// A warning when `MAX_CONNECTIONS` exceeds what the memory limit holds: then the process would
+/// be killed for lack of memory instead of rejecting connections with 503.
+pub fn memory_warning(max_connections: usize, limit: Option<u64>) -> Option<String> {
+    let limit = limit?;
+    let fits = connections_for_memory(limit);
+    (max_connections as u64 > fits).then(|| {
+        format!(
+            "MAX_CONNECTIONS={max_connections} exceeds the memory limit of {} MiB, which holds about {fits} connections; set MAX_CONNECTIONS={fits} or raise the limit",
+            limit / (1024 * 1024)
+        )
+    })
+}
+
+/// Content of cgroup v2 `memory.max`: bytes, or `max` for no limit.
+pub fn parse_memory_max(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
+/// The memory limit of this process's cgroup (container or systemd `MemoryMax`), if any.
+pub fn memory_limit() -> Option<u64> {
+    std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|text| parse_memory_max(&text))
+}
+
 /// Keys for license documents: `raw` (`LICENSE_PUBLIC_KEYS`) or, when empty, the official
 /// website's key.
 pub fn license_keys_from(raw: &str) -> Result<KeySet, ConfigError> {
@@ -493,6 +528,38 @@ Set-Cookie: x"
         assert_eq!(parse_redirect("https://bücher.example/"), None);
         assert_eq!(parse_redirect(r"https://a.org\@evil.example/"), None);
         assert_eq!(parse_redirect("http://localhost.evil.example/"), None);
+    }
+
+    #[test]
+    fn connections_that_exceed_the_memory_limit_are_reported() {
+        let mib = 1024 * 1024;
+        assert_eq!(connections_for_memory(512 * mib), 224);
+        assert!(
+            memory_warning(200, Some(512 * mib)).is_none(),
+            "the defaults fit"
+        );
+        assert!(memory_warning(20_000, Some(512 * mib)).is_some());
+        assert!(memory_warning(150, Some(512 * mib)).is_none());
+        assert!(memory_warning(20_000, None).is_none(), "no limit known");
+    }
+
+    #[test]
+    fn cgroup_memory_limit_is_parsed() {
+        assert_eq!(
+            parse_memory_max(
+                "536870912
+"
+            ),
+            Some(536_870_912)
+        );
+        assert_eq!(
+            parse_memory_max(
+                "max
+"
+            ),
+            None
+        );
+        assert_eq!(parse_memory_max("garbage"), None);
     }
 
     #[test]

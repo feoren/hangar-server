@@ -80,6 +80,12 @@ fn main() -> ExitCode {
 
 async fn serve(config: Config) -> Result<(), String> {
     let bind = config.bind;
+    if let Some(warning) = hangar_server::config::memory_warning(
+        config.max_connections,
+        hangar_server::config::memory_limit(),
+    ) {
+        tracing::warn!("{warning}");
+    }
     let server = hangar_server::build(config)
         .await
         .map_err(|e| e.to_string())?;

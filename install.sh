@@ -22,7 +22,7 @@
 # HANGAR_SKIP_CADDY=1 (native: you run your own reverse proxy), HANGAR_DIR (Docker folder).
 set -eu
 
-DEFAULT_VERSION=0.5.0
+DEFAULT_VERSION=0.5.1
 REPO_URL=https://github.com/feoren/hangar-server
 
 DOCKER_DIR="${HANGAR_DIR:-/opt/hangar-server}"
@@ -346,12 +346,22 @@ docker_ready() {
   fi
 }
 
+# docker_compose_file: the Compose file of this version, verified against SHA256SUMS and only
+# then put in place, so an aborted or altered download never replaces a working file.
 docker_compose_file() {
   if [ -n "${HANGAR_COMPOSE_FILE:-}" ]; then
     cp "$HANGAR_COMPOSE_FILE" "$DOCKER_DIR/docker-compose.yml"
-  else
-    download "$RELEASE_URL/docker-compose.yml" "$DOCKER_DIR/docker-compose.yml"
+    return 0
   fi
+  tmp=$(mktemp -d)
+  download "$RELEASE_URL/docker-compose.yml" "$tmp/docker-compose.yml"
+  download "$RELEASE_URL/SHA256SUMS" "$tmp/SHA256SUMS"
+  grep " \*\{0,1\}docker-compose.yml\$" "$tmp/SHA256SUMS" > "$tmp/expected" \
+    || { rm -rf "$tmp"; fail "docker-compose.yml is not listed in SHA256SUMS"; }
+  (cd "$tmp" && sha256sum -c expected > /dev/null 2>&1) \
+    || { rm -rf "$tmp"; fail "checksum of docker-compose.yml does not match; nothing was changed"; }
+  mv "$tmp/docker-compose.yml" "$DOCKER_DIR/docker-compose.yml"
+  rm -rf "$tmp"
 }
 
 docker_wait() {
@@ -474,7 +484,23 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ReadWritePaths=$DATA_DIR
-# 200 connections × up to 1 MiB read buffer plus state (docs/protocol.md).
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+# About 2 MiB per connection plus 64 MiB; the server warns when MAX_CONNECTIONS does not fit.
 MemoryMax=512M
 
 [Install]
@@ -504,7 +530,8 @@ native_update() {
 
 native_install() {
   command -v systemctl > /dev/null 2>&1 || fail "the native way needs systemd; use the Docker way"
-  matches "$PORT" '^[0-9]{2,5}$' || fail "HANGAR_PORT must be a port number"
+  { matches "$PORT" '^[0-9]{2,5}$' && [ "$PORT" -le 65535 ]; } \
+    || fail "HANGAR_PORT must be a port number (10-65535)"
   if ! systemctl is-active --quiet hangar-server; then
     owner=$(port_owner "$PORT")
     [ -z "$owner" ] || fail "port $PORT is used by $owner; choose another one with HANGAR_PORT=8081"
@@ -537,7 +564,8 @@ first_team() {
       (cd "$DOCKER_DIR" && docker compose run --rm -T server teams) 2>/dev/null
     else
       "$WRAPPER" teams 2>/dev/null
-    fi; } | awk -F '\t' -v team="$TEAM" -v owner="$EMAIL" '$2 == team && $3 == owner { print $1; exit }')
+    fi; } | HANGAR_MATCH_TEAM="$TEAM" HANGAR_MATCH_OWNER="$EMAIL" awk -F '\t' \
+      '$2 == ENVIRON["HANGAR_MATCH_TEAM"] && $3 == ENVIRON["HANGAR_MATCH_OWNER"] { print $1; exit }')
   if [ -n "$existing" ]; then say "$existing"; else admin create-team "$EMAIL" "$TEAM"; fi
 }
 
@@ -560,9 +588,11 @@ fi
 # --- New installation ------------------------------------------------------------------------
 
 if [ -f "$DOCKER_DIR/.env" ]; then
+  [ "$MODE" != native ] || fail "an unfinished Docker installation exists in $DOCKER_DIR; remove it to use the native way"
   MODE=docker
   say "Hangar server $VERSION: continuing the unfinished installation in $DOCKER_DIR"
 elif [ -f "$ETC_DIR/.env" ]; then
+  [ "$MODE" != docker ] || fail "an unfinished native installation exists in $ETC_DIR; remove it to use the Docker way"
   MODE=native
   say "Hangar server $VERSION: continuing the unfinished installation in $ETC_DIR"
 else
@@ -576,12 +606,12 @@ matches "$DOMAIN" '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?
   || fail "not a domain name: $DOMAIN"
 
 ask HANGAR_EMAIL "Your e-mail address (first account):"
-EMAIL="$HANGAR_EMAIL"
+EMAIL=$(printf '%s' "$HANGAR_EMAIL" | tr '[:upper:]' '[:lower:]')
 matches "$EMAIL" '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' || fail "not an e-mail address: $EMAIL"
 
 HANGAR_TEAM="${HANGAR_TEAM:-}"
 ask HANGAR_TEAM "Name of your first team (Enter = Team):" Team
-TEAM="$HANGAR_TEAM"
+TEAM=$(printf '%s' "$HANGAR_TEAM" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 matches "$TEAM" '^[^[:cntrl:]"]+$' || fail "not a team name: $TEAM"
 
 if [ -z "$MODE" ]; then

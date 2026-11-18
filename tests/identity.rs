@@ -1194,3 +1194,81 @@ async fn host_command_license_stores_for_the_named_account() {
     .await;
     assert_eq!(taken.json()["error"], "license_in_use", "{}", taken.body);
 }
+
+/// Security: an invitation link must not sign in an account that already exists. Without mail
+/// the inviter receives the link, so it proves nothing about the invited mailbox; otherwise any
+/// account could create a team, invite someone else's address and take that account over.
+#[tokio::test]
+async fn invitation_link_never_signs_in_an_existing_account() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let (victim, _) = login(&s, "victim@example.org").await;
+    let secret = create_team(app, &victim, "Secret").await;
+    let (attacker, _) = login(&s, "attacker@example.org").await;
+    let bait = create_team(app, &attacker, "Bait").await;
+    let link = invite_links(app, &attacker, &bait, &["victim@example.org"], "member")
+        .await
+        .remove(0);
+
+    let response = call(
+        app,
+        "POST",
+        &format!("/invite/{link}"),
+        &[("origin", ORIGIN)],
+        Some(form(&[])),
+    )
+    .await;
+    assert!(
+        response.cookie.is_none(),
+        "no browser session for the existing account: {}",
+        response.body
+    );
+    assert_ne!(response.status, StatusCode::OK);
+
+    // The victim was not added to the attacker's team, and still owns their own team alone.
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{secret}"),
+        &[("authorization", &bearer(&victim))],
+        None,
+    )
+    .await
+    .json();
+    assert_eq!(detail["seats"]["used"], 1);
+}
+
+/// A new address still joins with one click, but the session starts only after joining.
+#[tokio::test]
+async fn invitation_link_session_only_after_joining() {
+    let mut config = local_config();
+    config.license_keys = KeySet::default();
+    let s = start(config).await;
+    let app = &s.server.router;
+    let (owner, _) = login(&s, "full@example.org").await;
+    let team = create_team(app, &owner, "Full").await;
+    let emails = ["a1@example.org", "a2@example.org", "a3@example.org"];
+    let links = invite_links(app, &owner, &team, &emails, "member").await;
+    for link in &links[..2] {
+        let joined = call(
+            app,
+            "POST",
+            &format!("/invite/{link}"),
+            &[("origin", ORIGIN)],
+            Some(form(&[])),
+        )
+        .await;
+        assert_eq!(joined.status, StatusCode::OK, "{}", joined.body);
+    }
+    // Free has three seats: the third person cannot join and gets no session either.
+    let full = call(
+        app,
+        "POST",
+        &format!("/invite/{}", links[2]),
+        &[("origin", ORIGIN)],
+        Some(form(&[])),
+    )
+    .await;
+    assert_eq!(full.status, StatusCode::CONFLICT, "{}", full.body);
+    assert!(full.cookie.is_none(), "no session without joining");
+}

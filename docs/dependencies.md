@@ -24,7 +24,7 @@ for the Unicode tables documented by the app).
 | dotenvy | 0.15 | MIT | Reading `.env` (maintained successor of dotenv) | environment variables only |
 | reqwest | 0.13 | MIT/Apache-2.0 | Fetching the website's revocation list (official mode only). Without default features, `rustls-no-provider`: no aws-lc-rs (C, cmake) in the static binary, root certificates via `rustls-platform-verifier` (system). No redirects, no proxy, 10 s timeout, 1 MiB size limit in the code; hyper is already in the tree via axum | hyper-util directly (build TLS, timeouts and the redirect ban yourself) |
 | rustls | 0.23 | MIT/Apache-2.0/ISC | Installing the `ring` provider for reqwest once per process (`src/tls.rs`); already in the tree via lettre | none |
-| lettre | 0.11.23 | MIT | SMTP with TLS (rustls, ring, webpki-roots, no OpenSSL in the static binary), multipart mail | own SMTP client (too much error surface) |
+| lettre | 0.11.24 | MIT | SMTP with TLS (rustls, ring, webpki-roots, no OpenSSL in the static binary), multipart mail | own SMTP client (too much error surface) |
 
 Tests only: `tokio-tungstenite` 0.29 (MIT, WebSocket client, same tungstenite version as axum),
 `tower` 0.5 (MIT, `oneshot` against the router), `http-body-util` 0.1 (MIT).
