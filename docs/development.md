@@ -9,8 +9,8 @@ see [operations.md](operations.md), for the routes [http-api.md](http-api.md).
 Cargo.toml, Cargo.lock      one crate, pinned versions
 migrations/                 0001_relay.sql (relay), 0002_identity.sql (self-hosting),
                             0003_magic_link_browser.sql (magic link bound to the browser)
-                            through 0010_removed_device_log_index.sql (log index of the
-                            device removal, grace period of the removed device)
+                            through 0011_blobs_purge_index.sql (index for the hourly
+                            purge of old transcripts)
 src/
   main.rs                   commands: serve, healthcheck, login-link, create-team, invite, teams, license
   lib.rs                    wiring (also for the tests)

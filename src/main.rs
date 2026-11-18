@@ -93,17 +93,7 @@ async fn serve(config: Config) -> Result<(), String> {
         .await
         .map_err(|e| format!("{bind}: {e}"))?;
     tracing::info!(%bind, "server ready");
-    let shutdown = server.shutdown;
-    let app = server
-        .router
-        .into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            wait_for_signal().await;
-            tracing::info!("shutting down: closing connections");
-            // Live connections close with 1012; the clients reconnect.
-            let _ = shutdown.send(true);
-        })
+    hangar_server::serve_until(server, listener, wait_for_signal())
         .await
         .map_err(|e| e.to_string())?;
     tracing::info!("stopped");

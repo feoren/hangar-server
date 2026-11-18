@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex, OnceCell};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -56,9 +56,13 @@ pub struct Relay {
     /// Grace period of a removed device for its `memberlog.get` (see `conn`).
     pub removed_grace: Duration,
     transcript_retention_ms: u64,
-    teams: Mutex<HashMap<String, Arc<Mutex<Team>>>>,
+    /// Loaded teams. The map's lock is held only to find or insert an entry; the team itself
+    /// loads outside it, in its entry's cell (see `team`).
+    teams: Mutex<HashMap<String, Arc<TeamCell>>>,
     connections: AtomicUsize,
     before_hello: AtomicUsize,
+    /// Test hook: every team load waits this long first (milliseconds, 0 in operation).
+    load_delay_ms: AtomicU64,
     per_member: std::sync::Mutex<HashMap<String, usize>>,
     per_ip: std::sync::Mutex<HashMap<String, usize>>,
     next_conn: AtomicU64,
@@ -103,6 +107,7 @@ impl Relay {
             teams: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),
             before_hello: AtomicUsize::new(0),
+            load_delay_ms: AtomicU64::new(0),
             per_member: std::sync::Mutex::new(HashMap::new()),
             per_ip: std::sync::Mutex::new(HashMap::new()),
             next_conn: AtomicU64::new(1),
@@ -117,6 +122,13 @@ impl Relay {
 
     pub fn audience(&self) -> &str {
         &self.audience
+    }
+
+    /// Test hook: makes every following team load wait `ms` first, to check what else waits
+    /// for a load.
+    #[doc(hidden)]
+    pub fn delay_team_loads(&self, ms: u64) {
+        self.load_delay_ms.store(ms, Ordering::Relaxed);
     }
 
     pub fn next_conn(&self) -> u64 {
@@ -227,17 +239,47 @@ impl Relay {
         }
     }
 
-    /// The team in memory, loaded from the database if needed.
+    /// The team in memory, loaded from the database if needed. Only finding or inserting the
+    /// entry happens under the map's lock; loading (queries, verifying the log, the first
+    /// write) runs in the entry's cell, so `hello` for other teams, the timer and the
+    /// revocation list do not wait for it. Concurrent callers for the same team wait for the
+    /// same load. A failed load leaves the cell empty and removes it; the next call tries again.
     pub async fn team(&self, id: &str) -> Result<Arc<Mutex<Team>>, sqlx::Error> {
+        let cell = self
+            .teams
+            .lock()
+            .await
+            .entry(id.to_owned())
+            .or_default()
+            .clone();
+        let loaded = cell
+            .get_or_try_init(|| async {
+                let delay = self.load_delay_ms.load(Ordering::Relaxed);
+                if delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                let team = Team::load(&self.db, id, self.policy, now_ms()).await?;
+                Ok::<_, sqlx::Error>(Arc::new(Mutex::new(team)))
+            })
+            .await
+            .cloned();
         let mut teams = self.teams.lock().await;
-        if let Some(team) = teams.get(id) {
-            return Ok(team.clone());
+        let current = teams.get(id).is_some_and(|c| Arc::ptr_eq(c, &cell));
+        match loaded {
+            Ok(team) if current => Ok(team),
+            Ok(team) => {
+                // Deleted (`close_team`) while it was loading.
+                drop(teams);
+                team.lock().await.close_all();
+                Err(sqlx::Error::RowNotFound)
+            }
+            Err(failure) => {
+                if current && cell.get().is_none() {
+                    teams.remove(id);
+                }
+                Err(failure)
+            }
         }
-        let team = Arc::new(Mutex::new(
-            Team::load(&self.db, id, self.policy, now_ms()).await?,
-        ));
-        teams.insert(id.to_owned(), team.clone());
-        Ok(team)
     }
 
     /// Passes notices on to the identity (only self-hosting has a receiver).
@@ -308,7 +350,12 @@ impl Relay {
         // Create the team (foreign key), then set the floor before the new role.
         self.team(team_id).await?;
         store::raise_ticket_floor(&self.db, team_id, member.as_str(), at_ms).await?;
-        let team = self.teams.lock().await.get(team_id).cloned();
+        let team = self
+            .teams
+            .lock()
+            .await
+            .get(team_id)
+            .and_then(|cell| cell.get().cloned());
         match team {
             Some(team) => {
                 team.lock()
@@ -365,8 +412,8 @@ impl Relay {
 
     /// Team deleted (self-hosting): closes connections, removes relay data.
     pub async fn close_team(&self, team_id: &str) -> Result<(), sqlx::Error> {
-        let team = self.teams.lock().await.remove(team_id);
-        if let Some(team) = team {
+        let cell = self.teams.lock().await.remove(team_id);
+        if let Some(team) = cell.as_ref().and_then(|cell| cell.get()) {
             team.lock().await.close_all();
         }
         sqlx::query("DELETE FROM relay_teams WHERE id = ?")
@@ -376,22 +423,56 @@ impl Relay {
         Ok(())
     }
 
-    /// Timer: expiries and warnings, unloading unused teams.
+    /// Timer: expiries and warnings, unloading unused teams. A team whose lock is held right
+    /// now (an intent, a slow write) is skipped and gets its tick 10 s later, so it does not
+    /// hold up the others. Its own intents meanwhile apply the book's due timing events
+    /// anyway (`Applied::timing`).
     pub async fn tick(&self) {
         let now = now_ms();
-        let teams: Vec<Arc<Mutex<Team>>> = self.teams.lock().await.values().cloned().collect();
+        let teams: Vec<Arc<Mutex<Team>>> = self
+            .teams
+            .lock()
+            .await
+            .values()
+            .filter_map(|cell| cell.get().cloned())
+            .collect();
+        let mut busy = 0usize;
         for team in teams {
-            let mut team = team.lock().await;
+            let Ok(mut team) = team.try_lock() else {
+                busy += 1;
+                continue;
+            };
             if let Err(error) = team.tick(&self.db, now).await {
                 tracing::error!(%error, "team timer failed");
             }
             self.forward_attention(&mut team);
         }
+        if busy > 0 {
+            tracing::debug!(busy, "busy teams skipped by the timer");
+        }
         let mut map = self.teams.lock().await;
-        map.retain(|_, team| {
-            // Only unload if nobody else is holding the team right now.
-            Arc::strong_count(team) > 1 || team.try_lock().map(|t| !t.idle(now)).unwrap_or(true)
+        map.retain(|_, cell| {
+            // Only unload if nobody else is holding the team right now. An empty cell nobody
+            // holds is the rest of a cancelled load.
+            Arc::strong_count(cell) > 1
+                || cell.get().is_some_and(|team| {
+                    Arc::strong_count(team) > 1
+                        || team.try_lock().map(|t| !t.idle(now)).unwrap_or(true)
+                })
         });
+    }
+
+    /// Waits until every live connection has ended (after the shutdown signal they close with
+    /// 1012 and leave their teams), at most `limit`. `false`: some were still open.
+    pub async fn wait_for_connections(&self, limit: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        while self.connection_count() > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
     }
 
     pub async fn housekeeping(&self) {
@@ -417,6 +498,9 @@ impl Relay {
         });
     }
 }
+
+/// A team's entry in the map: empty while it loads.
+type TeamCell = OnceCell<Arc<Mutex<Team>>>;
 
 fn acquire(map: &std::sync::Mutex<HashMap<String, usize>>, key: &str, max: usize) -> bool {
     let Ok(mut map) = map.lock() else {

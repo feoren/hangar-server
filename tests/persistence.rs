@@ -379,3 +379,41 @@ async fn intents_without_changes_do_not_rewrite_the_team_state() {
         "no write without a change"
     );
 }
+
+/// As in `main`: the server runs in its own runtime, which ends when `serve_until` returns and
+/// takes every task still running with it. Live connections must have their 1012 by then.
+#[test]
+fn shutdown_closes_live_connections_with_1012() {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let config = Config::for_tests(IdentityMode::Official, website_keys());
+            let server = hangar_server::build(config).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addr_tx.send(listener.local_addr().unwrap()).unwrap();
+            hangar_server::serve_until(server, listener, async {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
+        });
+    });
+    let addr = addr_rx.recv().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let (mut a, _) = Client::join(addr, "t", "alice", Role::Owner).await;
+        let (mut b, _) = Client::join(addr, "t", "bob", Role::Member).await;
+        stop_tx.send(()).unwrap();
+        assert_eq!(a.close_code().await, Some(1012));
+        assert_eq!(b.close_code().await, Some(1012));
+    });
+    server.join().unwrap();
+}

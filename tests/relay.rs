@@ -1052,3 +1052,61 @@ async fn housekeeping_forgets_devices_not_seen_for_long() {
         .unwrap();
     assert_eq!(left, vec!["alice".to_owned()]);
 }
+
+#[tokio::test]
+async fn loading_a_team_does_not_block_hello_for_loaded_teams() {
+    let s = start_official().await;
+    let (_a, _) = Client::join(s.addr, "a", "alice", Role::Owner).await;
+    s.server.state.relay.delay_team_loads(2_000);
+    let addr = s.addr;
+    let slow = tokio::spawn(async move { Client::join(addr, "b", "bob", Role::Owner).await.1 });
+    // Bob's team is loading now.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let started = std::time::Instant::now();
+    let (_c, _) = Client::join(s.addr, "a", "carol", Role::Member).await;
+    let waited = started.elapsed();
+    assert!(
+        waited < std::time::Duration::from_millis(1_000),
+        "hello for a loaded team waited {waited:?} for another team's load"
+    );
+    slow.await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_hellos_for_a_new_team_share_one_instance() {
+    let s = start_official().await;
+    s.server.state.relay.delay_team_loads(300);
+    let joins: Vec<_> = (0..12)
+        .map(|n| {
+            let addr = s.addr;
+            tokio::spawn(async move {
+                Client::join(addr, "fresh", &format!("m{n}"), Role::Member)
+                    .await
+                    .0
+            })
+        })
+        .collect();
+    let mut clients = Vec::new();
+    for join in joins {
+        clients.push(join.await.unwrap());
+    }
+    s.server.state.relay.delay_team_loads(0);
+    // One instance: everyone sees the reservation of the first.
+    assert!(is_ack(&clients[0].request("fresh", reserve(h(7))).await));
+    for c in clients.iter_mut().skip(1) {
+        c.until(|f| matches!(&f.message, ServerMessage::TaskReserved(r) if r.task == h(7)))
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn timer_does_not_wait_for_a_busy_team() {
+    let s = start_official().await;
+    let (_a, _) = Client::join(s.addr, "a", "alice", Role::Owner).await;
+    let (_b, _) = Client::join(s.addr, "b", "bob", Role::Owner).await;
+    let relay = s.server.state.relay.clone();
+    let team = relay.team("a").await.unwrap();
+    let _busy = team.lock().await;
+    let ticked = tokio::time::timeout(std::time::Duration::from_secs(1), relay.tick()).await;
+    assert!(ticked.is_ok(), "the timer waited for the busy team");
+}

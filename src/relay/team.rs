@@ -230,9 +230,17 @@ impl Team {
             }
         };
         let members = store::members(db, id).await?.into_iter().collect();
-        let mut verifier = LogVerifier::new(team.clone());
         let entries = store::log_all(db, id).await?;
-        if let Err(error) = verifier.apply_all(&entries) {
+        // Verifying every signature of the log is CPU work: off the async threads.
+        let for_log = team.clone();
+        let (verifier, replayed) = tokio::task::spawn_blocking(move || {
+            let mut verifier = LogVerifier::new(for_log);
+            let replayed = verifier.apply_all(&entries).map_err(|e| e.to_string());
+            (verifier, replayed)
+        })
+        .await
+        .map_err(|e| protocol(e.to_string()))?;
+        if let Err(error) = replayed {
             // Only what was admitted gets stored; an error here means corrupted data.
             // The log stops at the last valid entry.
             tracing::error!(%error, "stored membership log cannot be replayed");

@@ -98,3 +98,37 @@ pub async fn build(config: Config) -> Result<Server, StartError> {
         shutdown,
     })
 }
+
+/// How long a shutdown waits for the live connections to close (below the 20 s that Compose
+/// and systemd give before they kill the process).
+pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Serves `server` on `listener` until `signal` completes, then closes the live connections
+/// with 1012 (the clients reconnect) and waits up to `SHUTDOWN_DRAIN` for them: the graceful
+/// shutdown of the HTTP server does not wait for upgraded WebSockets, and ending the runtime
+/// would cut them off without a close frame (1006) and before they leave their teams.
+pub async fn serve_until(
+    server: Server,
+    listener: tokio::net::TcpListener,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let relay = server.state.relay.clone();
+    let shutdown = server.shutdown;
+    let app = server
+        .router
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            signal.await;
+            tracing::info!("shutting down: closing connections");
+            let _ = shutdown.send(true);
+        })
+        .await?;
+    if !relay.wait_for_connections(SHUTDOWN_DRAIN).await {
+        tracing::warn!(
+            open = relay.connection_count(),
+            "connections still open after the shutdown deadline"
+        );
+    }
+    Ok(())
+}

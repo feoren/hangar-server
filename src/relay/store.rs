@@ -524,6 +524,17 @@ pub async fn use_jti(db: &Db, jti: &str, exp_s: i64) -> Result<bool> {
     Ok(done.rows_affected() == 1)
 }
 
+/// Old transcripts, at most one batch (bind: cutoff, batch size). A macro, so the test can
+/// check the plan of exactly this query.
+macro_rules! purge_transcripts_select {
+    () => {
+        "SELECT id FROM relay_blobs WHERE kind = 'transcript' AND created_at < ? LIMIT ?"
+    };
+}
+
+/// Transcripts deleted per write transaction, so no purge holds the write lock for long.
+const PURGE_BATCH: i64 = 500;
+
 pub async fn purge(db: &Db, now_s: i64, transcript_cutoff_ms: u64) -> Result<()> {
     sqlx::query("DELETE FROM relay_used_tickets WHERE exp < ?")
         .bind(now_s - 2 * crate::ticket::CLOCK_SKEW_S)
@@ -543,20 +554,35 @@ pub async fn purge(db: &Db, now_s: i64, transcript_cutoff_ms: u64) -> Result<()>
         )
         .execute(db)
         .await?;
-    let mut tx = begin_write(db).await?;
-    sqlx::query(
-        "UPDATE relay_teams SET blob_bytes = blob_bytes - COALESCE((SELECT SUM(size) FROM relay_blobs b \
-         WHERE b.team_id = relay_teams.id AND b.kind = 'transcript' AND b.created_at < ?), 0)",
-    )
-    .bind(i64_of(transcript_cutoff_ms))
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("DELETE FROM relay_blobs WHERE kind = 'transcript' AND created_at < ?")
+    // In batches, each its own short write transaction: the index on (kind, created_at)
+    // (migration 0011) finds them without scanning, and the quota shrinks by what was deleted.
+    loop {
+        let mut tx = begin_write(db).await?;
+        let gone: Vec<(String, i64)> = sqlx::query_as(concat!(
+            "DELETE FROM relay_blobs WHERE id IN (",
+            purge_transcripts_select!(),
+            ") RETURNING team_id, size"
+        ))
         .bind(i64_of(transcript_cutoff_ms))
-        .execute(&mut *tx)
+        .bind(PURGE_BATCH)
+        .fetch_all(&mut *tx)
         .await?;
-    tx.commit().await?;
-    Ok(())
+        let mut per_team: std::collections::BTreeMap<&str, i64> = Default::default();
+        for (team, size) in &gone {
+            *per_team.entry(team.as_str()).or_default() += size;
+        }
+        for (team, size) in per_team {
+            sqlx::query("UPDATE relay_teams SET blob_bytes = blob_bytes - ? WHERE id = ?")
+                .bind(size)
+                .bind(team)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        if (gone.len() as i64) < PURGE_BATCH {
+            return Ok(());
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -973,4 +999,99 @@ pub async fn mark_revocation(db: &Db, rid: &str, now: u64) -> Result<()> {
     .execute(db)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> Db {
+        let path = std::env::temp_dir().join(format!("hangar-store-test-{}.db", random_id()));
+        crate::db::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transcript_purge_uses_an_index() {
+        let db = test_db().await;
+        let plan: Vec<String> =
+            sqlx::query(concat!("EXPLAIN QUERY PLAN ", purge_transcripts_select!()))
+                .bind(0i64)
+                .bind(PURGE_BATCH)
+                .fetch_all(&db)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.get::<String, _>("detail"))
+                .collect();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("USING INDEX relay_blobs_kind_created")),
+            "{plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_purge_removes_only_old_transcripts_in_batches() {
+        let db = test_db().await;
+        for team in ["t1", "t2"] {
+            sqlx::query("INSERT INTO relay_teams (id, stream, created_at) VALUES (?, 's', 0)")
+                .bind(team)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let mut tx = begin_write(&db).await.unwrap();
+        let add = |team: &'static str, kind: &'static str, created_at: i64, n: usize| {
+            (0..n)
+                .map(move |_| (team, kind, created_at))
+                .collect::<Vec<_>>()
+        };
+        // More old transcripts than one batch, plus what must stay.
+        let mut rows = add("t1", "transcript", 100, PURGE_BATCH as usize * 2 + 7);
+        rows.extend(add("t2", "transcript", 100, 3));
+        rows.extend(add("t1", "transcript", 5_000, 4));
+        rows.extend(add("t2", "decision", 100, 2));
+        for (team, kind, created_at) in &rows {
+            sqlx::query(
+                "INSERT INTO relay_blobs (id, team_id, kind, epoch, data, size, member, device, created_at) \
+                 VALUES (?, ?, ?, 0, 'YQ', 10, 'm', 'd', ?)",
+            )
+            .bind(random_id())
+            .bind(*team)
+            .bind(*kind)
+            .bind(*created_at)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE relay_teams SET blob_bytes = blob_bytes + 10 WHERE id = ?")
+                .bind(*team)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        purge(&db, crate::util::now_s(), 1_000).await.unwrap();
+
+        let left: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT team_id, kind, COUNT(*) FROM relay_blobs GROUP BY team_id, kind ORDER BY team_id, kind",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            left,
+            vec![
+                ("t1".into(), "transcript".into(), 4),
+                ("t2".into(), "decision".into(), 2)
+            ]
+        );
+        let bytes: Vec<i64> = sqlx::query_scalar("SELECT blob_bytes FROM relay_teams ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(bytes, vec![40, 20]);
+    }
 }
