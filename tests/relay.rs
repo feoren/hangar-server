@@ -860,3 +860,195 @@ async fn snapshot_larger_than_the_outgoing_queue_ends_with_welcome() {
     assert_eq!(held, 640);
     still_open(&mut c).await;
 }
+
+/// The largest `claim.set`: 1000 files (distinct per `n`, without area, so no overlaps) and a
+/// detail of the longest ciphertext.
+fn largest_claim(n: u16) -> ClientMessage {
+    let files = (0..limits::MAX_CLAIM_FILES as u16)
+        .map(|i| {
+            let mut bytes = [0u8; 32];
+            bytes[..2].copy_from_slice(&n.to_be_bytes());
+            bytes[2..4].copy_from_slice(&i.to_be_bytes());
+            bytes[31] = 0xCC;
+            PathHashes {
+                area: None,
+                file: KeyedHash::from_bytes(bytes),
+            }
+        })
+        .collect();
+    ClientMessage::ClaimSet(ClaimSet {
+        session: session(&format!("s{n}")),
+        repo: h(1),
+        epoch: Epoch(0),
+        files,
+        truncated: true,
+        detail: Some(Sealed {
+            epoch: Epoch(0),
+            data: Ciphertext::new("A".repeat(limits::MAX_CIPHERTEXT_LEN)).unwrap(),
+        }),
+    })
+}
+
+#[tokio::test]
+async fn claims_have_a_byte_budget_per_member() {
+    let s = start_official().await;
+    let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Member).await;
+    let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
+    // Far below the 64 sessions per device, the member budget ends with `limit`.
+    let mut accepted = 0;
+    let refused = loop {
+        let r = a.request("t", largest_claim(accepted)).await;
+        if !is_ack(&r) {
+            break r;
+        }
+        accepted += 1;
+        assert!(accepted < 64, "no byte budget per member");
+    };
+    assert_eq!(code(&refused), Some(ErrorCode::Limit));
+    assert!(accepted >= 16, "only {accepted} of the largest claims fit");
+    // Replacing a session with one of the same size still works at the limit.
+    assert!(is_ack(&a.request("t", largest_claim(0)).await));
+    // Another member still has room in the team.
+    assert!(is_ack(&b.request("t", largest_claim(100)).await));
+}
+
+#[tokio::test]
+async fn claims_have_a_byte_budget_per_team() {
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.claim_bytes_per_team = 1024 * 1024;
+    let s = start(config).await;
+    let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Member).await;
+    let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
+    let mut accepted = 0;
+    while is_ack(&a.request("t", largest_claim(accepted)).await) {
+        accepted += 1;
+        assert!(accepted < 64, "no byte budget per team");
+    }
+    assert!(accepted >= 3, "{accepted}");
+    // The team is full for everyone, also for bob.
+    assert_eq!(
+        code(&b.request("t", largest_claim(100)).await),
+        Some(ErrorCode::Limit)
+    );
+    // A cleared session frees its bytes.
+    let clear = ClientMessage::ClaimClear(ClaimClear {
+        session: session("s0"),
+    });
+    assert!(is_ack(&a.request("t", clear).await));
+    assert!(is_ack(&b.request("t", largest_claim(100)).await));
+}
+
+#[tokio::test]
+async fn replay_window_is_bounded_in_bytes() {
+    let s = start_official().await;
+    let note = Sealed {
+        epoch: Epoch(0),
+        data: Ciphertext::new("B".repeat(16_000)).unwrap(),
+    };
+    // 300 reservations with a 16 KB note each: about 4.8 MB of events.
+    let mut last = None;
+    for batch in 0..6u16 {
+        let mut c = join_tracking(&s, "t", "alice", &mut last).await;
+        for n in batch * 50..(batch + 1) * 50 {
+            let reserve = ClientMessage::TaskReserve(TaskReserve {
+                task: task_no(n),
+                epoch: Epoch(0),
+                prev: Vec::new(),
+                note: Some(note.clone()),
+            });
+            let r = request_tracking(&mut c, "t", reserve, &mut last).await;
+            assert!(is_ack(&r), "{:?}", r.message);
+            let release = ClientMessage::TaskRelease(TaskRef { task: task_no(n) });
+            let r = request_tracking(&mut c, "t", release, &mut last).await;
+            assert!(is_ack(&r), "{:?}", r.message);
+        }
+        c.close().await;
+    }
+    let cursor = last.expect("cursor");
+    assert!(cursor.seq.0 >= 600);
+
+    // The oldest events left the window: a cursor at the start gets a snapshot.
+    let mut old = Client::connect(s.addr).await;
+    let op = old.op();
+    old.send(
+        &op,
+        Some("t"),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket("bob", "t", Role::Member)).unwrap(),
+            device: device("bob-device"),
+            proto: ProtoRange::CURRENT,
+            last_seq: Some(Cursor {
+                stream: cursor.stream.clone(),
+                seq: Seq(0),
+            }),
+        }),
+    )
+    .await;
+    let first = old.recv().await.expect("reply to hello");
+    assert!(
+        matches!(&first.message, ServerMessage::ResyncRequired(r) if r.reason == ResyncReason::TooOld),
+        "{:?}",
+        first.message
+    );
+
+    // A recent cursor still gets the replay, in order.
+    let mut recent = Client::connect(s.addr).await;
+    let from = cursor.seq.0 - 20;
+    let w = recent
+        .hello(
+            "t",
+            ticket("carol", "t", Role::Member),
+            "carol-device",
+            Some(Cursor {
+                stream: cursor.stream.clone(),
+                seq: Seq(from),
+            }),
+        )
+        .await;
+    assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+    let next = recent.until(|f| f.seq.is_some()).await.seq.expect("logged");
+    assert_eq!(next.0, from + 1);
+}
+
+#[tokio::test]
+async fn connections_before_hello_have_their_own_quota() {
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    // A quarter of 8: two connections may wait for their hello at once.
+    config.max_connections = 8;
+    let s = start(config).await;
+    let mut first = Client::connect(s.addr).await;
+    let _second = Client::connect(s.addr).await;
+    let refused = tokio_tungstenite::connect_async(format!("ws://{}/v1/live", s.addr)).await;
+    match refused {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status().as_u16(), 503)
+        }
+        other => panic!("expected 503: {other:?}"),
+    }
+    // After its hello the first one counts as a normal connection and frees the slot.
+    let w = first
+        .hello("t", ticket("alice", "t", Role::Owner), "alice-device", None)
+        .await;
+    assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+    let _third = Client::connect(s.addr).await;
+}
+
+#[tokio::test]
+async fn housekeeping_forgets_devices_not_seen_for_long() {
+    let s = start_official().await;
+    let (_a, _) = Client::join(s.addr, "t", "alice", Role::Owner).await;
+    let db = &s.server.state.relay.db;
+    sqlx::query(
+        "INSERT INTO relay_devices (member, device, created_at, last_seen) \
+         VALUES ('gone', 'gone-device', 1, 1)",
+    )
+    .execute(db)
+    .await
+    .unwrap();
+    s.server.state.relay.housekeeping().await;
+    let left: Vec<String> = sqlx::query_scalar("SELECT member FROM relay_devices ORDER BY member")
+        .fetch_all(db)
+        .await
+        .unwrap();
+    assert_eq!(left, vec!["alice".to_owned()]);
+}

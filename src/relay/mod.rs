@@ -46,6 +46,9 @@ pub struct Relay {
     policy: Policy,
     pub limits: HandleLimits,
     max_connections: usize,
+    /// Connections without a valid `hello` yet: at most a quarter of `max_connections`, so
+    /// connections that never sign in cannot take every slot.
+    max_before_hello: usize,
     max_per_member: usize,
     max_per_ip: usize,
     pub connection_max_age: Duration,
@@ -55,6 +58,7 @@ pub struct Relay {
     transcript_retention_ms: u64,
     teams: Mutex<HashMap<String, Arc<Mutex<Team>>>>,
     connections: AtomicUsize,
+    before_hello: AtomicUsize,
     per_member: std::sync::Mutex<HashMap<String, usize>>,
     per_ip: std::sync::Mutex<HashMap<String, usize>>,
     next_conn: AtomicU64,
@@ -85,8 +89,11 @@ impl Relay {
             }),
             limits: HandleLimits {
                 blob_quota_bytes: config.blob_quota_bytes,
+                claim_bytes_per_member: config.claim_bytes_per_member,
+                claim_bytes_per_team: config.claim_bytes_per_team,
             },
             max_connections: config.max_connections,
+            max_before_hello: (config.max_connections / 4).max(1),
             max_per_member: config.max_connections_per_member,
             max_per_ip: config.max_connections_per_ip,
             connection_max_age: Duration::from_secs(config.connection_max_age_s.max(60)),
@@ -95,6 +102,7 @@ impl Relay {
             transcript_retention_ms: config.transcript_retention_days.saturating_mul(86_400_000),
             teams: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),
+            before_hello: AtomicUsize::new(0),
             per_member: std::sync::Mutex::new(HashMap::new()),
             per_ip: std::sync::Mutex::new(HashMap::new()),
             next_conn: AtomicU64::new(1),
@@ -127,6 +135,22 @@ impl Relay {
 
     pub fn release_connection(&self) {
         self.connections.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Takes a slot among the connections still waiting for their first valid `hello`;
+    /// `false` when a quarter of `MAX_CONNECTIONS` is already waiting.
+    pub fn acquire_before_hello(&self) -> bool {
+        let previous = self.before_hello.fetch_add(1, Ordering::AcqRel);
+        if previous >= self.max_before_hello {
+            self.before_hello.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
+
+    /// The connection's first valid `hello`, or its end without one.
+    pub fn release_before_hello(&self) {
+        self.before_hello.fetch_sub(1, Ordering::AcqRel);
     }
 
     pub fn connection_count(&self) -> usize {

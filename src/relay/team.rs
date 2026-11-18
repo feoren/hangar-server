@@ -7,7 +7,7 @@
 //! The caller holds the team lock; thus the order of arrival counts as the truth, and events go
 //! to all receivers in sequence order.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use axum::extract::ws::Utf8Bytes;
@@ -31,7 +31,7 @@ use crate::wire::{
     limits::MAX_WRAPPED_KEYS, Ack, BlobKind, Ciphertext, ClientMessage, Cursor, DeviceList,
     DeviceRemoved, Epoch, ErrorBody, ErrorCode, Holder, KeyRotated, KeyWrapped, KeyedHash,
     MemberId, MemberJoined, MemberLogAppended, MemberLogEntries, MemberRemoved, MemberRoleChanged,
-    Notify as NotifyMessage, OpId, PresenceState, PresenceUpdate, ReservationExpired,
+    Notify as NotifyMessage, OpId, PathHashes, PresenceState, PresenceUpdate, ReservationExpired,
     ReservationExpiring, ResyncRequired, Sealed, Seq, ServerFrame, ServerMessage, SessionKey,
     SessionRef, StreamId, TaskReleaseAnswered, TaskReleaseRequestEnded, TaskReleaseRequested,
     TaskReleased, TaskReserved, TeamId, UnixMillis, Welcome,
@@ -39,6 +39,11 @@ use crate::wire::{
 
 /// Events kept in memory for replay; older ones require a snapshot.
 pub const REPLAY_WINDOW: usize = 2048;
+/// Encoded bytes of the events kept for replay. Without it, 2048 events with notes of 16 KiB
+/// would hold 32 MiB per team; a usual event has a few hundred bytes, so the limit only bites
+/// with large notes or log entries. Older events then leave the window early and a cursor
+/// behind it gets a snapshot (`tooOld`), as the protocol already defines.
+pub const REPLAY_WINDOW_BYTES: usize = 4 * 1024 * 1024;
 /// Remembered operation IDs per team for idempotent retries.
 pub const RECENT_OPS: usize = 4096;
 /// Claims per device.
@@ -147,10 +152,15 @@ pub struct Team {
     team: TeamId,
     policy: Policy,
     log: EventLog<ServerMessage>,
+    /// Sequence number and encoded size of each event in the log's replay window, oldest
+    /// first (the same events as the window; see `REPLAY_WINDOW_BYTES`).
+    window: VecDeque<(Seq, usize)>,
+    window_bytes: usize,
     book: ReservationBook,
     board: ClaimBoard,
-    /// Sessions per device, for the limits (the board does not count them).
-    sessions: HashMap<Holder, HashSet<SessionKey>>,
+    /// Sessions per device with the bytes of their claims, for the limits (the board does not
+    /// count them).
+    sessions: HashMap<Holder, HashMap<SessionKey, usize>>,
     /// Encrypted notes of held tasks and open release requests; the book does not know them,
     /// the events carry them.
     notes: HashMap<KeyedHash, Sealed>,
@@ -241,6 +251,8 @@ impl Team {
             team,
             policy,
             log,
+            window: VecDeque::new(),
+            window_bytes: 0,
             book,
             board: ClaimBoard::new(),
             sessions: HashMap::new(),
@@ -441,7 +453,7 @@ impl Team {
             if let Some(notify) = NotifyMessage::attention(&message, |m| self.member_online(m)) {
                 notifies.push(notify);
             }
-            let seq = message.loggable().then(|| self.log.push(message.clone()));
+            let seq = message.loggable().then(|| self.log_push(message.clone()));
             logged |= seq.is_some();
             numbered.push((seq, message));
         }
@@ -488,6 +500,59 @@ impl Team {
             }
         }
         Ok(())
+    }
+
+    /// Appends a logged event and keeps the replay window within `REPLAY_WINDOW_BYTES`.
+    fn log_push(&mut self, message: ServerMessage) -> Seq {
+        let size = serde_json::to_string(&message).map_or(0, |text| text.len());
+        let seq = self.log.push(message);
+        // The log drops its oldest event at `REPLAY_WINDOW` events; so does the mirror.
+        if self.window.len() == REPLAY_WINDOW {
+            if let Some((_, dropped)) = self.window.pop_front() {
+                self.window_bytes -= dropped;
+            }
+        }
+        self.window.push_back((seq, size));
+        self.window_bytes += size;
+        if self.window_bytes > REPLAY_WINDOW_BYTES {
+            self.shrink_window();
+        }
+        seq
+    }
+
+    /// Drops the oldest events until a quarter of the byte budget is free again (so this runs
+    /// rarely), at least the newest event stays. The crate's log has no way to drop events, so
+    /// it is rebuilt with `EventLog::resume` and the kept events: stream, head and the
+    /// sequence numbers stay the same, nothing is stored differently.
+    fn shrink_window(&mut self) {
+        let target = REPLAY_WINDOW_BYTES / 4 * 3;
+        while self.window_bytes > target && self.window.len() > 1 {
+            if let Some((_, dropped)) = self.window.pop_front() {
+                self.window_bytes -= dropped;
+            }
+        }
+        let head = self.log.head();
+        let stream = self.log.stream().clone();
+        let from = Cursor {
+            stream: stream.clone(),
+            seq: Seq(head.0.saturating_sub(self.window.len() as u64)),
+        };
+        let kept: Vec<ServerMessage> = match self.log.replay(Some(&from)) {
+            Replay::Events(events) => events.into_iter().map(|(_, m)| m.clone()).collect(),
+            Replay::Resync(_) => Vec::new(),
+        };
+        if kept.len() != self.window.len() {
+            // Never expected: start with an empty window (every cursor behind gets a snapshot).
+            tracing::warn!("replay window out of step, emptied");
+            self.window.clear();
+            self.window_bytes = 0;
+        }
+        let start = Seq(head.0 - self.window.len() as u64);
+        let mut log = EventLog::resume(stream, start, REPLAY_WINDOW);
+        for message in kept.into_iter().take(self.window.len()) {
+            log.push(message);
+        }
+        self.log = log;
     }
 
     /// A removed device in its grace period only gets what leads to its removal:
@@ -1218,19 +1283,31 @@ impl Team {
                 (events, reply, None)
             }
             ClientMessage::ClaimSet(m) => {
-                let total: usize = self.sessions.values().map(HashSet::len).sum();
+                let bytes = claim_bytes(&m.files, m.detail.as_ref());
+                let total: usize = self.sessions.values().map(HashMap::len).sum();
                 let own = self.sessions.get(&who);
-                let known = own.is_some_and(|s| s.contains(&m.session));
-                if !known
+                // A session that is replaced frees its old bytes.
+                let previous = own.and_then(|s| s.get(&m.session)).copied();
+                let freed = previous.unwrap_or(0);
+                let team_bytes: usize = self.sessions.values().flat_map(HashMap::values).sum();
+                let member_bytes: usize = self
+                    .sessions
+                    .iter()
+                    .filter(|(holder, _)| holder.member == who.member)
+                    .flat_map(|(_, s)| s.values())
+                    .sum();
+                let too_many = previous.is_none()
                     && (total >= MAX_SESSIONS_PER_TEAM
-                        || own.map_or(0, HashSet::len) >= MAX_SESSIONS_PER_DEVICE)
-                {
+                        || own.map_or(0, HashMap::len) >= MAX_SESSIONS_PER_DEVICE);
+                let too_large = member_bytes - freed + bytes > limits.claim_bytes_per_member
+                    || team_bytes - freed + bytes > limits.claim_bytes_per_team;
+                if too_many || too_large {
                     (Vec::new(), Some(Err(error(ErrorCode::Limit))), None)
                 } else {
                     self.sessions
                         .entry(who.clone())
                         .or_default()
-                        .insert(m.session.clone());
+                        .insert(m.session.clone(), bytes);
                     let session = SessionRef {
                         holder: who.clone(),
                         session: m.session,
@@ -1584,4 +1661,12 @@ fn log_refused(refused: &LogError) -> Reply {
 #[derive(Debug, Clone, Copy)]
 pub struct HandleLimits {
     pub blob_quota_bytes: u64,
+    /// Claim bytes per member and per team (`Config::claim_bytes_per_member`, `_per_team`).
+    pub claim_bytes_per_member: usize,
+    pub claim_bytes_per_team: usize,
+}
+
+/// Memory a claim holds in the board: its file hashes and the encrypted detail.
+fn claim_bytes(files: &[PathHashes], detail: Option<&Sealed>) -> usize {
+    std::mem::size_of_val(files) + detail.map_or(0, |d| d.data.as_str().len())
 }

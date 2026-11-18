@@ -125,6 +125,11 @@ pub struct Config {
     pub reservation_inactivity_s: u64,
     pub reservation_warn_s: u64,
     pub blob_quota_bytes: u64,
+    /// Memory budget for the claims (`claim.set`) of one member in a team, in bytes (see
+    /// `DEFAULT_CLAIM_BYTES_PER_MEMBER`); not configurable through the environment.
+    pub claim_bytes_per_member: usize,
+    /// Memory budget for all claims of a team, in bytes (`DEFAULT_CLAIM_BYTES_PER_TEAM`).
+    pub claim_bytes_per_team: usize,
     pub transcript_retention_days: u64,
     pub log_json: bool,
     // Self-hosting
@@ -172,6 +177,16 @@ pub const DEFAULT_HELLO_TIMEOUT_MS: u64 = hangar_team_protocol::close::HELLO_TIM
 /// How long a removed device may still read the membership log, so the app can verify its
 /// removal against the signed entry.
 pub const DEFAULT_REMOVED_GRACE_MS: u64 = 5_000;
+
+/// Claims of one member in a team. The largest `claim.set` takes about 240 KB in memory (1000
+/// files and a detail of 175,000 characters), so 4 MiB hold 17 of them; a usual claim (a few
+/// dozen files, a few KiB of detail) needs a few KiB, so the 64 sessions per device stay far
+/// below it.
+pub const DEFAULT_CLAIM_BYTES_PER_MEMBER: usize = 4 * 1024 * 1024;
+
+/// Claims of a whole team: eight members at the member budget. Without it, 2000 sessions of
+/// the largest kind would hold about 480 MB.
+pub const DEFAULT_CLAIM_BYTES_PER_TEAM: usize = 32 * 1024 * 1024;
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name)
@@ -410,6 +425,8 @@ impl Config {
             reservation_inactivity_s: number("RESERVATION_INACTIVITY_SECS", 1800)?,
             reservation_warn_s: number("RESERVATION_WARN_SECS", 300)?,
             blob_quota_bytes: number("BLOB_QUOTA_BYTES", 64 * 1024 * 1024)?,
+            claim_bytes_per_member: DEFAULT_CLAIM_BYTES_PER_MEMBER,
+            claim_bytes_per_team: DEFAULT_CLAIM_BYTES_PER_TEAM,
             transcript_retention_days: number("TRANSCRIPT_RETENTION_DAYS", 90)?,
             log_json: var("LOG_FORMAT").as_deref() != Some("pretty"),
             server_secret,
@@ -463,6 +480,8 @@ impl Config {
             reservation_inactivity_s: 1800,
             reservation_warn_s: 300,
             blob_quota_bytes: 1024 * 1024,
+            claim_bytes_per_member: DEFAULT_CLAIM_BYTES_PER_MEMBER,
+            claim_bytes_per_team: DEFAULT_CLAIM_BYTES_PER_TEAM,
             transcript_retention_days: 90,
             log_json: false,
             server_secret: b"test-secret-test-secret-test-secret!".to_vec(),

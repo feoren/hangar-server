@@ -69,6 +69,9 @@ An invalid document changes nothing (not even the cursor).
   role change, 4403 on removal). Otherwise a downgraded member could use a previously hoarded,
   still valid ticket to get the old role back, for up to `CONNECTION_MAX_AGE_SECS`. The floor
   also stays in place after readmission.
+- This also applies to projects the relay has never seen: the entry creates the team's row
+  so the floor is stored durably and survives restarts. Revocations only come signed from the
+  website, so these rows grow with the website's projects, not with outside input.
 
 ## Configuration
 

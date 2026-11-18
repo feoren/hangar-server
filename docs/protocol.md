@@ -16,7 +16,9 @@ describes how the relay runs it. Open requests to the crate:
   already rejected by the WebSocket reader). Binary frames: `err badRequest`.
 - The server pings every 25 s; after 60 s without any sign of life it disconnects (close 1001).
 - Limits: `MAX_CONNECTIONS` in total (200) and `MAX_CONNECTIONS_PER_IP` (20) per client address (IPv6 per /64)
-  answer with 503 before the upgrade; `MAX_CONNECTIONS_PER_MEMBER` per member gives `err limit`;
+  answer with 503 before the upgrade; so do connections still waiting for their first valid
+  `hello` beyond a quarter of `MAX_CONNECTIONS` (at least 1), so connections that never sign in
+  cannot take every slot (after the first valid ticket the connection counts only in the total); `MAX_CONNECTIONS_PER_MEMBER` per member gives `err limit`;
   30 frames/s per connection with a burst of 120 (`err rateLimited` with `retryAfterMs`); more than
   20 malformed frames or rejected `hello`s: close 1008.
 - Without a valid `hello` within `close::HELLO_TIMEOUT_SECS` (15 s) the server closes with
@@ -37,7 +39,7 @@ An idle connection needs a few dozen KiB (WebSocket buffers start at 16 KiB). Ev
 can hold a frame of up to 1 MiB in its read buffer, and its outgoing queue is limited to 512
 frames and 4 MiB; a client that does not read fast enough is closed with 1013. The catch-up
 after a `hello` (replay or snapshot, see below) goes into the queue as a single entry and does
-not count against these limits: it is bounded by the replay window or the team's state and comes
+not count against these limits: it is bounded by the replay window (4 MiB) or the team's state and comes
 once per joined team, so a client with a long replay is not closed before it could read. Plan about 2 MiB
 per connection plus 64 MiB for the process: with the default of 200 connections that fits the
 Compose limit of 512 MiB. If you raise `MAX_CONNECTIONS`, raise the memory limit in the same
@@ -102,7 +104,11 @@ new ticket.
 
 ## Event log
 
-- Sequence numbers per team starting at 1 (`EventLog`), with a window of the last 2048 events in memory.
+- Sequence numbers per team starting at 1 (`EventLog`), with a window of the last 2048 events in memory,
+  and at most 4 MiB of them (`REPLAY_WINDOW_BYTES`, the encoded events): above that the oldest
+  leave the window early, down to 3 MiB, and a cursor behind them gets a snapshot (`tooOld`).
+  Usual events have a few hundred bytes; the limit only bites with many large notes or log
+  entries.
 - The log position (`EventLog::position`: stream and head) is stored together with the book in
   `relay_team_state`. On load, `EventLog::resume` continues the stream: a client exactly at the
   stored head carries on without a snapshot, an older cursor gets `tooOld` (the
@@ -190,7 +196,10 @@ The app verifies the log, discards its team identity and signs in with a new dev
 The crate's `ClaimBoard`: hashes `{area, file}` per file, `sameFile` for an identical file hash
 (with the other side's encrypted `detail`), `sameArea` for an identical area; only for the same
 `repo` and the same epoch, never two sessions of the same holder. Claims exist only in memory
-(2000 sessions per team, 64 per device), remain for 24 h after a disconnect and then expire; on
+(2000 sessions per team, 64 per device, and a byte budget: file hashes plus encrypted `detail`
+of all sessions of a member at most 4 MiB, of the whole team at most 32 MiB; the largest
+`claim.set` takes about 240 KB, so a member fits 17 of them. Beyond a limit `err limit`, and a
+replaced session counts with its new size), remain for 24 h after a disconnect and then expire; on
 leaving, `clear_member`, on removing a device, `clear_device`. Deliberately not persisted:
 after a restart the board is empty, and every client resends `claim.set` for its sessions after
 every `welcome`.

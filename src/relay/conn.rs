@@ -61,6 +61,13 @@ pub async fn upgrade(
         state.relay.release_ip(&ip_key);
         return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
     }
+    // Until its first valid `hello` the connection also holds a slot of the smaller quota for
+    // connections that have not signed in (`run` frees it).
+    if !state.relay.acquire_before_hello() {
+        state.relay.release_connection();
+        state.relay.release_ip(&ip_key);
+        return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
+    }
     let relay = state.relay.clone();
     let shutdown = state.shutdown.clone();
     // Small buffers: tungstenite reserves 128 KiB per connection by default, which alone fills
@@ -73,6 +80,7 @@ pub async fn upgrade(
             let relay = relay.clone();
             let ip_key = ip_key.clone();
             move |_| {
+                relay.release_before_hello();
                 relay.release_connection();
                 relay.release_ip(&ip_key);
             }
@@ -202,6 +210,8 @@ async fn run(
         at: Instant::now(),
     };
     let mut bad = 0u32;
+    // Still holds a slot of the quota before `hello` (see `upgrade`).
+    let mut before_hello = true;
     let close: Option<(u16, &'static str)> = loop {
         // Maximum age per team since the last checked ticket; `ticket.renew` restarts it.
         let oldest = joined
@@ -357,7 +367,12 @@ async fn run(
                     )
                     .await
                 {
-                    Ok(ok) => ok,
+                    Ok(ok) => {
+                        if std::mem::take(&mut before_hello) {
+                            relay.release_before_hello();
+                        }
+                        ok
+                    }
                     Err(code) => {
                         send(&tx, reply_err(code));
                         // Rejected tickets count like broken frames (no guessing in a row).
@@ -537,6 +552,9 @@ async fn run(
 
     for (_, entry) in joined.drain() {
         leave(&relay, conn, entry).await;
+    }
+    if before_hello {
+        relay.release_before_hello();
     }
     if let Some(member) = member {
         relay.release_member(&member);

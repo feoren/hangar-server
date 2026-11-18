@@ -95,7 +95,11 @@ commands: `docker exec hangar-server hangar-server teams`.
 - **Logs:** JSON on stdout, fine-grained control via `RUST_LOG`.
 - **Monitoring:** `/health` from outside (uptime monitor) and `HEALTHCHECK` in the image.
 - **Memory:** limited to 512 MiB (200 connections with up to 1 MiB read buffer each,
-  docs/protocol.md); unused teams are unloaded after 10 min.
+  docs/protocol.md); unused teams are unloaded after 10 min. Per team, claims take at most
+  32 MiB and the replay window at most 4 MiB.
+- **Housekeeping** (hourly): used ticket IDs after expiry, processed revocations after 30 days,
+  transcripts after `TRANSCRIPT_RETENTION_DAYS`, and devices in `relay_devices` not seen for
+  90 days (the table is only written, every `hello` refreshes it).
 
 ## Running on a Strato V-Server
 

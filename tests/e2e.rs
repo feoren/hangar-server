@@ -776,3 +776,27 @@ async fn last_log_page_of_one_team_keeps_the_connection_in_the_other_team() {
         Some(ErrorCode::Forbidden)
     );
 }
+
+#[tokio::test]
+async fn key_packages_are_numbered_without_gaps() {
+    let s = start_official().await;
+    let (mut log, alice, mut a, _bob, _b) = team(&s).await;
+    let (rotate, _) = log.rotate(&alice);
+    assert!(is_ack(
+        &a.request("t", ClientMessage::KeyRotate(rotate.clone()))
+            .await
+    ));
+    log.accept_rotation(&rotate, &alice.holder);
+    let (second, _) = log.rotate(&alice);
+    assert!(is_ack(
+        &a.request("t", ClientMessage::KeyRotate(second)).await
+    ));
+    let seqs: Vec<i64> =
+        sqlx::query_scalar("SELECT seq FROM relay_key_packages WHERE team_id = 't' ORDER BY seq")
+            .fetch_all(&s.server.state.relay.db)
+            .await
+            .unwrap();
+    let expected: Vec<i64> = (1..=seqs.len() as i64).collect();
+    assert_eq!(seqs.len(), 2 * rotate.wrapped.len());
+    assert_eq!(seqs, expected);
+}

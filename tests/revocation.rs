@@ -326,3 +326,63 @@ async fn hoarded_ticket_does_not_restore_the_old_role() {
         "{welcome:?}"
     );
 }
+
+/// A revocation for a project this relay has never seen is stored durably: after a restart a
+/// ticket issued before it still does not open the team.
+#[tokio::test]
+async fn revocation_for_unknown_project_survives_a_restart() {
+    let mock: Shared = Arc::default();
+    let url = website(mock.clone()).await;
+    let config = Config::for_tests(IdentityMode::Official, website_keys());
+    let s = start(config.clone()).await;
+    let at = now_s() - 5;
+    mock.lock().unwrap().pages.push((
+        "0".into(),
+        list(
+            0,
+            3,
+            false,
+            json!([
+                {"rid": 1, "prj": 999, "sub": 2001, "kind": "member_removed", "at": at},
+                {"rid": 2, "prj": 998, "sub": 2002, "kind": "role_changed", "role": "member", "at": at},
+                {"rid": 3, "prj": 997, "sub": 2003, "kind": "role_changed", "at": at}
+            ]),
+            &website_key(),
+        ),
+    ));
+    assert_eq!(poller(&s, &url, TOKEN).poll_once().await.unwrap(), 3);
+
+    // Restart on the same data (as in tests/persistence.rs).
+    let _ = s.server.shutdown.send(true);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let s = start(config).await;
+
+    let before = |member: &str, team: &str, role| {
+        let mut c = claims(member, team, role);
+        c.iat = at - 10;
+        c.exp = now_s() + 30;
+        sign_ticket(&c, &website_key())
+    };
+    for (member, team, role) in [
+        ("2001", "999", Role::Member),
+        ("2002", "998", Role::Admin),
+        ("2003", "997", Role::Admin),
+    ] {
+        let mut old = Client::connect(s.addr).await;
+        let refused = old
+            .hello(team, before(member, team, role), "old-device", None)
+            .await;
+        assert!(
+            matches!(&refused.message, ServerMessage::Err(e) if e.code == ErrorCode::Forbidden),
+            "{team}: {refused:?}"
+        );
+        let mut fresh = Client::connect(s.addr).await;
+        let welcome = fresh
+            .hello(team, ticket(member, team, Role::Member), "new-device", None)
+            .await;
+        assert!(
+            matches!(welcome.message, ServerMessage::Welcome(_)),
+            "{team}: {welcome:?}"
+        );
+    }
+}

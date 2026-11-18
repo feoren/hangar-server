@@ -32,6 +32,9 @@ pub struct TeamRow {
 }
 
 /// Loads or creates the team, including stored state (book, log position, notes).
+/// Devices in `relay_devices` not seen for this long are deleted by `purge`.
+pub const DEVICE_RETENTION_DAYS: i64 = 90;
+
 pub async fn load_team(db: &Db, team: &str, now: u64) -> Result<TeamRow> {
     let stream = random_id();
     sqlx::query(
@@ -530,6 +533,16 @@ pub async fn purge(db: &Db, now_s: i64, transcript_cutoff_ms: u64) -> Result<()>
         .bind(now_s.saturating_sub(30 * 86_400).saturating_mul(1000))
         .execute(db)
         .await?;
+    // Nothing reads `relay_devices` (device keys and blocks live per team in their own
+    // tables); every `hello` refreshes `last_seen`, so only devices gone for long go.
+    sqlx::query("DELETE FROM relay_devices WHERE last_seen < ?")
+        .bind(
+            now_s
+                .saturating_sub(DEVICE_RETENTION_DAYS * 86_400)
+                .saturating_mul(1000),
+        )
+        .execute(db)
+        .await?;
     let mut tx = begin_write(db).await?;
     sqlx::query(
         "UPDATE relay_teams SET blob_bytes = blob_bytes - COALESCE((SELECT SUM(size) FROM relay_blobs b \
@@ -734,6 +747,17 @@ pub enum EpochChange {
     AlreadyWrapped,
 }
 
+/// The `seq` for the team's next key package (order of arrival); read once per transaction
+/// and counted up by the caller for each stored package.
+async fn next_package_seq(tx: &mut Tx, team: &str) -> Result<i64> {
+    sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) + 1 FROM relay_key_packages WHERE team_id = ?")
+        .bind(team)
+        .fetch_one(&mut **tx)
+        .await
+}
+
+/// Stores a package with `seq`; `false` if there already is one for the sender, target and
+/// epoch (then `seq` stays unused).
 async fn insert_package(
     tx: &mut Tx,
     team: &str,
@@ -741,13 +765,8 @@ async fn insert_package(
     wrapped: &WrappedKey,
     by: &Holder,
     now: u64,
+    seq: i64,
 ) -> Result<bool> {
-    let seq: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(seq), 0) + 1 FROM relay_key_packages WHERE team_id = ?",
-    )
-    .bind(team)
-    .fetch_one(&mut **tx)
-    .await?;
     let done = sqlx::query(
         "INSERT INTO relay_key_packages (team_id, epoch, member, device, by_member, by_device, data, created_at, seq) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
@@ -796,8 +815,11 @@ pub async fn rotate_epoch(
         .bind(i64_of(now))
         .execute(&mut *tx)
         .await?;
+    let mut seq = next_package_seq(&mut tx, team).await?;
     for w in wrapped {
-        insert_package(&mut tx, team, epoch, w, by, now).await?;
+        if insert_package(&mut tx, team, epoch, w, by, now, seq).await? {
+            seq += 1;
+        }
     }
     sqlx::query("UPDATE relay_teams SET epoch = ? WHERE id = ?")
         .bind(i64::from(epoch.0))
@@ -854,7 +876,8 @@ pub async fn wrap_key(
     if i64::from(epoch.0) != current || current == 0 {
         return Ok(EpochChange::WrongEpoch);
     }
-    if !insert_package(&mut tx, team, epoch, wrapped, by, now).await? {
+    let seq = next_package_seq(&mut tx, team).await?;
+    if !insert_package(&mut tx, team, epoch, wrapped, by, now, seq).await? {
         return Ok(EpochChange::AlreadyWrapped);
     }
     tx.commit().await?;
