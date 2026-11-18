@@ -1110,3 +1110,78 @@ async fn timer_does_not_wait_for_a_busy_team() {
     let ticked = tokio::time::timeout(std::time::Duration::from_secs(1), relay.tick()).await;
     assert!(ticked.is_ok(), "the timer waited for the busy team");
 }
+
+#[tokio::test]
+async fn team_deleted_while_loading_leaves_no_rows() {
+    let s = start_official().await;
+    let relay = s.server.state.relay.clone();
+    relay.delay_team_loads(500);
+    let addr = s.addr;
+    let hello = tokio::spawn(async move {
+        let mut c = Client::connect(addr).await;
+        c.hello(
+            "gone",
+            ticket("alice", "gone", Role::Owner),
+            "alice-device",
+            None,
+        )
+        .await
+    });
+    // The load is waiting in its delay; the team is deleted meanwhile.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    relay.close_team("gone").await.unwrap();
+    let answer = hello.await.unwrap();
+    assert!(
+        matches!(answer.message, ServerMessage::Err(_)),
+        "{answer:?}"
+    );
+    for query in [
+        "SELECT COUNT(*) FROM relay_teams WHERE id = 'gone'",
+        "SELECT COUNT(*) FROM relay_team_state WHERE team_id = 'gone'",
+    ] {
+        let rows: i64 = sqlx::query_scalar(query)
+            .fetch_one(&relay.db)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn timer_waits_for_a_team_skipped_three_times() {
+    let s = start_official().await;
+    let (_a, _) = Client::join(s.addr, "a", "alice", Role::Owner).await;
+    let relay = s.server.state.relay.clone();
+    let team = relay.team("a").await.unwrap();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let (held, is_held) = tokio::sync::oneshot::channel::<()>();
+    let holder = tokio::spawn(async move {
+        let _busy = team.lock().await;
+        let _ = held.send(());
+        let _ = released.await;
+    });
+    is_held.await.unwrap();
+    let quick = std::time::Duration::from_millis(500);
+    for round in 1..=2 {
+        let started = std::time::Instant::now();
+        relay.tick().await;
+        assert!(started.elapsed() < quick, "tick {round} waited");
+    }
+    // Third tick: the team was skipped twice, so this tick waits for its lock.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = release.send(());
+    });
+    let started = std::time::Instant::now();
+    relay.tick().await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= std::time::Duration::from_millis(250),
+        "the third tick did not wait for the team ({waited:?})"
+    );
+    holder.await.unwrap();
+    // Caught up: the next tick does not wait.
+    let started = std::time::Instant::now();
+    relay.tick().await;
+    assert!(started.elapsed() < quick);
+}

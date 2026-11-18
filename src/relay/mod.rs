@@ -61,6 +61,8 @@ pub struct Relay {
     teams: Mutex<HashMap<String, Arc<TeamCell>>>,
     connections: AtomicUsize,
     before_hello: AtomicUsize,
+    /// Ticks skipped in a row per team because its lock was held (see `tick`).
+    skipped_ticks: std::sync::Mutex<HashMap<String, u32>>,
     /// Test hook: every team load waits this long first (milliseconds, 0 in operation).
     load_delay_ms: AtomicU64,
     per_member: std::sync::Mutex<HashMap<String, usize>>,
@@ -107,6 +109,7 @@ impl Relay {
             teams: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),
             before_hello: AtomicUsize::new(0),
+            skipped_ticks: std::sync::Mutex::new(HashMap::new()),
             load_delay_ms: AtomicU64::new(0),
             per_member: std::sync::Mutex::new(HashMap::new()),
             per_ip: std::sync::Mutex::new(HashMap::new()),
@@ -243,7 +246,9 @@ impl Relay {
     /// entry happens under the map's lock; loading (queries, verifying the log, the first
     /// write) runs in the entry's cell, so `hello` for other teams, the timer and the
     /// revocation list do not wait for it. Concurrent callers for the same team wait for the
-    /// same load. A failed load leaves the cell empty and removes it; the next call tries again.
+    /// same load. A failed load leaves the cell empty but in the map: a caller already waiting
+    /// on it tries again in the same cell (removing it would let a third caller start a
+    /// second load in a new one); the timer drops empty cells nobody holds.
     pub async fn team(&self, id: &str) -> Result<Arc<Mutex<Team>>, sqlx::Error> {
         let cell = self
             .teams
@@ -263,22 +268,23 @@ impl Relay {
             })
             .await
             .cloned();
-        let mut teams = self.teams.lock().await;
+        let teams = self.teams.lock().await;
         let current = teams.get(id).is_some_and(|c| Arc::ptr_eq(c, &cell));
         match loaded {
             Ok(team) if current => Ok(team),
             Ok(team) => {
-                // Deleted (`close_team`) while it was loading.
+                // Deleted (`close_team`) while it was loading. The load may have created the
+                // team's row after the delete; it goes again, unless someone has loaded the
+                // team anew since (then the row is theirs).
+                let reloaded = teams.contains_key(id);
                 drop(teams);
                 team.lock().await.close_all();
+                if !reloaded {
+                    self.delete_team_rows(id).await?;
+                }
                 Err(sqlx::Error::RowNotFound)
             }
-            Err(failure) => {
-                if current && cell.get().is_none() {
-                    teams.remove(id);
-                }
-                Err(failure)
-            }
+            Err(failure) => Err(failure),
         }
     }
 
@@ -416,6 +422,11 @@ impl Relay {
         if let Some(team) = cell.as_ref().and_then(|cell| cell.get()) {
             team.lock().await.close_all();
         }
+        self.delete_team_rows(team_id).await
+    }
+
+    /// Deletes the team's row; everything else of the team goes with it (`ON DELETE CASCADE`).
+    async fn delete_team_rows(&self, team_id: &str) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM relay_teams WHERE id = ?")
             .bind(team_id)
             .execute(&self.db)
@@ -424,31 +435,34 @@ impl Relay {
     }
 
     /// Timer: expiries and warnings, unloading unused teams. A team whose lock is held right
-    /// now (an intent, a slow write) is skipped and gets its tick 10 s later, so it does not
-    /// hold up the others. Its own intents meanwhile apply the book's due timing events
-    /// anyway (`Applied::timing`).
+    /// now (an intent, a slow write) is skipped, so it does not hold up the others. After
+    /// `MAX_SKIPPED_TICKS` skips in a row the timer waits for its lock, after all other teams:
+    /// expiries and warnings for others and the expiry of offline claims only run here.
     pub async fn tick(&self) {
         let now = now_ms();
-        let teams: Vec<Arc<Mutex<Team>>> = self
+        let teams: Vec<(String, Arc<Mutex<Team>>)> = self
             .teams
             .lock()
             .await
-            .values()
-            .filter_map(|cell| cell.get().cloned())
+            .iter()
+            .filter_map(|(id, cell)| Some((id.clone(), cell.get()?.clone())))
             .collect();
-        let mut busy = 0usize;
-        for team in teams {
-            let Ok(mut team) = team.try_lock() else {
-                busy += 1;
+        let mut overdue = Vec::new();
+        for (id, team) in teams {
+            let Ok(mut guard) = team.try_lock() else {
+                let skipped = self.note_skipped(&id);
+                if skipped >= MAX_SKIPPED_TICKS {
+                    overdue.push((id, team));
+                } else {
+                    tracing::debug!(skipped, "busy team skipped by the timer");
+                }
                 continue;
             };
-            if let Err(error) = team.tick(&self.db, now).await {
-                tracing::error!(%error, "team timer failed");
-            }
-            self.forward_attention(&mut team);
+            self.tick_team(&id, &mut guard, now).await;
         }
-        if busy > 0 {
-            tracing::debug!(busy, "busy teams skipped by the timer");
+        for (id, team) in overdue {
+            let mut guard = team.lock().await;
+            self.tick_team(&id, &mut guard, now_ms()).await;
         }
         let mut map = self.teams.lock().await;
         map.retain(|_, cell| {
@@ -460,6 +474,29 @@ impl Relay {
                         || team.try_lock().map(|t| !t.idle(now)).unwrap_or(true)
                 })
         });
+        if let Ok(mut skipped) = self.skipped_ticks.lock() {
+            skipped.retain(|id, _| map.contains_key(id));
+        }
+    }
+
+    async fn tick_team(&self, id: &str, team: &mut Team, now: u64) {
+        if let Ok(mut skipped) = self.skipped_ticks.lock() {
+            skipped.remove(id);
+        }
+        if let Err(error) = team.tick(&self.db, now).await {
+            tracing::error!(%error, "team timer failed");
+        }
+        self.forward_attention(team);
+    }
+
+    /// Counts a skipped tick of the team; returns the skips in a row.
+    fn note_skipped(&self, id: &str) -> u32 {
+        let Ok(mut skipped) = self.skipped_ticks.lock() else {
+            return MAX_SKIPPED_TICKS;
+        };
+        let count = skipped.entry(id.to_owned()).or_insert(0);
+        *count += 1;
+        *count
     }
 
     /// Waits until every live connection has ended (after the shutdown signal they close with
@@ -498,6 +535,9 @@ impl Relay {
         });
     }
 }
+
+/// Skipped ticks in a row after which the timer waits for a team's lock.
+const MAX_SKIPPED_TICKS: u32 = 3;
 
 /// A team's entry in the map: empty while it loads.
 type TeamCell = OnceCell<Arc<Mutex<Team>>>;

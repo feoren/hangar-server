@@ -31,10 +31,10 @@ pub struct TeamRow {
     pub state: Option<StoredState>,
 }
 
-/// Loads or creates the team, including stored state (book, log position, notes).
 /// Devices in `relay_devices` not seen for this long are deleted by `purge`.
 pub const DEVICE_RETENTION_DAYS: i64 = 90;
 
+/// Loads or creates the team, including stored state (book, log position, notes).
 pub async fn load_team(db: &Db, team: &str, now: u64) -> Result<TeamRow> {
     let stream = random_id();
     sqlx::query(

@@ -39,8 +39,9 @@ An idle connection needs a few dozen KiB (WebSocket buffers start at 16 KiB). Ev
 can hold a frame of up to 1 MiB in its read buffer, and its outgoing queue is limited to 512
 frames and 4 MiB; a client that does not read fast enough is closed with 1013. The catch-up
 after a `hello` (replay or snapshot, see below) goes into the queue as a single entry and does
-not count against these limits: it is bounded by the replay window (4 MiB) or the team's state and comes
-once per joined team, so a client with a long replay is not closed before it could read. Plan about 2 MiB
+not count against these limits but against its own budget of 16 MiB per connection (four teams
+with a full replay window of 4 MiB): a client with a long replay is not closed before it could
+read, and one that joins many teams without reading is closed with 1013. Plan about 2 MiB
 per connection plus 64 MiB for the process: with the default of 200 connections that fits the
 Compose limit of 512 MiB. If you raise `MAX_CONNECTIONS`, raise the memory limit in the same
 proportion; at startup the server reads the cgroup memory limit and warns when
