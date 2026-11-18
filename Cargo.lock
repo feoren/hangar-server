@@ -731,7 +731,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek 2.2.0",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hangar-team-crypto",
  "hangar-team-protocol",
  "hmac 0.12.1",
