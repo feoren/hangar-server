@@ -104,7 +104,9 @@ Image: `docker build -t hangar-server .`; for amd64 and arm64:
    No `latest` tag. From the same build it takes the static binaries and creates the GitHub
    release with `hangar-server-x86_64-linux-musl`, `hangar-server-aarch64-linux-musl`,
    `install.sh`, `docker-compose.yml` and `SHA256SUMS`; `releases/latest/download/...` then
-   points to them.
+   points to them. Image and files carry a signed build provenance (Sigstore); check it with
+   `gh attestation verify oci://ghcr.io/feoren/hangar-server:<version> -R feoren/hangar-server`
+   or `gh attestation verify <file> -R feoren/hangar-server`.
 4. Only before the first release under a package name (`hangar-server` since 0.5.0): in the
    package settings on GitHub, set the visibility to public so that `docker pull` works without
    signing in.

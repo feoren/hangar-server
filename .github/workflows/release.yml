@@ -48,6 +48,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # Signed build provenance (Sigstore) for the image and the binaries.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -78,7 +81,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # The source label links the package to this repository on GitHub.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - name: Image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -92,6 +97,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Verify with: gh attestation verify oci://ghcr.io/feoren/hangar-server:<version> -R feoren/hangar-server
+      - name: Image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.version.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
       # The binary stage of the same Dockerfile, served from the cache of the image build.
       - name: Binaries
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -102,9 +115,7 @@ jobs:
           outputs: type=local,dest=out
           cache-from: type=gha
 
-      - name: Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Assets
         run: |
           mkdir dist
           cp out/linux_amd64/hangar-server dist/hangar-server-x86_64-linux-musl
@@ -112,4 +123,18 @@ jobs:
           cp install.sh docker-compose.yml dist/
           (cd dist && sha256sum hangar-server-* install.sh docker-compose.yml > SHA256SUMS)
           cat dist/SHA256SUMS
+
+      # Verify with: gh attestation verify <file> -R feoren/hangar-server
+      - name: Asset provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/hangar-server-*
+            dist/install.sh
+            dist/docker-compose.yml
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
