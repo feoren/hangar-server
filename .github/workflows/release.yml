@@ -7,7 +7,7 @@
 # There is deliberately no "latest" tag; installations name an exact version.
 #
 # The same build also yields the static binaries; they go to a GitHub release together with
-# SHA256SUMS, install.sh and docker-compose.yml (README, "Set up your own server").
+# SHA256SUMS, install.sh and docker-compose.yml (README, "Quick start" and "Step by step").
 name: Release image
 
 on:
