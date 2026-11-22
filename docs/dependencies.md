@@ -8,8 +8,8 @@ for the Unicode tables documented by the app).
 
 | Crate | Version | License | Purpose and rationale | Alternative |
 | --- | --- | --- | --- | --- |
-| hangar-team-crypto | copy from `79c68ca` (`vendor/`) | MIT | Verification of the membership log, rotations, device removals and key packages (step E); owned by the app, no secrets in the relay. Brings in `hpke` 0.15, `chacha20poly1305` 0.11, `ed25519-dalek` 3, `hkdf` 0.13, `getrandom` 0.4, `data-encoding` 2 (all MIT/Apache-2.0 or BSD-3-Clause/MIT) | own verification (a second source for the same rules) |
-| hangar-team-protocol | copy from `79c68ca` (`vendor/`) | MIT | Wire format, keyed hashes, reservation, claims, log, E2E rules; owned by the app (step C), one source for both sides. Pinned via `git`/`rev` instead of `path`, so that uncommitted work in the app's worktree does not change the server | `path` to the worktree (development only) |
+| hangar-team-crypto | copy in `vendor/` (origin in its `ORIGIN.md`) | MIT | Verification of the membership log, rotations, device removals and key packages (step E); owned by the app, no secrets in the relay. Brings in `hpke` 0.15, `chacha20poly1305` 0.11, `ed25519-dalek` 3, `hkdf` 0.13, `getrandom` 0.4, `data-encoding` 2 (all MIT/Apache-2.0 or BSD-3-Clause/MIT) | own verification (a second source for the same rules) |
+| hangar-team-protocol | copy in `vendor/` (origin in its `ORIGIN.md`) | MIT | Wire format, keyed hashes, reservation, claims, log, E2E rules; owned by the app (step C), one source for both sides. Pinned via `git`/`rev` instead of `path`, so that uncommitted work in the app's worktree does not change the server | `path` to the worktree (development only) |
 | axum | 0.8.9 | MIT | HTTP and WebSocket, required by the plan; tokio project, actively maintained | actix-web (own runtime), hyper directly (a lot of custom code) |
 | tokio | 1.54 | MIT | Runtime, timers, signals; the standard in the Rust ecosystem | smol (smaller ecosystem) |
 | sqlx | 0.9.0 | MIT/Apache-2.0 | SQLite (WAL), migrations (`migrate!` embeds `migrations/`); required by the plan; `sqlite-bundled` builds SQLite in (static binary) | rusqlite (synchronous, own pooling) |

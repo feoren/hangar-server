@@ -24,7 +24,7 @@ src/
                             account (/account/devices), pages (browser pages)
   mail/                     sending (SMTP/log/none), templates, texts in 12 languages
   http/                     router, security headers, rate limiting
-tests/                      relay.rs, identity.rs, account_api.rs, vectors.rs (integration tests)
+tests/                      relay.rs, notes_keys.rs, identity.rs, account_api.rs, vectors.rs (integration tests)
 testdata/                   test vectors for tickets and licenses
 tools/php/verify_vectors.php  cross-check of the vectors with PHP/libsodium
 docs/                       formats, protocol, wishes for the protocol crate, security, dependencies
@@ -36,8 +36,8 @@ tools/check-versions.sh     default versions in install.sh, docker-compose.yml, 
 ### The app's crates (protocol and crypto)
 
 Two crates belong to the app (MIT) and are kept as **fixed, unmodified copies** under `vendor/`,
-included as path dependencies (origin and commit per crate in `ORIGIN.md`, currently
-`79c68ca`). This way the image builds without access to the app repository or GitHub.
+included as path dependencies (origin and commit per crate in `ORIGIN.md`; currently the
+state with protocol version 2). This way the image builds without access to the app repository or GitHub.
 
 | Crate | Contents | In the relay |
 | --- | --- | --- |

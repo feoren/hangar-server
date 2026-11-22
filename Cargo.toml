@@ -11,8 +11,8 @@ publish = false
 [dependencies]
 # Wire format, keyed hashes and state machines (step C) plus the rules of the end-to-end
 # encryption (step E, checking the membership log and the key packages). Both belong to the app
-# (MIT) and are kept as unmodified copies from commit 79c68ca under `vendor/` (origin per crate
-# in ORIGIN.md); new version: docs/development.md, "Updating the crates".
+# (MIT) and are kept as unmodified copies under `vendor/` (origin and commit per crate in
+# ORIGIN.md); new version: docs/development.md, "Updating the crates".
 hangar-team-protocol = { path = "vendor/hangar-team-protocol" }
 hangar-team-crypto = { path = "vendor/hangar-team-crypto" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json", "form", "query", "matched-path"] }

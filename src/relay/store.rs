@@ -10,7 +10,8 @@ use crate::ticket::Role;
 use crate::util::random_id;
 use crate::wire::{
     check_append, ChainHead, Ciphertext, DeviceId, DeviceInfo, DeviceKeys, Epoch, Holder, KeyProof,
-    LogHash, MemberId, MemberLogAppend, MemberLogEntry, PublicKey, UnixMillis, WrappedKey,
+    LogHash, MemberId, MemberLogAppend, MemberLogEntry, NotesKeysRecord, PublicKey, Sealed,
+    UnixMillis, WrappedKey,
 };
 
 pub type Result<T> = std::result::Result<T, sqlx::Error>;
@@ -943,6 +944,88 @@ pub async fn key_package(
         .await?
         .into_iter()
         .next())
+}
+
+/// The team's stored notes key ring (`notes.keys.get`), `None` when none was written.
+pub async fn notes_keys(db: &Db, team: &str) -> Result<Option<NotesKeysRecord>> {
+    let row: Option<(i64, String, String, i64, String)> = sqlx::query_as(
+        "SELECT version, by_member, by_device, epoch, content FROM relay_notes_keys WHERE team_id = ?",
+    )
+    .bind(team)
+    .fetch_optional(db)
+    .await?;
+    let Some((version, member, device, epoch, content)) = row else {
+        return Ok(None);
+    };
+    // Only what passed the protocol's checks was stored; anything else is corrupted data.
+    let record = (|| {
+        Some(NotesKeysRecord {
+            version: u64::try_from(version).ok()?,
+            by: Holder {
+                member: MemberId::new(member).ok()?,
+                device: DeviceId::new(device).ok()?,
+            },
+            content: Sealed {
+                epoch: Epoch(u32::try_from(epoch).ok()?),
+                data: Ciphertext::new(content).ok()?,
+            },
+        })
+    })();
+    if record.is_none() {
+        tracing::error!("stored notes key ring cannot be read");
+    }
+    Ok(record)
+}
+
+/// Outcome of `set_notes_keys`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotesKeysStored {
+    /// Stored under this new version.
+    Stored(u64),
+    /// `base` is not the stored version (0: none stored).
+    Conflict,
+}
+
+/// Compare and set of the team's notes key ring: stores `content` as version `base + 1` only if
+/// the stored version is `base` (0 when there is none), in one write transaction. Durable
+/// before the caller answers (`synchronous = FULL`).
+pub async fn set_notes_keys(
+    db: &Db,
+    team: &str,
+    base: u64,
+    by: &Holder,
+    content: &Sealed,
+    now: u64,
+) -> Result<NotesKeysStored> {
+    let mut tx = begin_write(db).await?;
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM relay_notes_keys WHERE team_id = ?")
+            .bind(team)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let current = stored.map_or(0, u64_of);
+    let next = match base.checked_add(1) {
+        Some(next) if base == current && i64::try_from(next).is_ok() => next,
+        _ => return Ok(NotesKeysStored::Conflict),
+    };
+    sqlx::query(
+        "INSERT INTO relay_notes_keys (team_id, version, by_member, by_device, epoch, content, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (team_id) DO UPDATE SET version = excluded.version, by_member = excluded.by_member, \
+         by_device = excluded.by_device, epoch = excluded.epoch, content = excluded.content, \
+         updated_at = excluded.updated_at",
+    )
+    .bind(team)
+    .bind(i64_of(next))
+    .bind(by.member.as_str())
+    .bind(by.device.as_str())
+    .bind(i64::from(content.epoch.0))
+    .bind(content.data.as_str())
+    .bind(i64_of(now))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(NotesKeysStored::Stored(next))
 }
 
 /// The role a member last had in the team (for checks without a ticket).

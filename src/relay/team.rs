@@ -31,10 +31,11 @@ use crate::wire::{
     limits::MAX_WRAPPED_KEYS, Ack, BlobKind, Ciphertext, ClientMessage, Cursor, DeviceList,
     DeviceRemoved, Epoch, ErrorBody, ErrorCode, Holder, KeyRotated, KeyWrapped, KeyedHash,
     MemberId, MemberJoined, MemberLogAppended, MemberLogEntries, MemberRemoved, MemberRoleChanged,
-    Notify as NotifyMessage, OpId, PathHashes, PresenceState, PresenceUpdate, ReservationExpired,
-    ReservationExpiring, ResyncRequired, Sealed, Seq, ServerFrame, ServerMessage, SessionKey,
-    SessionRef, StreamId, TaskReleaseAnswered, TaskReleaseRequestEnded, TaskReleaseRequested,
-    TaskReleased, TaskReserved, TeamId, UnixMillis, Welcome,
+    NotesKeys, NotesKeysUpdated, Notify as NotifyMessage, OpId, PathHashes, PresenceState,
+    PresenceUpdate, ReservationExpired, ReservationExpiring, ResyncRequired, Sealed, Seq,
+    ServerFrame, ServerMessage, SessionKey, SessionRef, StreamId, TaskReleaseAnswered,
+    TaskReleaseRequestEnded, TaskReleaseRequested, TaskReleased, TaskReserved, TeamId, UnixMillis,
+    Welcome,
 };
 
 /// Events kept in memory for replay; older ones require a snapshot.
@@ -71,11 +72,32 @@ pub enum Outgoing {
     Close(u16, &'static str),
 }
 
+/// An encoded server frame together with the protocol version that introduced its kind
+/// (`ServerMessage::since`). The text only comes out through `for_proto`, so no path can hand a
+/// kind to a connection whose team negotiated an older version: an app of that version would
+/// end the connection on a kind it does not know.
+#[derive(Debug, Clone)]
+pub struct Framed {
+    since: u16,
+    text: Utf8Bytes,
+}
+
+impl Framed {
+    /// The text for a connection that negotiated `proto`, `None` if the kind is newer.
+    fn for_proto(&self, proto: u16) -> Option<Utf8Bytes> {
+        (self.since <= proto).then(|| self.text.clone())
+    }
+}
+
 /// A connection that has joined the team.
 #[derive(Debug, Clone)]
 pub struct Subscriber {
     pub holder: Holder,
     pub role: Role,
+    /// The protocol version negotiated for this team in this connection's `hello`
+    /// (`welcome.proto`). Client kinds newer than it are refused, server kinds newer than it are
+    /// never sent.
+    pub proto: u16,
     pub tx: super::outbox::Outbox,
     /// Triggered when the connection can no longer keep up (queue full).
     pub kick: Arc<Notify>,
@@ -94,6 +116,15 @@ struct Departing {
     holder: Holder,
     tx: super::outbox::Outbox,
     until: u64,
+    proto: u16,
+}
+
+impl Departing {
+    fn send(&self, framed: Option<&Framed>) {
+        if let Some(text) = framed.and_then(|f| f.for_proto(self.proto)) {
+            self.tx.try_send(Outgoing::Text(text));
+        }
+    }
 }
 
 /// Result of a join.
@@ -318,20 +349,19 @@ impl Team {
             .any(|s| s.holder.member == *member)
     }
 
-    fn frame(
-        &self,
-        id: Option<&OpId>,
-        seq: Option<Seq>,
-        message: ServerMessage,
-    ) -> Option<Utf8Bytes> {
+    fn frame(&self, id: Option<&OpId>, seq: Option<Seq>, message: ServerMessage) -> Option<Framed> {
         let kind = message.kind();
+        let since = message.since();
         match wire::encode_server(&ServerFrame {
             id: id.cloned(),
             seq,
             team: Some(self.team.clone()),
             message,
         }) {
-            Ok(text) => Some(Utf8Bytes::from(text)),
+            Ok(text) => Some(Framed {
+                since,
+                text: Utf8Bytes::from(text),
+            }),
             Err(error) => {
                 tracing::error!(%error, kind, "cannot encode frame");
                 None
@@ -339,11 +369,14 @@ impl Team {
         }
     }
 
-    fn send(&mut self, conn: u64, text: Option<Utf8Bytes>) {
-        let Some(text) = text else { return };
+    /// Sends to one connection, only a kind its negotiated version knows.
+    fn send(&mut self, conn: u64, framed: Option<Framed>) {
+        let Some(framed) = framed else { return };
         if let Some(sub) = self.subscribers.get(&conn) {
-            // Whoever cannot keep up is kicked by the outbox and catches up via cursor.
-            sub.tx.try_send(Outgoing::Text(text));
+            if let Some(text) = framed.for_proto(sub.proto) {
+                // Whoever cannot keep up is kicked by the outbox and catches up via cursor.
+                sub.tx.try_send(Outgoing::Text(text));
+            }
         }
     }
 
@@ -582,9 +615,7 @@ impl Team {
             if text.is_none() {
                 text = self.frame(None, None, message.clone());
             }
-            if let Some(text) = &text {
-                departing.tx.try_send(Outgoing::Text(text.clone()));
-            }
+            departing.send(text.as_ref());
         }
     }
 
@@ -605,9 +636,10 @@ impl Team {
             store::log_get_until(db, &self.id, after, departing.until, MAX_LOG_ENTRIES + 1).await?;
         let page = MemberLogEntries::page(entries);
         let done = !page.more;
-        if let Some(text) = self.frame(Some(op), None, ServerMessage::MemberLogEntries(page)) {
-            departing.tx.try_send(Outgoing::Text(text));
-        }
+        departing.send(
+            self.frame(Some(op), None, ServerMessage::MemberLogEntries(page))
+                .as_ref(),
+        );
         if done {
             self.departing.remove(&conn);
         }
@@ -685,7 +717,6 @@ impl Team {
         op: &OpId,
         sub: Subscriber,
         cursor: Option<&Cursor>,
-        proto: u16,
         ticket_iat_ms: u64,
         now: u64,
         allow_departing: bool,
@@ -707,23 +738,20 @@ impl Team {
             }
             tracing::info!("hello from a removed device: only memberlog.get up to the removal");
             let welcome = ServerMessage::Welcome(Welcome {
-                proto,
+                proto: sub.proto,
                 stream: self.log.stream().clone(),
                 head: self.log.head(),
                 member: sub.holder.member.clone(),
                 epoch: self.book.epoch(),
             });
-            if let Some(text) = self.frame(Some(op), None, welcome) {
-                sub.tx.try_send(Outgoing::Text(text));
-            }
-            self.departing.insert(
-                conn,
-                Departing {
-                    holder: sub.holder,
-                    tx: sub.tx,
-                    until,
-                },
-            );
+            let departing = Departing {
+                holder: sub.holder,
+                tx: sub.tx,
+                until,
+                proto: sub.proto,
+            };
+            departing.send(self.frame(Some(op), None, welcome).as_ref());
+            self.departing.insert(conn, departing);
             return Ok(Ok(Joined::Departing));
         }
         let seen = store::see_member(
@@ -741,6 +769,7 @@ impl Team {
         self.last_activity = now;
         let holder = sub.holder.clone();
         let role = sub.role;
+        let proto = sub.proto;
         self.subscribers.insert(conn, sub);
         let welcome = ServerMessage::Welcome(Welcome {
             proto,
@@ -759,13 +788,18 @@ impl Team {
         // Replay (up to `REPLAY_WINDOW` events) and snapshot can exceed the outgoing queue's
         // frame limit. They go in as a single entry, still under the team lock: no live event
         // gets in between or ahead, and the writer hands the frames over one by one.
+        // Only kinds of the negotiated version (logged and snapshot kinds are all of version
+        // 1 today; the filter keeps it that way should a newer kind ever be logged).
         let mut catch_up = Vec::new();
+        let mut add = |framed: Option<Framed>| {
+            catch_up.extend(framed.and_then(|f| f.for_proto(proto)));
+        };
         match replay {
             Ok(events) => {
-                catch_up.extend(self.frame(Some(op), None, welcome));
+                add(self.frame(Some(op), None, welcome));
                 for (seq, message) in events {
                     let message = self.personalize(db, &holder, message).await?;
-                    catch_up.extend(self.frame(None, Some(seq), message));
+                    add(self.frame(None, Some(seq), message));
                 }
             }
             Err(reason) => {
@@ -774,11 +808,11 @@ impl Team {
                     head: self.log.head(),
                     reason,
                 });
-                catch_up.extend(self.frame(Some(op), None, resync));
+                add(self.frame(Some(op), None, resync));
                 for message in self.snapshot() {
-                    catch_up.extend(self.frame(None, None, message));
+                    add(self.frame(None, None, message));
                 }
-                catch_up.extend(self.frame(Some(op), None, welcome));
+                add(self.frame(Some(op), None, welcome));
             }
         }
         if let Some(sub) = self.subscribers.get(&conn) {
@@ -974,6 +1008,7 @@ impl Team {
                         holder: sub.holder,
                         tx: sub.tx,
                         until,
+                        proto: sub.proto,
                     },
                 );
             }
@@ -1095,6 +1130,12 @@ impl Team {
             return Ok(());
         };
         self.last_activity = now;
+        // A kind newer than this connection's negotiated version is refused as a relay of that
+        // version would refuse it: nothing applied, nothing remembered for retries.
+        if message.since() > sub.proto {
+            self.reply(conn, op, Err(error(ErrorCode::BadRequest)));
+            return Ok(());
+        }
         let who = sub.holder.clone();
         let at = UnixMillis(now);
         let dedup = message.deduplicated().then(|| {
@@ -1126,13 +1167,18 @@ impl Team {
         let Some(reply) = reply else {
             return Ok(());
         };
+        // Live hints that announce the answer's own write follow the answer (`notes.keys.updated`
+        // after the `ack` of `notes.keys.set`); every other event goes out before it.
+        let (hints, events): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .partition(|m| matches!(m, ServerMessage::NotesKeysUpdated(_)));
         self.prune_notes();
         self.emit(db, events, wrapped.as_ref()).await?;
         if let Some((key, digest)) = dedup {
             self.ops.remember(key, digest, reply.clone());
         }
         self.reply(conn, op, reply);
-        Ok(())
+        self.emit(db, hints, None).await
     }
 
     /// Applies an intent. `None` as reply: the reply has already been sent (reads).
@@ -1599,7 +1645,53 @@ impl Team {
                     )
                 }
             }
+            ClientMessage::NotesKeysGet => {
+                let record = store::notes_keys(db, &self.id).await?;
+                let text = self.frame(
+                    Some(op),
+                    None,
+                    ServerMessage::NotesKeys(NotesKeys { record }),
+                );
+                self.send(conn, text);
+                (Vec::new(), None, None)
+            }
+            ClientMessage::NotesKeysSet(m) => {
+                // `handle` has checked the epoch; the size was checked while decoding.
+                if !self.may_manage_notes_keys(&who, sub.role) {
+                    (Vec::new(), Some(Err(error(ErrorCode::Forbidden))), None)
+                } else {
+                    match store::set_notes_keys(db, &self.id, m.base, &who, &m.content, now).await?
+                    {
+                        store::NotesKeysStored::Stored(version) => (
+                            vec![ServerMessage::NotesKeysUpdated(NotesKeysUpdated {
+                                version,
+                                by: who.clone(),
+                            })],
+                            Some(Ok(ack())),
+                            None,
+                        ),
+                        store::NotesKeysStored::Conflict => {
+                            (Vec::new(), Some(Err(error(ErrorCode::Conflict))), None)
+                        }
+                    }
+                }
+            }
         })
+    }
+
+    /// Whether `who` may write the team's notes key ring: a device of the verified log whose
+    /// effective role (the lower of log role and ticket role) is owner or admin. Without a log
+    /// nobody may: there is no epoch secret to seal it under. A device the log does not list
+    /// could not produce a record any member accepts, so it does not get to replace one.
+    fn may_manage_notes_keys(&self, who: &Holder, ticket_role: Role) -> bool {
+        let Some(state) = self.verifier.state() else {
+            return false;
+        };
+        state.device(who).is_some()
+            && matches!(
+                state.effective_role(&who.member, wire::role(ticket_role)),
+                Some(wire::Role::Owner | wire::Role::Admin)
+            )
     }
 
     /// The registered keys of the holders an entry records (for `check_registered_keys`, which

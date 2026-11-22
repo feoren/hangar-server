@@ -132,3 +132,8 @@ reversed without the key, but they can be compared within the epoch.
 - Account deletion and data export in self-hosting are still missing (GDPR Art. 17 and 20).
 - Storage has a quota per team and a retention period only for transcripts
   (`TRANSCRIPT_RETENTION_DAYS`); decisions and tasks remain until the team is deleted.
+- The notes key ring (protocol version 2) is one sealed record per team, readable only with the
+  epoch key; the relay keeps the writing device's IDs and the time with it and deletes it with
+  the team. Only a device of the verified log with owner or admin as its effective role may
+  replace it, and only on top of the stored version (`conflict` otherwise), so a stolen ticket
+  without a device in the log cannot overwrite it.

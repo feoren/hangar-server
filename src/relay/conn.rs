@@ -29,7 +29,7 @@ use crate::http::{AppState, ClientIp};
 use crate::util::now_ms;
 use crate::wire::{
     self, ack, error, limits::MAX_FRAME_BYTES, ClientMessage, ErrorBody, ErrorCode, Holder,
-    MemberId, OpId, ServerFrame, ServerMessage, TeamId,
+    MemberId, OpId, ServerFrame, ServerMessage, TeamId, MIN_PROTOCOL_VERSION,
 };
 
 pub const PING_INTERVAL: Duration = Duration::from_secs(25);
@@ -137,7 +137,16 @@ async fn leave(relay: &Relay, conn: u64, entry: Joined) {
     relay.forward_attention(&mut guard);
 }
 
+/// A frame sent here, outside the team (answers before or without a joined team), may not
+/// depend on a negotiated version: only kinds every supported version knows.
 fn text(id: Option<OpId>, team: Option<TeamId>, message: ServerMessage) -> Option<Outgoing> {
+    if message.since() > MIN_PROTOCOL_VERSION {
+        tracing::error!(
+            kind = message.kind(),
+            "kind newer than the oldest version not sent"
+        );
+        return None;
+    }
     wire::encode_server(&ServerFrame {
         id,
         seq: None,
@@ -416,6 +425,7 @@ async fn run(
                         device: hello.device.clone(),
                     },
                     role: claims.role,
+                    proto,
                     tx: tx.clone(),
                     kick: kick.clone(),
                     removed: removed.clone(),
@@ -430,7 +440,6 @@ async fn run(
                             &op,
                             sub,
                             hello.last_seq.as_ref(),
-                            proto,
                             iat_ms,
                             now_ms(),
                             // Only a connection without another team: its 4403 does not hit a

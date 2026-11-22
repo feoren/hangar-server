@@ -1,7 +1,7 @@
-# Live protocol (version 1)
+# Live protocol (versions 1 and 2)
 
 The protocol belongs to the app: the crates `hangar-team-protocol` (step C) and `hangar-team-crypto`
-(step E), kept here as unmodified copies from commit `79c68ca` under `vendor/`. Messages,
+(step E), kept here as unmodified copies under `vendor/` (origin in each `ORIGIN.md`). Messages,
 limits, and the rules for reservations, claims, the log and the E2E checks come from the
 crates; the reference is their READMEs plus `docs/wiki/pages/concepts/team-protocol.md` and
 `team-crypto.md` in the app repository. This document
@@ -55,9 +55,11 @@ Client: {"v":1,"id":"<op>","team":"<team>","type":"task.reserve","body":{...}}
 Server: {"v":1,"id":"<op answered>","seq":12,"team":"<team>","type":"task.reserved","body":{...}}
 ```
 
-- `v` is read first; older clients get `err outdatedClient`.
+- `v` is the envelope version (`ENVELOPE_VERSION`, 1 for every protocol version so far) and is
+  read first; a lower value gets `err outdatedClient`, a higher one `err badRequest`. Which message kinds a connection may
+  use is the protocol version negotiated per team in `hello` (see below).
 - `id`: operation ID. For intents with `ClientMessage::deduplicated` (all `task.*`, `blob.put`,
-  `memberlog.append`, `key.rotate`, `key.wrap`) the relay remembers sender (member and
+  `memberlog.append`, `key.rotate`, `key.wrap`, `notes.keys.set`) the relay remembers sender (member and
   device), team and `id` together with the digest of the content (`RecentOps`, 4096 per team): the same
   intent sent again gets the first answer, a different one under the same `id` gets `badRequest`.
 - `team`: project ID of the website or team ID in self-hosting, opaque. Missing only for `ping`.
@@ -70,6 +72,10 @@ Ticket verification: [ticket-format.md](ticket-format.md). The member comes from
 `hello.device`; device IDs are only unique per member (the same ID for two members means two
 devices). One connection can sign in to several teams, but belongs to exactly one member.
 
+- **Protocol version.** `hello.proto` offers a range; the relay speaks `ProtoRange::CURRENT`
+  (`{1, 2}`) and answers with the highest version both speak in `welcome.proto` (an app of
+  version 1 offers `{1, 1}` and gets 1). A range that ends below 1 gets `err outdatedClient`,
+  one that starts above 2 `err badRequest`. The version holds per connection and team.
 - **Replay** (cursor within the window): `welcome` with the `id` of the `hello`, then the events
   after the cursor in order, then live.
 - **Snapshot**: `resync_required`, then `member.joined`, `task.reserved` per hold (plus
@@ -123,10 +129,18 @@ new ticket.
 - After restoring a backup, the stored stream continues. Clients that had
   seen events after that point are ahead of the head (`ahead`) and fetch a snapshot.
 - Logged: whatever `ServerMessage::loggable` lists. Not logged: `presence.update`,
-  `claim.overlap`, `key.wrapped`, `notify`, responses.
+  `claim.overlap`, `key.wrapped`, `notify`, `notes.keys.updated`, responses.
 - Events go to all of the team's connections, including the one that triggered them; after that the response goes to
   the triggering connection. Targeted messages (`ServerMessage::recipient`) go only to their
-  recipient.
+  recipient. The one exception is `notes.keys.updated`, which announces the answer's own write
+  and follows the `ack` of `notes.keys.set`.
+- **Version filter.** A client kind newer than the connection's negotiated version
+  (`ClientMessage::since`) gets `err badRequest`, as a relay of that version would answer; it is
+  neither applied nor remembered for retries. A server kind newer than it
+  (`ServerMessage::since`) is never sent to that connection: every frame carries its kind's
+  version through the relay's single send path, which drops it for an older connection. Today
+  only the notes key ring kinds are of version 2, and none of them is logged, so replay and
+  snapshot are the same for both versions.
 
 ## Reservations
 
@@ -242,6 +256,32 @@ downgrade on the website takes effect immediately, even if the log does not know
 - `key.get`: all stored packages of the requesting device for the epoch in `ack.keys`, in
   order of arrival; none: `notFound`. The device tries each one against the epoch's
   commitment.
+
+## Notes key ring (version 2)
+
+The team's key ring for shared project notes (ADR 0006, phase 2, in the app repository): one
+opaque record per team, sealed by an owner's or admin's device under the current epoch. The
+relay cannot read it; it checks role, epoch and version and keeps only the newest record
+(`relay_notes_keys`).
+
+- `notes.keys.get` (no body): any member's device. Answer `notes.keys {record}` with the op id,
+  only to the asking connection; `record` is `{version, by, content}` or `null` when nothing is
+  stored. A connection in its grace period after a device removal gets `err forbidden`.
+- `notes.keys.set {base, content}`, deduplicated by op id. In this order:
+  1. `content.epoch` the current epoch (`check_epoch`), otherwise `staleEpoch`;
+  2. the sender is a device of the verified log and its effective role (the lower of log role and
+     ticket role) is owner or admin, otherwise `forbidden` (also when the team has no log yet);
+  3. `base` equals the stored version (0: none stored), otherwise `conflict`;
+  4. stored in one write transaction as version `base + 1` together with the sending device,
+     the epoch and the time, durable before the answer;
+  5. `ack` to the sender, then `notes.keys.updated {version, by}` to every connection of the team
+     that negotiated version 2 (not logged, no `seq`, no replay; the app fetches with
+     `notes.keys.get` after every `welcome` and on every hint).
+  The size (`MAX_INLINE_CIPHERTEXT_LEN`) is checked while decoding.
+- The record goes with the team (team deleted). Removing a member or a device leaves it; the next
+  rotation re-seals it in the app.
+- A connection of version 1 gets `err badRequest` for both client kinds and never sees either
+  server kind.
 
 ## Revocation list (official mode)
 
