@@ -1,10 +1,11 @@
-"""Independent reference for the test vectors in src/tests.rs (Python standard library only).
+"""Independent reference for the test vectors in src/tests.rs and src/notes.rs (Python standard
+library only).
 
 Implements Ed25519 (RFC 8032), X25519 (RFC 7748), ChaCha20-Poly1305 and XChaCha20-Poly1305
 (RFC 8439, draft-irtf-cfrg-xchacha-03), HKDF (RFC 5869) and HPKE base mode with
 DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305 (RFC 9180) from their specifications,
 checks each against a published test vector, then recomputes every VECTOR_* constant of
-src/tests.rs and exits with an error when one differs.
+src/tests.rs and src/notes.rs and exits with an error when one differs.
 
 Slow on purpose (textbook big-integer arithmetic); the inputs are fixed, nothing here is secret.
 
@@ -19,7 +20,7 @@ import re
 import struct
 import sys
 
-SRC = pathlib.Path(__file__).parent / "src" / "tests.rs"
+SRC = [pathlib.Path(__file__).parent / "src" / name for name in ("tests.rs", "notes.rs")]
 
 # ---------------------------------------------------------------------------------------------
 # Ed25519, RFC 8032 section 6 (reference implementation, rewritten)
@@ -536,6 +537,34 @@ def compute():
         b"\x01" + head[0] + head[1] + counter + nonce + ciphertext + signature
     )
 
+    # ADR 0006 phase 2: the team's notes key ring as a `notes-keys` record (record id empty),
+    # sealed and signed like any record; the plaintext is the key ring's binary form.
+    ring = b"\x01\x02" + counting(0x30, 40) + counting(0x58, 40)
+    aad = framed(
+        b"hangar-team/v1/record",
+        b"\x01",
+        TEAM,
+        struct.pack(">I", 1),
+        b"notes-keys",
+        b"",
+        OWNER[0],
+        OWNER[1],
+        head[0],
+        head[1],
+        counter,
+    )
+    nonce = counting(0xF0, 24)
+    ciphertext = xchacha20poly1305_seal(seal_key, nonce, ring, aad)
+    signature = ed25519_sign(
+        sign_seed, framed(b"hangar-team/v1/record-sig", aad, nonce, ciphertext)
+    )
+    out["VECTOR_NOTES_KEYS"] = b64(
+        b"\x01" + head[0] + head[1] + counter + nonce + ciphertext + signature
+    )
+    out["VECTOR_TEAM_HINT"] = hashlib.sha256(framed(b"hangar-notes/v1/team", TEAM)).digest()[
+        :8
+    ].hex()
+
     entropy = counting(0x10, 16)
     check = hashlib.sha256(framed(b"hangar-team/v1/recovery-code", b"\x01", entropy)).digest()
     out["VECTOR_RECOVERY_CODE"] = crockford(b"\x01" + entropy + check[:3])
@@ -545,22 +574,53 @@ def compute():
     return out
 
 
+def compute_notes():
+    """ADR 0006: a sealed note file, the notes recovery code, its code slot, the keychain text."""
+    out = {}
+    vault = counting(0x20, 16)
+    key_id, key = counting(0x30, 8), counting(0x38, 32)
+    note_id = b"00112233-4455-4677-8899-aabbccddeeff"
+    plaintext = (
+        b'{"v":1,"title":"Plan","created":1762770000000,"updated":1762770000000,"by":""}\n# Plan\n'
+    )
+    file_key = hkdf(key, framed(b"hangar-notes/v1/file", vault, note_id), 32)
+    padded_len = -(-(4 + len(plaintext)) // 256) * 256
+    padded = (struct.pack(">I", len(plaintext)) + plaintext).ljust(padded_len, b"\x00")
+    aad = framed(b"hangar-notes/v1/note", b"\x01", vault, note_id, key_id)
+    nonce = counting(0x70, 24)
+    sealed = xchacha20poly1305_seal(file_key, nonce, padded, aad)
+    out["VECTOR_NOTE_FILE"] = "hangar-note 1 %s\\n%s\\n" % (key_id.hex(), b64(nonce + sealed))
+
+    entropy = counting(0x90, 16)
+    check = hashlib.sha256(framed(b"hangar-notes/v1/recovery-code", b"\xa8", entropy)).digest()
+    out["VECTOR_NOTES_CODE"] = crockford(b"\xa8" + entropy + check[:3])
+    slot_key = hkdf(entropy, framed(b"hangar-notes/v1/code-slot", vault), 32)
+    ring = b"\x01\x01" + key_id + key
+    nonce = counting(0xB0, 24)
+    sealed = xchacha20poly1305_seal(
+        slot_key, nonce, ring, framed(b"hangar-notes/v1/code-slot", b"\x01", vault)
+    )
+    out["VECTOR_NOTES_CODE_SLOT"] = b64(b"\x01" + nonce + sealed)
+    out["VECTOR_NOTES_KEYCHAIN"] = "v1 %s:%s" % (key_id.hex(), key.hex())
+    return out
+
+
 def main():
     check_anchors()
     print(
         "anchors: RFC 8032, RFC 7748, RFC 9180 A.2.1, XChaCha draft A.3.1, RFC 5869, "
         "X25519 low-order points ok"
     )
-    source = SRC.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in SRC)
     failed = False
-    for name, value in compute().items():
+    for name, value in {**compute(), **compute_notes()}.items():
         match = re.search(r"const %s: &str =\s*\"([^\"]*)\";" % name, source)
         print("%s = %s" % (name, value))
         if match is None:
-            print("  missing in src/tests.rs")
+            print("  missing in src/tests.rs and src/notes.rs")
             failed = True
         elif match.group(1) != value:
-            print("  differs from src/tests.rs: %s" % match.group(1))
+            print("  differs from the Rust source: %s" % match.group(1))
             failed = True
     if failed:
         sys.exit(1)
