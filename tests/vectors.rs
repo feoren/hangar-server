@@ -192,7 +192,7 @@ fn license_cases() -> Vec<Case> {
             LICENSE_CONTEXT,
             false,
             false,
-            "ok:3",
+            "ok:1",
         ),
         c(
             "foreign_signature",

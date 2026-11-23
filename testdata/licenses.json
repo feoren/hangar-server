@@ -30,7 +30,7 @@
     },
     {
       "document": "eyJ2IjoxLCJraWQiOiJ0ZXN0LTIwMjYtMSIsImxpZCI6ImxpY184ZjNhMmMiLCJzdWIiOiIxMDQyIiwiZW1haWwiOiJvd25lckBleGFtcGxlLm9yZyIsInBsYW4iOiJ0ZWFtIiwic2VhdHMiOjEwLCJpYXQiOjE3OTM5MDAwMDAsImV4cCI6MTc5NDIyNTU5OX0.iT8YdF12UEEILsF6YlHSba6jYj0lnl-m_AJ34qIhdBhAjdMInTXs1KCQfqO4fjIGIggQlfWeHYi7SWfPSLPbAg",
-      "expect": "ok:3",
+      "expect": "ok:1",
       "name": "expired",
       "payload_json": "{\"v\":1,\"kid\":\"test-2026-1\",\"lid\":\"lic_8f3a2c\",\"sub\":\"1042\",\"email\":\"owner@example.org\",\"plan\":\"team\",\"seats\":10,\"iat\":1793900000,\"exp\":1794225599}",
       "signed_with": "key",

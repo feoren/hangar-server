@@ -9,7 +9,12 @@
 //!   acceptance in the same write transaction as the join (BEGIN IMMEDIATE: acceptances
 //!   run one after another, the last seat is taken exactly once).
 //! - Seats per account: distinct people across all of the owner's teams, the owner
-//!   included; limit from the owner's license document, otherwise Free (3).
+//!   included; limit from the owner's license document, otherwise Free (the owner alone, so
+//!   teams need a license). Nobody loses a seat when a license expires or is removed; only new
+//!   people beyond the limit are refused (`license_required` without an active license,
+//!   `seats_full` with one). Without an active license, an invitation that could never be
+//!   accepted is refused right away; with one, the check waits for the acceptance, so the owner
+//!   can still buy seats in between.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +34,7 @@ use super::auth::{
 };
 use super::pages::{self, csrf_ok, csrf_token, hidden, message, page, same_origin, t};
 use super::{ApiError, ApiResult, Identity};
+use crate::config::Config;
 use crate::db::{begin_write, Db};
 use crate::http::ratelimit::Rule;
 use crate::http::AppState;
@@ -91,19 +97,22 @@ async fn license_of(
     identity: &Identity,
     user: &str,
 ) -> Result<Option<LicenseClaims>, sqlx::Error> {
+    stored_license(conn, &identity.config, user).await
+}
+
+/// [`license_of`] for the host commands, which have the configuration but no [`Identity`].
+async fn stored_license(
+    conn: &mut SqliteConnection,
+    config: &Config,
+    user: &str,
+) -> Result<Option<LicenseClaims>, sqlx::Error> {
     let document: Option<String> =
         sqlx::query_scalar("SELECT document FROM licenses WHERE user_id = ?")
             .bind(user)
             .fetch_optional(&mut *conn)
             .await?;
-    Ok(document.and_then(|d| {
-        license::verify(
-            &d,
-            &identity.config.license_keys,
-            &identity.config.license_revoked,
-        )
-        .ok()
-    }))
+    Ok(document
+        .and_then(|d| license::verify(&d, &config.license_keys, &config.license_revoked).ok()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +126,15 @@ async fn seats(
     identity: &Identity,
     owner: &str,
 ) -> Result<(Seats, Option<LicenseClaims>), sqlx::Error> {
-    let lic = license_of(conn, identity, owner).await?;
+    seats_with(conn, &identity.config, owner).await
+}
+
+async fn seats_with(
+    conn: &mut SqliteConnection,
+    config: &Config,
+    owner: &str,
+) -> Result<(Seats, Option<LicenseClaims>), sqlx::Error> {
+    let lic = stored_license(conn, config, owner).await?;
     let used: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT m.user_id) FROM team_members m JOIN teams t ON t.id = m.team_id WHERE t.owner_id = ?",
     )
@@ -132,6 +149,58 @@ async fn seats(
         },
         lic,
     ))
+}
+
+/// Why a person who holds no seat on an account yet cannot get one now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoSeat {
+    /// The owner has no active license: Free is the owner alone, teams need a license.
+    LicenseRequired,
+    /// The owner's license has no seat left.
+    Full,
+}
+
+/// Seat check for one new person; `None` when a seat is free. People who already hold a seat
+/// never come here, so members beyond a lowered limit keep theirs (nothing is taken away).
+fn seat_refusal(seats: Seats, lic: Option<&LicenseClaims>, now: i64) -> Option<NoSeat> {
+    if seats.used < seats.limit {
+        None
+    } else if lic.is_some_and(|l| l.active(now)) {
+        Some(NoSeat::Full)
+    } else {
+        Some(NoSeat::LicenseRequired)
+    }
+}
+
+/// Whether the person with `email` already holds a seat on `owner`'s account (is a member of any
+/// of the owner's teams).
+async fn holds_seat_by_email(
+    conn: &mut SqliteConnection,
+    owner: &str,
+    email: &str,
+) -> Result<bool, sqlx::Error> {
+    let found: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id JOIN users u ON u.id = m.user_id \
+         WHERE t.owner_id = ? AND u.email = ? LIMIT 1",
+    )
+    .bind(owner)
+    .bind(email)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(found.is_some())
+}
+
+/// Invitation check, part one: `true` when the owner has no active license and no seat is free,
+/// so only people who already hold a seat can still be invited (into another of the owner's
+/// teams). With an active license this is always `false`; the seat check then happens on
+/// acceptance only, as before.
+async fn invitations_need_license(
+    conn: &mut SqliteConnection,
+    config: &Config,
+    owner: &str,
+) -> Result<bool, sqlx::Error> {
+    let (seats, lic) = seats_with(conn, config, owner).await?;
+    Ok(seat_refusal(seats, lic.as_ref(), now_s()) == Some(NoSeat::LicenseRequired))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -181,8 +250,13 @@ async fn insert_team(db: &Db, owner_id: &str, name: &str) -> Result<String, sqlx
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accept {
-    Joined { team: String, name: String },
+    Joined {
+        team: String,
+        name: String,
+    },
     SeatsFull,
+    /// The owner has no active license, and Free is the owner alone.
+    LicenseRequired,
     WrongAccount,
     Invalid,
 }
@@ -233,10 +307,17 @@ pub async fn accept(
         .fetch_optional(&mut *tx)
         .await?;
         if counted.is_none() {
-            let (seats, _) = seats(&mut tx, identity, &owner).await?;
-            if seats.used >= seats.limit {
-                tracing::info!(limit = seats.limit, "join refused: no seat available");
-                return Ok(Accept::SeatsFull);
+            let (seats, lic) = seats(&mut tx, identity, &owner).await?;
+            match seat_refusal(seats, lic.as_ref(), now) {
+                None => {}
+                Some(NoSeat::Full) => {
+                    tracing::info!(limit = seats.limit, "join refused: no seat available");
+                    return Ok(Accept::SeatsFull);
+                }
+                Some(NoSeat::LicenseRequired) => {
+                    tracing::info!("join refused: the team's owner has no active license");
+                    return Ok(Accept::LicenseRequired);
+                }
             }
         }
         sqlx::query(
@@ -372,7 +453,13 @@ async fn upsert_invitation(
 //
 // Whoever runs the commands has access to the server and its database; hence no
 // authentication and no rate limiting. The rules stay the same as in the API: name at most
-// 80 characters, invitation only as admin or member, seat check only on acceptance.
+// 80 characters, invitation only as admin or member, seat check on acceptance (and without an
+// active license already on invitation).
+
+/// Answer of the `invite` command when the team's owner has no active license.
+pub const LICENSE_REQUIRED_HINT: &str = "the team's owner has no active license: without one, \
+     the server is for one person (private use) and nobody else can join. Teams need a license \
+     (Team plan); store it with: license <file>. Members who already joined keep their access.";
 
 /// A team as the `teams` command shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,8 +532,7 @@ async fn cli_find_team(db: &Db, team: &str) -> Result<(String, String, String), 
 /// link itself; no mail is sent.
 pub async fn cli_invite(
     db: &Db,
-    public_url: &str,
-    default_lang: &str,
+    config: &Config,
     team: &str,
     email: &str,
     role: &str,
@@ -467,11 +553,23 @@ pub async fn cli_invite(
     if member.is_some() {
         return Err(format!("{email} is already a member"));
     }
-    let (_, _, token, _) = upsert_invitation(db, &owner, &team, &email, role, default_lang)
+    let needs_license = async {
+        let mut conn = db.acquire().await?;
+        Ok::<_, sqlx::Error>(
+            invitations_need_license(&mut conn, config, &owner).await?
+                && !holds_seat_by_email(&mut conn, &owner, &email).await?,
+        )
+    }
+    .await
+    .map_err(|e| e.to_string())?;
+    if needs_license {
+        return Err(LICENSE_REQUIRED_HINT.into());
+    }
+    let (_, _, token, _) = upsert_invitation(db, &owner, &team, &email, role, &config.default_lang)
         .await
         .map_err(|e| e.to_string())?;
     tracing::info!("invitation created (command)");
-    Ok(format!("{public_url}/invite/{token}"))
+    Ok(format!("{}/invite/{token}", config.public_url))
 }
 
 /// `teams`: all teams with owner, members and open invitations.
@@ -721,10 +819,15 @@ pub async fn invite(
         headers.get("accept-language").and_then(|v| v.to_str().ok()),
         &identity.config.default_lang,
     );
-    let name: String = sqlx::query_scalar("SELECT name FROM teams WHERE id = ?")
-        .bind(&team)
-        .fetch_one(&identity.db)
-        .await?;
+    let (name, owner): (String, String) =
+        sqlx::query_as("SELECT name, owner_id FROM teams WHERE id = ?")
+            .bind(&team)
+            .fetch_one(&identity.db)
+            .await?;
+    let need_license = {
+        let mut conn = identity.db.acquire().await?;
+        invitations_need_license(&mut conn, &identity.config, &owner).await?
+    };
     let mut results = Vec::new();
     for email in emails {
         let member: Option<i64> = sqlx::query_scalar("SELECT 1 FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = ? AND u.email = ?")
@@ -734,6 +837,17 @@ pub async fn invite(
             .await?;
         if member.is_some() {
             results.push(json!({ "email": email, "status": "member" }));
+            continue;
+        }
+        let holds_seat = if need_license {
+            let mut conn = identity.db.acquire().await?;
+            holds_seat_by_email(&mut conn, &owner, &email).await?
+        } else {
+            true
+        };
+        if !holds_seat {
+            tracing::info!("invitation refused: the team's owner has no active license");
+            results.push(json!({ "email": email, "status": "license_required" }));
             continue;
         }
         results.push(send_invitation(identity, &user, &team, &name, &email, role, lang).await?);
@@ -823,6 +937,7 @@ pub async fn accept_api(
     match accept(identity, &body.token, &user.id, &user.email).await? {
         Accept::Joined { team, name } => Ok(Json(json!({ "team": team, "name": name }))),
         Accept::SeatsFull => Err(conflict("seats_full")),
+        Accept::LicenseRequired => Err(conflict("license_required")),
         Accept::WrongAccount => Err(ApiError::new(StatusCode::FORBIDDEN, "wrong_account")),
         Accept::Invalid => Err(ApiError::NOT_FOUND),
     }
@@ -992,6 +1107,13 @@ pub async fn invite_accept_page(
             lang,
             title,
             s.page_seats_full,
+            "error",
+            StatusCode::CONFLICT,
+        ),
+        Ok(Accept::LicenseRequired) => message(
+            lang,
+            title,
+            s.page_license_required,
             "error",
             StatusCode::CONFLICT,
         ),

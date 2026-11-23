@@ -279,11 +279,14 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    An address that already has an account must be signed in first (in the browser, or without
    mail via `login-link`) and then opens the link again: since the inviter gets the link, it
    never signs in an existing account. The server checks the seat limit on acceptance. Whatever a script uses further (link, team ID) is the last line on stdout.
+   Without a license, the server is for one person (the owner): `invite` refuses with a hint at
+   the license instead of printing a link (step 4).
 
    Via the API, the same is done with `POST /v1/teams` and `POST /v1/teams/{team}/invitations`;
    without mail, the API returns the link to the admin.
-4. From the fourth person on: buy seats on hangar.feoren.com, download the license document in
-   your account and place it on the server, most easily on the host:
+4. Teams need a license: without one, the server runs for one person (private use). Buy a Team
+   plan with the seats you need on hangar.feoren.com, download the license document in your
+   account and place it on the server, most easily on the host:
 
    ```sh
    docker compose run --rm -T server license - < hangar-license-2026-11-17.txt
@@ -293,4 +296,6 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    against `LICENSE_PUBLIC_KEYS`, creates the account of the address named in the license if
    needed and stores the license for it; running it again with a new file replaces the old one.
    Via the API, the signed-in owner does the same with `PUT /v1/license`. Seats apply to all
-   teams of this owner.
+   teams of this owner. When a license expires or is removed, nothing is deleted: everyone who
+   already joined keeps access, only new people are refused (`license_required`) until a valid
+   license is stored again.

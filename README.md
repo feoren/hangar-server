@@ -39,7 +39,7 @@ server when your team's data should stay on a machine you control.
 | Setup | none, just sign in | about 30 minutes, one command |
 | Where the data lives | hangar.feoren.com | your server |
 | Updates and backups | done for you | by you, one command each |
-| Cost | see [pricing](https://hangar.feoren.com/pricing) | your server, plus seats beyond 3 people |
+| Cost | see [pricing](https://hangar.feoren.com/pricing) | your server; for one person free, teams need a license |
 | Content readable by the operator | no | no |
 
 ## Quick start
@@ -219,8 +219,9 @@ The full list is in [docs/security.md](docs/security.md).
 
 ## Running your server
 
-**More than three people.** Up to 3 people are free. For more, buy seats on
-[hangar.feoren.com](https://hangar.feoren.com/pricing), then:
+**Teams need a license.** Without a license, the server runs for one person (private use):
+you alone, with all your devices. To work with others, buy a Team plan with the seats you need
+on [hangar.feoren.com](https://hangar.feoren.com/pricing), then:
 
 1. Download the license file in your account under "Licence for your own server".
 2. Copy it to the server, from a terminal on your computer (with your file name and IP address):
@@ -304,9 +305,11 @@ system service. With Docker installed, it suggests `docker`. Both work the same 
 <summary><strong>What does it cost?</strong></summary>
 <br>
 
-The server software is free for up to 3 people. You pay your hosting provider for the server
-(the smallest plan is enough) and, for more than 3 people, seats on
-[hangar.feoren.com](https://hangar.feoren.com/pricing).
+The server software is free for one person (private use). You pay your hosting provider for
+the server (the smallest plan is enough) and, as soon as others should join, a Team plan with
+seats on [hangar.feoren.com](https://hangar.feoren.com/pricing). If a license runs out, nothing
+is deleted and nobody loses access: everyone who already joined keeps working, only new people
+cannot join until the license is renewed.
 
 </details>
 
@@ -391,7 +394,7 @@ as a stack and set `PUBLIC_URL` and `SERVER_SECRET` as variables. To update, set
 docker run -d --name hangar-server --restart unless-stopped -p 127.0.0.1:8080:8080 \
   -v hangar-data:/data -e IDENTITY=local -e PUBLIC_URL=https://team.example.org \
   -e SERVER_SECRET="$(openssl rand -hex 32)" -e TRUST_PROXY=true \
-  ghcr.io/feoren/hangar-server:0.5.1
+  ghcr.io/feoren/hangar-server:0.6.0
 ```
 
 Forward the domain to `http://127.0.0.1:8080` and allow WebSocket upgrades with long timeouts.

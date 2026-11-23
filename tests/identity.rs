@@ -487,12 +487,51 @@ fn license(seats: u32, email: &str, exp: i64, key: &SigningKey) -> String {
     signed::sign(&serde_json::to_vec(&claims).unwrap(), LICENSE_CONTEXT, key)
 }
 
+/// Stores a valid license with `seats` seats for the signed-in account: without one, Free is the
+/// owner alone and nobody else can join.
+async fn grant_license(app: &Router, token: &str, email: &str, seats: u32) {
+    let r = call(
+        app,
+        "PUT",
+        "/v1/license",
+        &[("authorization", &bearer(token))],
+        json_body(json!({ "document": license(seats, email, now_s() + 86_400, &license_key()) })),
+    )
+    .await;
+    assert_eq!(r.json()["effectiveSeats"], seats, "{}", r.body);
+}
+
+/// The statuses of an invitation request, one per address.
+async fn invite_statuses(app: &Router, token: &str, team: &str, emails: &[&str]) -> Vec<Value> {
+    let r = call(
+        app,
+        "POST",
+        &format!("/v1/teams/{team}/invitations"),
+        &[("authorization", &bearer(token))],
+        json_body(json!({ "emails": emails, "role": "member" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    r.json()["invitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["status"].clone())
+        .collect()
+}
+
 #[tokio::test]
 async fn invitations_seats_and_license() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
     let team = create_team(app, &owner, "Core").await;
+    // Free is the owner alone: without a license no invitation is created.
+    assert_eq!(
+        invite_statuses(app, &owner, &team, &["a@example.org"]).await,
+        vec![json!("license_required")]
+    );
+    grant_license(app, &owner, "owner@example.org", 3).await;
     let links = invite_links(
         app,
         &owner,
@@ -517,7 +556,7 @@ async fn invitations_seats_and_license() {
     );
     assert_eq!(accept(app, &a, &links[0]).await.status, StatusCode::OK);
     assert_eq!(accept(app, &b, &links[1]).await.status, StatusCode::OK);
-    // Owner + 2 = Free plan full.
+    // Owner + 2 = all three licensed seats taken.
     let full = accept(app, &c, &links[2]).await;
     assert_eq!(full.status, StatusCode::CONFLICT);
     assert_eq!(full.json()["error"], "seats_full");
@@ -629,6 +668,7 @@ async fn last_seat_is_taken_exactly_once() {
     let s = start(local_config()).await;
     let app = s.server.router.clone();
     let (owner, _) = login(&s, "boss@example.org").await;
+    grant_license(&app, &owner, "boss@example.org", 3).await;
     let team = create_team(&app, &owner, "Race").await;
     let emails: Vec<String> = (0..6).map(|i| format!("p{i}@example.org")).collect();
     let refs: Vec<&str> = emails.iter().map(String::as_str).collect();
@@ -653,7 +693,11 @@ async fn last_seat_is_taken_exactly_once() {
             other => panic!("{other}"),
         }
     }
-    assert_eq!((joined, full), (2, 4), "Free: owner and exactly two more");
+    assert_eq!(
+        (joined, full),
+        (2, 4),
+        "3 seats: owner and exactly two more"
+    );
 }
 
 #[tokio::test]
@@ -661,6 +705,7 @@ async fn browser_invitation_and_ticket_through_to_live_connection() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
+    grant_license(app, &owner, "owner@example.org", 3).await;
     let team = create_team(app, &owner, "Live <b>").await;
     let link = invite_links(app, &owner, &team, &["new@example.org"], "member")
         .await
@@ -764,6 +809,7 @@ async fn invitation_mail_via_log_transport() {
     let s = start(config).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
+    grant_license(app, &owner, "owner@example.org", 3).await;
     let team = create_team(app, &owner, "Mailroom").await;
     let r = call(
         app,
@@ -904,6 +950,7 @@ async fn role_change_and_removal_take_effect_in_relay_immediately() {
     let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "owner@example.org").await;
+    grant_license(app, &owner, "owner@example.org", 3).await;
     let team = create_team(app, &owner, "Instant").await;
     let links = invite_links(app, &owner, &team, &["admin@example.org"], "admin").await;
     let (admin, _) = login(&s, "admin@example.org").await;
@@ -1027,11 +1074,14 @@ async fn invitations_count_per_address_for_rate_limit() {
 
 #[tokio::test]
 async fn host_commands_create_team_invite_and_teams() {
-    use hangar_server::identity::teams::{cli_create_team, cli_invite, cli_teams};
+    use hangar_server::identity::teams::{
+        cli_create_team, cli_install_license, cli_invite, cli_teams, LICENSE_REQUIRED_HINT,
+    };
     let s = start(local_config()).await;
     let app = &s.server.router;
     let db = &s.server.state.relay.db;
-    let public = &s.server.state.config.public_url;
+    let config = &s.server.state.config;
+    let public = &config.public_url;
 
     assert!(cli_teams(db).await.unwrap().is_empty());
     // Owner without an account: the account is created with the team.
@@ -1054,29 +1104,31 @@ async fn host_commands_create_team_invite_and_teams() {
     // Role owner and nonsense rejected, unknown team with a hint.
     for role in ["owner", "root", ""] {
         assert!(
-            cli_invite(db, public, "de", &team, "new@example.org", role)
+            cli_invite(db, config, &team, "new@example.org", role)
                 .await
                 .is_err(),
             "{role}"
         );
     }
-    let unknown = cli_invite(
-        db,
-        public,
-        "de",
-        "DoesNotExist",
-        "new@example.org",
-        "member",
-    )
-    .await
-    .unwrap_err();
+    let unknown = cli_invite(db, config, "DoesNotExist", "new@example.org", "member")
+        .await
+        .unwrap_err();
     assert!(unknown.contains("teams"), "{unknown}");
 
+    // Without a license the owner is alone: no invitation link, a hint at the license instead.
+    let refused = cli_invite(db, config, &team, "new@example.org", "member")
+        .await
+        .unwrap_err();
+    assert_eq!(refused, LICENSE_REQUIRED_HINT);
+    assert_eq!(cli_teams(db).await.unwrap()[0].open_invitations, 0);
+    let doc = license(3, "chef@example.org", now_s() + 86_400, &license_key());
+    cli_install_license(db, config, &doc).await.unwrap();
+
     // Team by name; a second call renews the invitation, the old link is no longer valid.
-    let first = cli_invite(db, public, "de", "Engineering", "new@example.org", "member")
+    let first = cli_invite(db, config, "Engineering", "new@example.org", "member")
         .await
         .unwrap();
-    let link = cli_invite(db, public, "de", &team, "New@example.org", "admin")
+    let link = cli_invite(db, config, &team, "New@example.org", "admin")
         .await
         .unwrap();
     assert!(link.starts_with(&format!("{public}/invite/")), "{link}");
@@ -1099,7 +1151,7 @@ async fn host_commands_create_team_invite_and_teams() {
     assert!(joined.cookie.is_some(), "browser session for /device");
     let lines = cli_teams(db).await.unwrap();
     assert_eq!((lines[0].members, lines[0].open_invitations), (2, 0));
-    let again = cli_invite(db, public, "de", &team, "new@example.org", "member")
+    let again = cli_invite(db, config, &team, "new@example.org", "member")
         .await
         .unwrap_err();
     assert!(again.contains("is already a member"), "{again}");
@@ -1122,18 +1174,16 @@ async fn host_commands_create_team_invite_and_teams() {
     let second = cli_create_team(db, "de", "chef@example.org", "Engineering")
         .await
         .unwrap();
-    let ambiguous = cli_invite(db, public, "de", "Engineering", "b@example.org", "member")
+    let ambiguous = cli_invite(db, config, "Engineering", "b@example.org", "member")
         .await
         .unwrap_err();
     assert!(
         ambiguous.contains(&team) && ambiguous.contains(&second),
         "{ambiguous}"
     );
-    assert!(
-        cli_invite(db, public, "de", &second, "b@example.org", "member")
-            .await
-            .is_ok()
-    );
+    assert!(cli_invite(db, config, &second, "b@example.org", "member")
+        .await
+        .is_ok());
 }
 
 #[tokio::test]
@@ -1205,6 +1255,7 @@ async fn invitation_link_never_signs_in_an_existing_account() {
     let (victim, _) = login(&s, "victim@example.org").await;
     let secret = create_team(app, &victim, "Secret").await;
     let (attacker, _) = login(&s, "attacker@example.org").await;
+    grant_license(app, &attacker, "attacker@example.org", 3).await;
     let bait = create_team(app, &attacker, "Bait").await;
     let link = invite_links(app, &attacker, &bait, &["victim@example.org"], "member")
         .await
@@ -1241,11 +1292,10 @@ async fn invitation_link_never_signs_in_an_existing_account() {
 /// A new address still joins with one click, but the session starts only after joining.
 #[tokio::test]
 async fn invitation_link_session_only_after_joining() {
-    let mut config = local_config();
-    config.license_keys = KeySet::default();
-    let s = start(config).await;
+    let s = start(local_config()).await;
     let app = &s.server.router;
     let (owner, _) = login(&s, "full@example.org").await;
+    grant_license(app, &owner, "full@example.org", 3).await;
     let team = create_team(app, &owner, "Full").await;
     let emails = ["a1@example.org", "a2@example.org", "a3@example.org"];
     let links = invite_links(app, &owner, &team, &emails, "member").await;
@@ -1260,7 +1310,7 @@ async fn invitation_link_session_only_after_joining() {
         .await;
         assert_eq!(joined.status, StatusCode::OK, "{}", joined.body);
     }
-    // Free has three seats: the third person cannot join and gets no session either.
+    // Three seats: the third person cannot join and gets no session either.
     let full = call(
         app,
         "POST",
@@ -1271,4 +1321,116 @@ async fn invitation_link_session_only_after_joining() {
     .await;
     assert_eq!(full.status, StatusCode::CONFLICT, "{}", full.body);
     assert!(full.cookie.is_none(), "no session without joining");
+}
+
+/// Free is the owner alone: when the license expires, members who already joined keep their seat
+/// and keep working, new people are refused with `license_required` (API and browser page), and
+/// a renewed license opens the team again.
+#[tokio::test]
+async fn expired_license_keeps_members_and_refuses_new_people() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let db = &s.server.state.relay.db;
+    let (owner, _) = login(&s, "owner@example.org").await;
+    let team = create_team(app, &owner, "Grandfathered").await;
+    let other_team = create_team(app, &owner, "Second").await;
+    grant_license(app, &owner, "owner@example.org", 3).await;
+    let links = invite_links(
+        app,
+        &owner,
+        &team,
+        &[
+            "kept@example.org",
+            "late@example.org",
+            "browser@example.org",
+        ],
+        "member",
+    )
+    .await;
+    let (kept, _) = login(&s, "kept@example.org").await;
+    let (late, _) = login(&s, "late@example.org").await;
+    assert_eq!(accept(app, &kept, &links[0]).await.status, StatusCode::OK);
+
+    // The license expires (the stored document is replaced by an expired one).
+    sqlx::query("UPDATE licenses SET document = ?")
+        .bind(license(3, "owner@example.org", now_s() - 1, &license_key()))
+        .execute(db)
+        .await
+        .unwrap();
+    let stored = call(
+        app,
+        "GET",
+        "/v1/license",
+        &[("authorization", &bearer(&owner))],
+        None,
+    )
+    .await
+    .json();
+    assert_eq!(
+        (&stored["active"], &stored["effectiveSeats"]),
+        (&json!(false), &json!(1))
+    );
+
+    // New people: refused, in the app API and on the browser page.
+    let refused = accept(app, &late, &links[1]).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(refused.json()["error"], "license_required");
+    let page = call(
+        app,
+        "POST",
+        &format!("/invite/{}", links[2]),
+        &[("origin", ORIGIN)],
+        Some(form(&[])),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::CONFLICT, "{}", page.body);
+    assert!(page.body.contains("license"), "{}", page.body);
+    assert!(page.cookie.is_none());
+    assert_eq!(
+        invite_statuses(app, &owner, &team, &["new@example.org"]).await,
+        vec![json!("license_required")]
+    );
+
+    // The member who already joined stays, is counted beyond the limit and keeps working.
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{team}"),
+        &[("authorization", &bearer(&owner))],
+        None,
+    )
+    .await
+    .json();
+    assert_eq!(
+        detail["seats"],
+        json!({ "limit": 1, "used": 2, "plan": "free" })
+    );
+    let mut ws = Client::connect(s.addr).await;
+    let welcome = ws
+        .hello(&team, ticket_for(app, &kept, &team).await, "kept-pc", None)
+        .await;
+    assert!(
+        matches!(welcome.message, ServerMessage::Welcome(_)),
+        "{welcome:?}"
+    );
+    // Holding a seat already, they can still join another of the owner's teams. The host command
+    // follows the same rule: a link for a seat holder, the license hint for a new person.
+    use hangar_server::identity::teams::{cli_invite, LICENSE_REQUIRED_HINT};
+    let config = &s.server.state.config;
+    assert!(
+        cli_invite(db, config, &other_team, "kept@example.org", "member")
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        cli_invite(db, config, &other_team, "late@example.org", "member").await,
+        Err(LICENSE_REQUIRED_HINT.to_owned())
+    );
+    let again = invite_links(app, &owner, &other_team, &["kept@example.org"], "member").await;
+    assert_eq!(accept(app, &kept, &again[0]).await.status, StatusCode::OK);
+
+    // A renewed license opens the team again.
+    grant_license(app, &owner, "owner@example.org", 3).await;
+    let fresh = invite_links(app, &owner, &team, &["late@example.org"], "member").await;
+    assert_eq!(accept(app, &late, &fresh[0]).await.status, StatusCode::OK);
 }

@@ -30,13 +30,13 @@ Further routes (administration and browser; the old OAuth routes remain for exis
 | `GET /v1/sessions`, `DELETE /v1/sessions/{id}`, `POST /v1/auth/logout` | sessions |
 | `POST /v1/teams`, `GET/DELETE /v1/teams/{team}` | teams |
 | `PATCH/DELETE /v1/teams/{team}/members/{user}` | change role, remove, leave |
-| `POST /v1/teams/{team}/invitations` | invite (`emails`, `role`, optional `lang`) |
+| `POST /v1/teams/{team}/invitations` | invite (`emails`, `role`, optional `lang`); status per address `invited`, `renewed`, `member` or `license_required` (owner without an active license, nothing created) |
 | `POST .../invitations/{id}/resend`, `DELETE .../invitations/{id}` | resend, revoke |
 | `POST /v1/invitations/accept`, `GET/POST /invite/{token}` | accept (app or browser) |
 | `GET/PUT/DELETE /v1/license` | license document |
 | `POST /v1/tickets` | ticket for `hello` (`team`, old form of `/api/v1/relay-ticket`) |
 
 Errors of the routes outside `/api/v1`: `{"error":"<code>"}` with a matching status (`unauthorized`, `forbidden`, `not_found`,
-`invalid_request`, `rate_limited`, `seats_full`, `wrong_account`, `invalid_license`,
+`invalid_request`, `rate_limited`, `seats_full`, `license_required`, `wrong_account`, `invalid_license`,
 `license_expired`, `license_email_mismatch`, `license_in_use`).
 

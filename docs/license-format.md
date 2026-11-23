@@ -14,12 +14,19 @@ about the seat and reports it in the ticket (`seat_ok`).
 - What counts is the number of **distinct people** across all of the owner's teams, the owner
   included. Someone who is already in one of the owner's teams does not need a new seat for
   another one.
-- Without a valid license, **Free: 3 people** applies. A license with fewer than 3 seats
-  results in 3.
+- Without a valid license, **Free: 1 person** applies, the owner alone. A server without a
+  license is for private use by one person; teams need a license (Team plan). A license never
+  results in fewer than 1 seat.
 - The check happens **when an invitation is accepted**, in the same write transaction as the
-  join. Open invitations do not occupy a seat.
-- **Expiry:** nothing is deleted, nobody is removed. Only joins beyond the limit that then
-  applies (3) are rejected.
+  join. Open invitations do not occupy a seat. Refusals: `license_required` when the owner has
+  no active license, `seats_full` when the license has no seat left.
+- Without an active license, the server also refuses **new invitations** for people who do not
+  hold a seat yet (API: status `license_required` per address, command `invite`: an error),
+  since they could never be accepted. With a license, invitations beyond the seats are still
+  created, so the owner can buy more seats before they are accepted.
+- **Expiry or no license:** nothing is deleted, nobody is removed. People who already joined
+  keep their seat and keep working, even beyond the limit; only joins of new people beyond the
+  limit that then applies (1) are rejected. Renewing the license lifts that again.
 
 ## Structure
 
@@ -86,7 +93,7 @@ and, on renewal, issue a new document that the owner downloads from their accoun
 ## Test vectors
 
 `testdata/licenses.json` (test key from RFC 8032, for tests only): `valid` (10 seats),
-`valid_with_features`, `expired` (signature valid, effectively 3 seats), `foreign_signature`,
+`valid_with_features`, `expired` (signature valid, effectively 1 seat), `foreign_signature`,
 `tampered_payload` (seats changed to 1000), `ticket_context`, `email_not_normalized`.
 Cross-check: `cargo test --test vectors` and `php tools/php/verify_vectors.php testdata/licenses.json`.
 

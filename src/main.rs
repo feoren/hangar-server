@@ -174,15 +174,7 @@ async fn invite(config: Config, args: &[String]) -> Result<(), String> {
     }
     let role = args.get(2).map_or("member", String::as_str);
     let db = local_db(&config, "invite").await?;
-    let link = hangar_server::identity::teams::cli_invite(
-        &db,
-        &config.public_url,
-        &config.default_lang,
-        team,
-        email,
-        role,
-    )
-    .await?;
+    let link = hangar_server::identity::teams::cli_invite(&db, &config, team, email, role).await?;
     eprintln!("invitation for {email} as {role}: single use, 7 days, only for this address.");
     println!("{link}");
     Ok(())

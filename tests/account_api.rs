@@ -9,9 +9,11 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use common::*;
+use ed25519_dalek::SigningKey;
 use hangar_server::config::{Config, IdentityMode};
-use hangar_server::signed::KeySet;
-use hangar_server::util::now_s;
+use hangar_server::license::LicenseClaims;
+use hangar_server::signed::{self, KeySet, LICENSE_CONTEXT};
+use hangar_server::util::{b64, now_s};
 use hangar_server::wire::ServerMessage;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -140,7 +142,38 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 fn local() -> Config {
-    Config::for_tests(IdentityMode::Local, KeySet::default())
+    let mut config = Config::for_tests(IdentityMode::Local, KeySet::default());
+    config.license_keys = KeySet::parse(&format!(
+        "web-1:{}",
+        b64(license_key().verifying_key().as_bytes())
+    ))
+    .unwrap();
+    config
+}
+
+fn license_key() -> SigningKey {
+    SigningKey::from_bytes(&[77; 32])
+}
+
+/// A valid license document with `seats` seats for `email`.
+fn license(seats: u32, email: &str) -> String {
+    let claims = LicenseClaims {
+        v: 1,
+        kid: "web-1".into(),
+        lid: format!("lic_{seats}"),
+        sub: "42".into(),
+        email: email.into(),
+        plan: "team".into(),
+        seats,
+        features: vec![],
+        iat: now_s() - 10,
+        exp: now_s() + 86_400,
+    };
+    signed::sign(
+        &serde_json::to_vec(&claims).unwrap(),
+        LICENSE_CONTEXT,
+        &license_key(),
+    )
 }
 
 /// Browser session via an admin magic link; returns the cookie.
@@ -653,7 +686,8 @@ async fn account_projects_and_ticket_up_to_the_live_connection() {
     assert!(me["id"].is_string(), "IDs as strings");
     assert_eq!(me["email"], "owner@example.org");
     assert_eq!(me["locale"], "en");
-    assert_eq!(me["seats_account_total"], 3);
+    // Without a license, Free: the owner alone.
+    assert_eq!(me["seats_account_total"], 1);
     assert_eq!(me["seats_account_used"], 0);
 
     let empty = call(
@@ -684,11 +718,20 @@ async fn account_projects_and_ticket_up_to_the_live_connection() {
             "role": "owner",
             "owner_id": me["id"],
             "plan": "free",
-            "seats_account_total": 3,
+            "seats_account_total": 1,
             "seats_account_used": 1,
             "pending_invitations": 0,
         }]})
     );
+
+    // Teams need a license.
+    hangar_server::identity::teams::cli_install_license(
+        &s.server.state.relay.db,
+        &s.server.state.config,
+        &license(3, "owner@example.org"),
+    )
+    .await
+    .unwrap();
 
     // Invite and accept: the member sees no pending invitations.
     let (member, _, _) = app_login(&s, "member@example.org", "Desktop").await;

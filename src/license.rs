@@ -2,8 +2,10 @@
 //!
 //! Model: seats per account. The owner buys `seats` seats; they apply to all teams the owner
 //! has on this server. Distinct people are counted across all of the owner's teams, the owner
-//! included. Without a valid license, Free with [`FREE_SEATS`] applies. When a license expires,
-//! nothing is deleted; only joins beyond the Free limit are rejected.
+//! included. Without a valid license, Free with [`FREE_SEATS`] applies: the owner alone, so a
+//! server without a license is for private use by one person and teams need a license. When a
+//! license expires (or none was ever stored), nothing is deleted and nobody is removed: people
+//! who already hold a seat keep it, only joins of new people beyond the limit are rejected.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -14,8 +16,8 @@ use crate::util::{is_id, is_opaque, normalize_email};
 /// Public key of the official website (hangar.feoren.com, `GET /api/v1/keys`) that signs license
 /// documents. Used when `LICENSE_PUBLIC_KEYS` is empty; a non-empty value replaces it.
 pub const OFFICIAL_LICENSE_KEYS: &str = "prod-20261109:7pwgqsy67kGFeqcHXk-59mFmkXESTE4xt33Y9bxwuJc";
-/// Seats without a license (Free): three people.
-pub const FREE_SEATS: u32 = 3;
+/// Seats without a license (Free): the owner only. Team functions need a license.
+pub const FREE_SEATS: u32 = 1;
 /// Longest license document.
 pub const MAX_LICENSE_LEN: usize = 4096;
 /// Highest seat count a document may carry (guards against overflows in counts).
@@ -103,7 +105,8 @@ impl LicenseClaims {
         self.iat <= now_s + CLOCK_SKEW_S && now_s < self.exp
     }
 
-    /// Seats that apply at time `now_s`.
+    /// Seats that apply at time `now_s`. [`verify`] already rejects zero seats; the floor of
+    /// [`FREE_SEATS`] keeps the owner's own seat regardless of the document.
     pub fn effective_seats(&self, now_s: i64) -> u32 {
         if self.active(now_s) {
             self.seats.max(FREE_SEATS)
@@ -152,15 +155,19 @@ mod tests {
         let k = SigningKey::from_bytes(&[9; 32]);
         let c = verify(&doc(&k, &claims()), &keys(&k), &[]).unwrap();
         assert_eq!(c.effective_seats(1500), 10);
+        // Expired: Free, the owner alone.
         assert_eq!(c.effective_seats(2000), FREE_SEATS);
-        assert_eq!(seats_for(None, 1500), FREE_SEATS);
+        assert_eq!(FREE_SEATS, 1);
+        assert_eq!(seats_for(None, 1500), 1);
+        assert_eq!(seats_for(Some(&c), 2000), 1);
+        // A small license keeps its seats now that Free is a single person.
         let mut small = claims();
-        small.seats = 1;
+        small.seats = 2;
         assert_eq!(
             verify(&doc(&k, &small), &keys(&k), &[])
                 .unwrap()
                 .effective_seats(1500),
-            FREE_SEATS
+            2
         );
     }
 
