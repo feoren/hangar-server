@@ -12,6 +12,7 @@ The app's account API under **`/api/v1`**, identical to the website (details:
 | `POST /api/v1/oauth/revoke` | RFC 7009: a refresh token ends the whole device session; always 200 |
 | `GET /api/v1/me` | own account with seats |
 | `GET /api/v1/projects` | teams with role, the owner's seats, open invitations |
+| `GET /api/v1/projects/{id}/members` | the team's members as `{"members":[{"id","role"}]}`, owner first, the whole list in one answer; for members of the team only, 404 otherwise. Hangar follows removals with it (membership log, notes key) |
 | `POST /api/v1/relay-ticket` | ticket for `hello` (`project_id`) with `relay_url` |
 | `GET /api/v1/keys` | public ticket key |
 | `GET/POST /account/devices` | browser page: view and disconnect connected devices |

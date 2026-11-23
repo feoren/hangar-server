@@ -17,7 +17,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, MethodRouter};
@@ -458,6 +458,33 @@ async fn projects(State(state): State<AppState>, headers: HeaderMap) -> ApiOut {
     Ok(ok(json!({ "projects": list })))
 }
 
+/// `GET /api/v1/projects/{id}/members`: the project's members and their roles, for a member of
+/// the project; 404 otherwise (also for unknown projects). An owner's or admin's Hangar removes
+/// members this list no longer names from the team's membership log, and every member's
+/// Hangar notices a removal held back by the relay.
+async fn project_members(
+    State(state): State<AppState>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+) -> ApiOut {
+    let identity = local(&state)?;
+    let user = signed_in(identity, &headers).await?;
+    if !is_id(&project, 64) {
+        return Err(Problem::not_found());
+    }
+    let members = teams::project_members(identity, &user, &project)
+        .await
+        .map_err(|error| match error.status {
+            StatusCode::NOT_FOUND => Problem::not_found(),
+            _ => Problem::from(error),
+        })?;
+    let list: Vec<Value> = members
+        .into_iter()
+        .map(|(id, role)| json!({ "id": id, "role": role }))
+        .collect();
+    Ok(ok(json!({ "members": list })))
+}
+
 /// `POST /api/v1/relay-ticket` `{"project_id"}`: ticket (60 s) for `hello`; members only,
 /// otherwise 404 (also for unknown teams).
 async fn relay_ticket(State(state): State<AppState>, request: Request) -> ApiOut {
@@ -539,6 +566,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/oauth/revoke", only(post(revoke), "POST"))
         .route("/api/v1/me", only(get(me), "GET, HEAD"))
         .route("/api/v1/projects", only(get(projects), "GET, HEAD"))
+        .route(
+            "/api/v1/projects/{id}/members",
+            only(get(project_members), "GET, HEAD"),
+        )
         .route("/api/v1/relay-ticket", only(post(relay_ticket), "POST"))
         .route("/api/v1/keys", only(get(keys), "GET, HEAD"))
         .route("/api/v1", any(not_found))

@@ -741,6 +741,40 @@ async fn account_projects_and_ticket_up_to_the_live_connection() {
     .json();
     assert_eq!(owner_view["projects"][0]["pending_invitations"], 1);
 
+    // The member list every member's Hangar compares its team log with.
+    let members = call(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{team}/members"),
+        &[("authorization", &bearer(&member))],
+        In::None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let listed = members.json()["members"].as_array().unwrap().clone();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0], json!({ "id": me["id"], "role": "owner" }));
+    assert_eq!(listed[1]["role"], "member");
+    let (outsider, _, _) = app_login(&s, "outsider@example.org", "Phone").await;
+    let foreign = call(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{team}/members"),
+        &[("authorization", &bearer(&outsider))],
+        In::None,
+    )
+    .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{}", foreign.body);
+    let unknown = call(
+        app,
+        "GET",
+        "/api/v1/projects/no-such-team/members",
+        &[("authorization", &auth)],
+        In::None,
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+
     // Ticket as JSON and as form.
     let ticket = call(
         app,

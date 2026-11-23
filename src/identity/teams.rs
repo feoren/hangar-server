@@ -1211,6 +1211,25 @@ pub struct ProjectView {
     pub pending_invitations: Option<u32>,
 }
 
+/// The members of `team` with their roles, for a member of it; foreign and unknown teams are
+/// "not found". The whole list in one answer (the app refuses paged lists).
+pub async fn project_members(
+    identity: &Identity,
+    user: &User,
+    team: &str,
+) -> ApiResult<Vec<(String, String)>> {
+    require_member(identity, team, user).await?;
+    let mut conn = identity.db.acquire().await?;
+    let members: Vec<(String, String)> = sqlx::query_as(
+        "SELECT user_id, role FROM team_members WHERE team_id = ? \
+         ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, joined_at, user_id",
+    )
+    .bind(team)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(members)
+}
+
 /// All of the person's teams with the seats of the respective owner account. Four queries
 /// regardless of the number of teams (no query per team or per owner): teams,
 /// used seats per owner, the owners' licenses, open invitations. Indexes:
