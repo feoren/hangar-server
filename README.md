@@ -394,7 +394,7 @@ as a stack and set `PUBLIC_URL` and `SERVER_SECRET` as variables. To update, set
 docker run -d --name hangar-server --restart unless-stopped -p 127.0.0.1:8080:8080 \
   -v hangar-data:/data -e IDENTITY=local -e PUBLIC_URL=https://team.example.org \
   -e SERVER_SECRET="$(openssl rand -hex 32)" -e TRUST_PROXY=true \
-  ghcr.io/feoren/hangar-server:0.6.0
+  ghcr.io/feoren/hangar-server:0.6.1
 ```
 
 Forward the domain to `http://127.0.0.1:8080` and allow WebSocket upgrades with long timeouts.

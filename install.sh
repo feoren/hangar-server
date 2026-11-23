@@ -22,7 +22,7 @@
 # HANGAR_SKIP_CADDY=1 (native: you run your own reverse proxy), HANGAR_DIR (Docker folder).
 set -eu
 
-DEFAULT_VERSION=0.6.0
+DEFAULT_VERSION=0.6.1
 REPO_URL=https://github.com/feoren/hangar-server
 
 DOCKER_DIR="${HANGAR_DIR:-/opt/hangar-server}"
