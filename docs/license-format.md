@@ -62,7 +62,11 @@ projects, without a new version.
 1. Signature, `kid` and form as for the ticket (context `hangar-license-v1`).
 2. `v == 1`; fields as above; `email` must already be normalized (`Owner@…` is rejected).
 3. `lid` not in `LICENSE_REVOKED`.
-4. On upload: `email` equals the account address, `iat <= now + 300 s`, `now < exp`.
+4. On upload: `email` equals the account address, `iat <= now + 300 s`, `now < exp`, and `iat`
+   not older than the newest document of the same `lid` stored on this server before
+   (`license_outdated`): after a downgrade the website issues a newer document with fewer seats,
+   and the older one must not come back while it is still valid. The website therefore keeps the
+   `lid` of a subscription and issues every change with a fresh `iat`.
 5. On every seat check the stored document is verified again (rotated or revoked keys take
    effect immediately); expired means Free.
 

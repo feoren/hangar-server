@@ -38,5 +38,5 @@ Further routes (administration and browser; the old OAuth routes remain for exis
 
 Errors of the routes outside `/api/v1`: `{"error":"<code>"}` with a matching status (`unauthorized`, `forbidden`, `not_found`,
 `invalid_request`, `rate_limited`, `seats_full`, `license_required`, `wrong_account`, `invalid_license`,
-`license_expired`, `license_email_mismatch`, `license_in_use`).
+`license_expired`, `license_email_mismatch`, `license_in_use`, `license_outdated`).
 

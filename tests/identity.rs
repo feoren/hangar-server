@@ -2009,3 +2009,67 @@ async fn invisible_characters_are_removed_from_names_and_refused_in_addresses() 
     .await
     .is_err());
 }
+
+/// Security: after a downgrade the website issues a newer document of the same license with
+/// fewer seats. The older one is still within its validity, but it must not come back.
+#[tokio::test]
+async fn an_older_document_of_the_same_license_is_refused() {
+    use hangar_server::identity::teams::cli_install_license;
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let db = &s.server.state.relay.db;
+    let config = &s.server.state.config;
+    let document = |seats: u32, iat: i64| {
+        let claims = LicenseClaims {
+            v: 1,
+            kid: "web-1".into(),
+            lid: "lic_downgraded".into(),
+            sub: "42".into(),
+            email: "chef@example.org".into(),
+            plan: "team".into(),
+            seats,
+            features: vec![],
+            iat,
+            exp: now_s() + 30 * 86_400,
+        };
+        signed::sign(
+            &serde_json::to_vec(&claims).unwrap(),
+            LICENSE_CONTEXT,
+            &license_key(),
+        )
+    };
+    let old = document(50, now_s() - 600);
+    let new = document(5, now_s() - 60);
+    let (token, _) = login(&s, "chef@example.org").await;
+    let put = |doc: String| {
+        let token = token.clone();
+        async move {
+            call(
+                app,
+                "PUT",
+                "/v1/license",
+                &[("authorization", &bearer(&token))],
+                json_body(json!({ "document": doc })),
+            )
+            .await
+        }
+    };
+    assert_eq!(put(old.clone()).await.status, StatusCode::OK);
+    assert_eq!(put(new.clone()).await.status, StatusCode::OK);
+    let back = put(old.clone()).await;
+    assert_eq!(back.status, StatusCode::CONFLICT, "{}", back.body);
+    assert_eq!(back.json()["error"], "license_outdated", "{}", back.body);
+    // The same newest document again is fine, and the host command refuses the old one too.
+    assert_eq!(put(new.clone()).await.status, StatusCode::OK);
+    let error = cli_install_license(db, config, &old).await.unwrap_err();
+    assert!(error.contains("newer document"), "{error}");
+    let stored = call(
+        app,
+        "GET",
+        "/v1/license",
+        &[("authorization", &bearer(&token))],
+        None,
+    )
+    .await;
+    assert_eq!(stored.json()["effectiveSeats"], 5, "{}", stored.body);
+}

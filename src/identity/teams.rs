@@ -1249,29 +1249,58 @@ pub async fn license_put(
         ));
     }
     let mut tx = begin_write(&identity.db).await?;
-    if !store_license(&mut tx, &user.id, &claims.lid, &document).await? {
-        return Err(conflict("license_in_use"));
+    match store_license(&mut tx, &user.id, &claims.lid, claims.iat, &document).await? {
+        Stored::Yes => {}
+        Stored::InUse => return Err(conflict("license_in_use")),
+        Stored::Outdated => return Err(conflict("license_outdated")),
     }
     tx.commit().await?;
     tracing::info!(seats = claims.seats, "license stored");
     Ok(Json(license_json(Some(&claims))))
 }
 
-/// Stores the license document for the account and replaces its previous one. Returns `false`
-/// without writing when another account already holds this license ID.
+/// Outcome of `store_license`.
+enum Stored {
+    Yes,
+    /// Another account already holds this license ID.
+    InUse,
+    /// A newer document of this license was stored before (`license_floors`).
+    Outdated,
+}
+
+/// Stores the license document for the account and replaces its previous one. Writes nothing
+/// when another account holds this license ID, or when the document is older than one of the
+/// same license stored before: after a downgrade the website issues a new document with fewer
+/// seats, and the old one, still valid until its expiry, must not come back.
 async fn store_license(
     tx: &mut crate::db::Tx,
     user_id: &str,
     lid: &str,
+    iat: i64,
     document: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Stored, sqlx::Error> {
     let holder: Option<String> = sqlx::query_scalar("SELECT user_id FROM licenses WHERE lid = ?")
         .bind(lid)
         .fetch_optional(&mut **tx)
         .await?;
     if holder.is_some_and(|h| h != user_id) {
-        return Ok(false);
+        return Ok(Stored::InUse);
     }
+    let floor: Option<i64> = sqlx::query_scalar("SELECT iat FROM license_floors WHERE lid = ?")
+        .bind(lid)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if floor.is_some_and(|floor| iat < floor) {
+        return Ok(Stored::Outdated);
+    }
+    sqlx::query(
+        "INSERT INTO license_floors (lid, iat) VALUES (?, ?) \
+         ON CONFLICT (lid) DO UPDATE SET iat = MAX(iat, excluded.iat)",
+    )
+    .bind(lid)
+    .bind(iat)
+    .execute(&mut **tx)
+    .await?;
     sqlx::query("INSERT INTO licenses (user_id, lid, document, uploaded_at) VALUES (?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET lid = excluded.lid, document = excluded.document, uploaded_at = excluded.uploaded_at")
         .bind(user_id)
         .bind(lid)
@@ -1279,7 +1308,7 @@ async fn store_license(
         .bind(now_s())
         .execute(&mut **tx)
         .await?;
-    Ok(true)
+    Ok(Stored::Yes)
 }
 
 /// Result of `license <file>`: for whom the license was stored and what it grants.
@@ -1312,11 +1341,17 @@ pub async fn cli_install_license(
     let user = find_or_create_user(&mut tx, &email, &config.default_lang, now_s())
         .await
         .map_err(|e| e.to_string())?;
-    if !store_license(&mut tx, &user, &claims.lid, document)
+    match store_license(&mut tx, &user, &claims.lid, claims.iat, document)
         .await
         .map_err(|e| e.to_string())?
     {
-        return Err("this license is already stored for another account".into());
+        Stored::Yes => {}
+        Stored::InUse => return Err("this license is already stored for another account".into()),
+        Stored::Outdated => {
+            return Err(
+                "a newer document of this license was stored before; use the newest one from your account".into(),
+            )
+        }
     }
     tx.commit().await.map_err(|e| e.to_string())?;
     tracing::info!(seats = claims.seats, "license stored (command)");
