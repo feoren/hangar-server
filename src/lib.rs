@@ -103,6 +103,9 @@ pub async fn build(config: Config) -> Result<Server, StartError> {
 /// and systemd give before they kill the process).
 pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a client may take to send the headers of a request.
+pub const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Serves `server` on `listener` until `signal` completes, then closes the live connections
 /// with 1012 (the clients reconnect) and waits up to `SHUTDOWN_DRAIN` for them: the graceful
 /// shutdown of the HTTP server does not wait for upgraded WebSockets, and ending the runtime
@@ -112,18 +115,71 @@ pub async fn serve_until(
     listener: tokio::net::TcpListener,
     signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    use hyper_util::service::TowerToHyperService;
+
     let relay = server.state.relay.clone();
     let shutdown = server.shutdown;
-    let app = server
-        .router
-        .into_make_service_with_connect_info::<std::net::SocketAddr>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            signal.await;
-            tracing::info!("shutting down: closing connections");
-            let _ = shutdown.send(true);
-        })
-        .await?;
+    let router = server.router;
+    // Not `axum::serve`: it builds hyper without a timer, so a client could hold a socket open
+    // forever by sending its request headers byte by byte (slowloris).
+    let (stop, stopped) = watch::channel(false);
+    // Every connection task holds a sender; once all are gone, `open.recv()` returns `None`.
+    let (alive, mut open) = mpsc::channel::<()>(1);
+    tokio::pin!(signal);
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = &mut signal => break,
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // Out of file descriptors and the like: wait a moment instead of spinning.
+                tracing::warn!(%error, "accepting a connection failed");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let _ = stream.set_nodelay(true);
+        // One layer around the whole router, not `Router::layer`, which would wrap every
+        // route again for each connection.
+        let service = TowerToHyperService::new(tower::Layer::layer(
+            &axum::Extension(axum::extract::ConnectInfo(peer)),
+            router.clone(),
+        ));
+        let connection = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades();
+        let mut stopped = stopped.clone();
+        let alive = alive.clone();
+        tokio::spawn(async move {
+            let mut connection = std::pin::pin!(connection);
+            tokio::select! {
+                _ = connection.as_mut() => {}
+                _ = async { stopped.wait_for(|stop| *stop).await.map(|_| ()) } => {
+                    // Finishes the request in progress, then closes; idle ones close at once.
+                    connection.as_mut().graceful_shutdown();
+                    let _ = connection.await;
+                }
+            }
+            drop(alive);
+        });
+    }
+    drop(listener);
+    tracing::info!("shutting down: closing connections");
+    let _ = shutdown.send(true);
+    let _ = stop.send(true);
+    drop(alive);
+    // Open HTTP requests finish; upgraded WebSockets are not counted here, see below.
+    if tokio::time::timeout(SHUTDOWN_DRAIN, open.recv())
+        .await
+        .is_err()
+    {
+        tracing::warn!("HTTP requests still open after the shutdown deadline");
+    }
     if !relay.wait_for_connections(SHUTDOWN_DRAIN).await {
         tracing::warn!(
             open = relay.connection_count(),

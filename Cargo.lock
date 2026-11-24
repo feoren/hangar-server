@@ -736,6 +736,8 @@ dependencies = [
  "hangar-team-protocol",
  "hmac 0.12.1",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "lettre",
  "reqwest",
  "rustls",

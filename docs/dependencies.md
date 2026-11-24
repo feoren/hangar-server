@@ -11,6 +11,7 @@ for the Unicode tables documented by the app).
 | hangar-team-crypto | copy in `vendor/` (origin in its `ORIGIN.md`) | MIT | Verification of the membership log, rotations, device removals and key packages (step E); owned by the app, no secrets in the relay. Brings in `hpke` 0.15, `chacha20poly1305` 0.11, `ed25519-dalek` 3, `hkdf` 0.13, `getrandom` 0.4, `data-encoding` 2 (all MIT/Apache-2.0 or BSD-3-Clause/MIT) | own verification (a second source for the same rules) |
 | hangar-team-protocol | copy in `vendor/` (origin in its `ORIGIN.md`) | MIT | Wire format, keyed hashes, reservation, claims, log, E2E rules; owned by the app (step C), one source for both sides. Pinned via `git`/`rev` instead of `path`, so that uncommitted work in the app's worktree does not change the server | `path` to the worktree (development only) |
 | axum | 0.8.9 | MIT | HTTP and WebSocket, required by the plan; tokio project, actively maintained | actix-web (own runtime), hyper directly (a lot of custom code) |
+| hyper, hyper-util | 1.9 / 0.1.20 | MIT | The HTTP server loop (`serve_until`): `axum::serve` builds hyper without a timer, so there is no deadline for request headers (slowloris). Both are already in the tree through axum | `axum::serve` and a reverse proxy that buffers headers |
 | tokio | 1.54 | MIT | Runtime, timers, signals; the standard in the Rust ecosystem | smol (smaller ecosystem) |
 | sqlx | 0.9.0 | MIT/Apache-2.0 | SQLite (WAL), migrations (`migrate!` embeds `migrations/`); required by the plan; `sqlite-bundled` builds SQLite in (static binary) | rusqlite (synchronous, own pooling) |
 | serde, serde_json | 1 | MIT/Apache-2.0 | JSON frames and documents, as in the app | none sensible |
@@ -26,8 +27,11 @@ for the Unicode tables documented by the app).
 | rustls | 0.23 | MIT/Apache-2.0/ISC | Installing the `ring` provider for reqwest once per process (`src/tls.rs`); already in the tree via lettre | none |
 | lettre | 0.11.24 | MIT | SMTP with TLS (rustls, ring, webpki-roots, no OpenSSL in the static binary), multipart mail | own SMTP client (too much error surface) |
 
+`tower` 0.5 (MIT, without features): `Layer` puts the client address in front of the router per
+connection in `serve_until`; already in the tree through axum.
+
 Tests only: `tokio-tungstenite` 0.29 (MIT, WebSocket client, same tungstenite version as axum),
-`tower` 0.5 (MIT, `oneshot` against the router), `http-body-util` 0.1 (MIT).
+`tower` 0.5 with `util` (`oneshot` against the router), `http-body-util` 0.1 (MIT).
 
 Deliberately not used: `tower-http` (CORS, headers and limits are a few lines of custom
 middleware, and no CORS is needed because the app does not use a browser), `jsonwebtoken` (JWT
