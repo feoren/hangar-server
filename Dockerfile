@@ -14,6 +14,10 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
+# sqlx stores a checksum over the exact bytes of each migration: a file with CRLF (a Windows
+# checkout with core.autocrlf) would not match a database migrated by an LF build, and the
+# server would refuse to start on it.
+RUN if grep -l "$(printf '\015')" migrations/*.sql; then echo 'migrations with CRLF' >&2; exit 1; fi
 COPY src ./src
 COPY vendor ./vendor
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

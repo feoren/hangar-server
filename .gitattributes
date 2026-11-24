@@ -1,1 +1,3 @@
 *.sh text eol=lf
+# sqlx checks the bytes of every applied migration; they must be the same on every checkout.
+migrations/*.sql text eol=lf
