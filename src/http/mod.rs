@@ -176,6 +176,18 @@ impl axum::extract::FromRequestParts<AppState> for ClientIp {
 impl ClientIp {
     /// Key for rate limiting. IPv6 counts per /64: a connection usually gets a whole /64,
     /// so individual addresses from it cost nothing.
+    /// Coarser key for the connections waiting for `hello`: IPv6 per /48, since a single
+    /// customer often gets a whole /48 and with it 65536 networks of /64.
+    pub fn wide_key(&self) -> String {
+        match self.0 {
+            Some(IpAddr::V6(ip)) if ip.to_ipv4_mapped().is_none() => {
+                let s = ip.segments();
+                format!("{:x}:{:x}:{:x}::/48", s[0], s[1], s[2])
+            }
+            _ => self.key(),
+        }
+    }
+
     pub fn key(&self) -> String {
         match self.0 {
             Some(IpAddr::V4(ip)) => ip.to_string(),

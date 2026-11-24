@@ -62,12 +62,13 @@ pub async fn upgrade(
         return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
     }
     // Until its first valid `hello` the connection also holds a slot of the smaller quota for
-    // connections that have not signed in (`run` frees it).
-    if !state.relay.acquire_before_hello() {
+    // connections that have not signed in (`run` frees it); newer ones push the oldest out.
+    let Some((waiting, pushed_out)) = state.relay.acquire_before_hello(&ip.wide_key()) else {
         state.relay.release_connection();
         state.relay.release_ip(&ip_key);
+        tracing::info!("too many connections without hello from one address");
         return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
-    }
+    };
     let relay = state.relay.clone();
     let shutdown = state.shutdown.clone();
     // Small buffers: tungstenite reserves 128 KiB per connection by default, which alone fills
@@ -80,13 +81,13 @@ pub async fn upgrade(
             let relay = relay.clone();
             let ip_key = ip_key.clone();
             move |_| {
-                relay.release_before_hello();
+                relay.release_before_hello(waiting);
                 relay.release_connection();
                 relay.release_ip(&ip_key);
             }
         })
         .on_upgrade(move |socket| async move {
-            run(socket, relay.clone(), shutdown).await;
+            run(socket, relay.clone(), shutdown, waiting, pushed_out).await;
             relay.release_connection();
             relay.release_ip(&ip_key);
         })
@@ -172,6 +173,8 @@ async fn run(
     socket: WebSocket,
     relay: Arc<Relay>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    waiting: u64,
+    pushed_out: Arc<Notify>,
 ) {
     let conn = relay.next_conn();
     let (mut sink, mut stream) = socket.split();
@@ -179,6 +182,11 @@ async fn run(
     let (tx, mut rx) = outbox(kick.clone());
     // Teams that removed this device; the team sends its ID (see `Team::drop_device`).
     let (removed, mut removed_rx) = mpsc::unbounded_channel::<String>();
+    // The writer ends once the connection is closed or broken (a close frame of the team, a
+    // failed send): then the reading side stops as well instead of holding its teams until the
+    // idle timeout while a client keeps the socket open without answering.
+    let writer_done = Arc::new(Notify::new());
+    let done = writer_done.clone();
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -208,6 +216,8 @@ async fn run(
                 }
             }
         }
+        // Before `close`: a peer that no longer reads can hold `close` up, the reader stops now.
+        done.notify_one();
         let _ = sink.close().await;
     });
 
@@ -250,8 +260,10 @@ async fn run(
         let next = tokio::select! {
             next = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => next,
             _ = kick.notified() => break Some((1013, "slow consumer")),
+            _ = writer_done.notified() => break None,
             _ = tokio::time::sleep(age_left) => break Some((close::CLOSE_ROLE_CHANGED, "ticket renewal")),
             _ = hello_deadline => break Some((close::CLOSE_HELLO_TIMEOUT, "hello required")),
+            _ = pushed_out.notified(), if before_hello => break Some((close::CLOSE_HELLO_TIMEOUT, "hello required")),
             _ = grace_deadline => {
                 // The connection leaves only the teams whose grace period is over.
                 let now = Instant::now();
@@ -286,7 +298,11 @@ async fn run(
             Message::Close(_) => break None,
             Message::Ping(_) | Message::Pong(_) => continue,
             Message::Binary(_) => {
+                bad += 1;
                 send(&tx, err(None, None, error(ErrorCode::BadRequest)));
+                if bad > MAX_BAD_FRAMES {
+                    break Some((close::CLOSE_HELLO_TIMEOUT, "bad frames"));
+                }
                 continue;
             }
         };
@@ -310,6 +326,14 @@ async fn run(
                 continue;
             }
         };
+        // Before signing in, only `hello` makes sense: anything else counts as a broken frame, so
+        // that a connection without a ticket cannot keep the server parsing until its deadline.
+        if before_hello && !matches!(frame.message, ClientMessage::Hello(_)) {
+            bad += 1;
+            if bad > MAX_BAD_FRAMES {
+                break Some((close::CLOSE_HELLO_TIMEOUT, "bad frames"));
+            }
+        }
         let op = frame.id;
         let team_id = frame.team;
         // If the removal arrived together with this frame, `select!` does not reliably pick it
@@ -378,7 +402,7 @@ async fn run(
                 {
                     Ok(ok) => {
                         if std::mem::take(&mut before_hello) {
-                            relay.release_before_hello();
+                            relay.release_before_hello(waiting);
                         }
                         ok
                     }
@@ -563,7 +587,7 @@ async fn run(
         leave(&relay, conn, entry).await;
     }
     if before_hello {
-        relay.release_before_hello();
+        relay.release_before_hello(waiting);
     }
     if let Some(member) = member {
         relay.release_member(&member);

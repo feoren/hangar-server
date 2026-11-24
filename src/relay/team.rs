@@ -8,6 +8,7 @@
 //! to all receivers in sequence order.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::Utf8Bytes;
@@ -51,6 +52,58 @@ pub const RECENT_OPS: usize = 4096;
 pub const MAX_SESSIONS_PER_DEVICE: usize = 64;
 /// Claims per team (protects memory).
 pub const MAX_SESSIONS_PER_TEAM: usize = 2000;
+/// Claims of one member in a team, over all its devices: one member cannot take every slot
+/// of the team (devices are only IDs from `hello`, a member can name many).
+pub const MAX_SESSIONS_PER_MEMBER: usize = 256;
+/// Claim bytes of all loaded teams together: every team has its own limit, but one account can
+/// be in many teams (a project on the website is cheap), so the relay as a whole has one too.
+pub const MAX_CLAIM_BYTES_TOTAL: usize = 64 * 1024 * 1024;
+/// Claim bytes of one member over all loaded teams, as a multiple of the limit per team.
+pub const CLAIM_TEAMS_PER_MEMBER: usize = 4;
+/// Bytes of the replay windows of all loaded teams together. Above it, the team that writes
+/// keeps only `SMALL_WINDOW_BYTES`; a cursor behind the window gets a snapshot.
+pub const MAX_WINDOW_BYTES_TOTAL: usize = 32 * 1024 * 1024;
+pub const SMALL_WINDOW_BYTES: usize = 128 * 1024;
+
+/// Memory shared by all loaded teams: claim bytes per team and member, and the bytes of all
+/// replay windows. A team keeps its own entries current and removes them when it is dropped
+/// (unloaded or deleted).
+#[derive(Default)]
+pub struct Budget {
+    claims: std::sync::Mutex<HashMap<String, HashMap<MemberId, usize>>>,
+    window_bytes: AtomicUsize,
+}
+
+impl Budget {
+    /// Claim bytes outside `team`: of `member`, and of everyone.
+    fn claims_elsewhere(&self, team: &str, member: &MemberId) -> (usize, usize) {
+        let Ok(claims) = self.claims.lock() else {
+            return (usize::MAX / 4, usize::MAX / 4);
+        };
+        let others = claims.iter().filter(|(id, _)| id.as_str() != team);
+        others.fold((0, 0), |(own, all), (_, members)| {
+            (
+                own + members.get(member).copied().unwrap_or(0),
+                all + members.values().sum::<usize>(),
+            )
+        })
+    }
+
+    fn set_claims(&self, team: &str, totals: HashMap<MemberId, usize>) {
+        if let Ok(mut claims) = self.claims.lock() {
+            if totals.is_empty() {
+                claims.remove(team);
+            } else {
+                claims.insert(team.to_owned(), totals);
+            }
+        }
+    }
+
+    /// Bytes of all replay windows (for tests and diagnostics).
+    pub fn window_bytes(&self) -> usize {
+        self.window_bytes.load(Ordering::Relaxed)
+    }
+}
 /// Claims of a device that has been offline this long expire (in milliseconds).
 pub const OFFLINE_CLAIMS_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -180,6 +233,7 @@ fn blob_kind(kind: BlobKind) -> &'static str {
 
 pub struct Team {
     pub id: String,
+    budget: Arc<Budget>,
     team: TeamId,
     policy: Policy,
     log: EventLog<ServerMessage>,
@@ -219,7 +273,13 @@ impl Team {
     /// holders count as disconnected afterwards); the restart events go into the log. If the
     /// state is missing or does not fit, an empty book starts with a new stream (clients fetch a
     /// snapshot).
-    pub async fn load(db: &Db, id: &str, policy: Policy, now: u64) -> Result<Team, sqlx::Error> {
+    pub async fn load(
+        db: &Db,
+        id: &str,
+        policy: Policy,
+        budget: Arc<Budget>,
+        now: u64,
+    ) -> Result<Team, sqlx::Error> {
         let protocol = |e: String| sqlx::Error::Protocol(e);
         let team = TeamId::new(id).map_err(|e| protocol(e.to_string()))?;
         let row = store::load_team(db, id, now).await?;
@@ -287,6 +347,7 @@ impl Team {
         }
         let mut loaded = Team {
             id: id.to_owned(),
+            budget,
             team,
             policy,
             log,
@@ -328,6 +389,16 @@ impl Team {
 
     pub fn epoch(&self) -> Epoch {
         self.book.epoch()
+    }
+
+    /// Writes this team's claim bytes per member into the shared budget.
+    fn publish_claims(&self) {
+        let mut totals: HashMap<MemberId, usize> = HashMap::new();
+        for (holder, sessions) in &self.sessions {
+            *totals.entry(holder.member.clone()).or_insert(0) += sessions.values().sum::<usize>();
+        }
+        totals.retain(|_, bytes| *bytes > 0);
+        self.budget.set_claims(&self.id, totals);
     }
 
     /// Nothing connected, nothing held, nothing remembered: may be unloaded from memory.
@@ -543,8 +614,30 @@ impl Team {
         Ok(())
     }
 
-    /// Appends a logged event and keeps the replay window within `REPLAY_WINDOW_BYTES`.
+    /// Appends a logged event and keeps the replay window within `REPLAY_WINDOW_BYTES`, or
+    /// within `SMALL_WINDOW_BYTES` while all windows together exceed `MAX_WINDOW_BYTES_TOTAL`.
     fn log_push(&mut self, message: ServerMessage) -> Seq {
+        let before = self.window_bytes;
+        let seq = self.log_push_inner(message);
+        self.account_window(before);
+        seq
+    }
+
+    /// Carries the change of this team's window into the shared budget.
+    fn account_window(&self, before: usize) {
+        let now = self.window_bytes;
+        if now >= before {
+            self.budget
+                .window_bytes
+                .fetch_add(now - before, Ordering::Relaxed);
+        } else {
+            self.budget
+                .window_bytes
+                .fetch_sub(before - now, Ordering::Relaxed);
+        }
+    }
+
+    fn log_push_inner(&mut self, message: ServerMessage) -> Seq {
         let size = serde_json::to_string(&message).map_or(0, |text| text.len());
         let seq = self.log.push(message);
         // The log drops its oldest event at `REPLAY_WINDOW` events; so does the mirror.
@@ -555,8 +648,12 @@ impl Team {
         }
         self.window.push_back((seq, size));
         self.window_bytes += size;
+        let crowded =
+            self.budget.window_bytes.load(Ordering::Relaxed) + size > MAX_WINDOW_BYTES_TOTAL;
         if self.window_bytes > REPLAY_WINDOW_BYTES {
-            self.shrink_window();
+            self.shrink_window(REPLAY_WINDOW_BYTES / 4 * 3);
+        } else if crowded && self.window_bytes > SMALL_WINDOW_BYTES {
+            self.shrink_window(SMALL_WINDOW_BYTES / 4 * 3);
         }
         seq
     }
@@ -565,8 +662,7 @@ impl Team {
     /// rarely), at least the newest event stays. The crate's log has no way to drop events, so
     /// it is rebuilt with `EventLog::resume` and the kept events: stream, head and the
     /// sequence numbers stay the same, nothing is stored differently.
-    fn shrink_window(&mut self) {
-        let target = REPLAY_WINDOW_BYTES / 4 * 3;
+    fn shrink_window(&mut self, target: usize) {
         while self.window_bytes > target && self.window.len() > 1 {
             if let Some((_, dropped)) = self.window.pop_front() {
                 self.window_bytes -= dropped;
@@ -973,6 +1069,7 @@ impl Team {
         }
         let notices = self.board.clear_member(member);
         self.sessions.retain(|holder, _| holder.member != *member);
+        self.publish_claims();
         self.deliver_overlaps(notices);
         self.close_where(close::CLOSE_REMOVED, "removed", |s| {
             s.holder.member == *member
@@ -992,6 +1089,7 @@ impl Team {
         let events = self.book_messages(removed);
         let notices = self.board.clear_device(holder);
         self.sessions.remove(holder);
+        self.publish_claims();
         self.deliver_overlaps(notices);
         let gone: Vec<u64> = self
             .subscribers
@@ -1105,6 +1203,7 @@ impl Team {
         for holder in stale {
             self.offline_since.remove(&holder);
             self.sessions.remove(&holder);
+            self.publish_claims();
             let notices = self.board.clear_device(&holder);
             self.deliver_overlaps(notices);
         }
@@ -1323,6 +1422,9 @@ impl Team {
                 )
             }
             ClientMessage::TaskRekey(m) => {
+                // The note moves along, but only if the book accepts the rekey: otherwise a
+                // member could overwrite the note of someone else's reservation.
+                let before = self.notes.get(&m.to).cloned();
                 if let Some(note) = self.notes.get(&m.from).cloned() {
                     self.notes.insert(m.to, note);
                 }
@@ -1334,6 +1436,12 @@ impl Team {
                         epoch: m.epoch,
                     },
                 );
+                if matches!(reply, Some(Err(_))) {
+                    match before {
+                        Some(note) => self.notes.insert(m.to, note),
+                        None => self.notes.remove(&m.to),
+                    };
+                }
                 (events, reply, None)
             }
             ClientMessage::ClaimSet(m) => {
@@ -1350,11 +1458,25 @@ impl Team {
                     .filter(|(holder, _)| holder.member == who.member)
                     .flat_map(|(_, s)| s.values())
                     .sum();
+                let member_sessions: usize = self
+                    .sessions
+                    .iter()
+                    .filter(|(holder, _)| holder.member == who.member)
+                    .map(|(_, s)| s.len())
+                    .sum();
                 let too_many = previous.is_none()
                     && (total >= MAX_SESSIONS_PER_TEAM
-                        || own.map_or(0, HashMap::len) >= MAX_SESSIONS_PER_DEVICE);
-                let too_large = member_bytes - freed + bytes > limits.claim_bytes_per_member
-                    || team_bytes - freed + bytes > limits.claim_bytes_per_team;
+                        || own.map_or(0, HashMap::len) >= MAX_SESSIONS_PER_DEVICE
+                        || member_sessions >= MAX_SESSIONS_PER_MEMBER);
+                let member_here = member_bytes - freed + bytes;
+                let team_here = team_bytes - freed + bytes;
+                let (member_elsewhere, all_elsewhere) =
+                    self.budget.claims_elsewhere(&self.id, &who.member);
+                let too_large = member_here > limits.claim_bytes_per_member
+                    || team_here > limits.claim_bytes_per_team
+                    || member_elsewhere + member_here
+                        > limits.claim_bytes_per_member * CLAIM_TEAMS_PER_MEMBER
+                    || all_elsewhere + team_here > MAX_CLAIM_BYTES_TOTAL;
                 if too_many || too_large {
                     (Vec::new(), Some(Err(error(ErrorCode::Limit))), None)
                 } else {
@@ -1362,6 +1484,7 @@ impl Team {
                         .entry(who.clone())
                         .or_default()
                         .insert(m.session.clone(), bytes);
+                    self.publish_claims();
                     let session = SessionRef {
                         holder: who.clone(),
                         session: m.session,
@@ -1386,6 +1509,7 @@ impl Team {
                         self.sessions.remove(&who);
                     }
                 }
+                self.publish_claims();
                 let notices = self.board.clear(&SessionRef {
                     holder: who.clone(),
                     session: m.session,
@@ -1436,6 +1560,17 @@ impl Team {
                 }
             }
             ClientMessage::DeviceKeys(m) => {
+                // Once the verified log lists this device, its keys are fixed: other keys would
+                // make `devices.get` disagree with the log, and with a stolen ticket of the same
+                // member someone could slip their own keys in front of the next `AddDevice`.
+                let listed = self
+                    .verifier
+                    .state()
+                    .and_then(|state| state.device(&who))
+                    .map(|entry| entry.keys);
+                if listed.is_some_and(|keys| keys.sign != m.sign || keys.kem != m.kem) {
+                    return Ok((Vec::new(), Some(Err(error(ErrorCode::Conflict))), None));
+                }
                 let stored = store::set_device_keys(
                     db,
                     &self.id,
@@ -1755,6 +1890,16 @@ impl Team {
 fn log_refused(refused: &LogError) -> Reply {
     tracing::info!(reason = %refused, "log entry rejected");
     Err(error(refused.code()))
+}
+
+impl Drop for Team {
+    /// An unloaded or deleted team gives its share of the shared budget back.
+    fn drop(&mut self) {
+        self.budget.set_claims(&self.id, HashMap::new());
+        self.budget
+            .window_bytes
+            .fetch_sub(self.window_bytes, Ordering::Relaxed);
+    }
 }
 
 /// Limits from the configuration that `handle` needs.

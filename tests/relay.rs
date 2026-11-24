@@ -1017,7 +1017,35 @@ async fn connections_before_hello_have_their_own_quota() {
     config.max_connections = 8;
     let s = start(config).await;
     let mut first = Client::connect(s.addr).await;
-    let _second = Client::connect(s.addr).await;
+    let mut second = Client::connect(s.addr).await;
+    // After its hello the first one counts as a normal connection and frees the slot.
+    let w = first
+        .hello("t", ticket("alice", "t", Role::Owner), "alice-device", None)
+        .await;
+    assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+    let _third = Client::connect(s.addr).await;
+    // The quota is full again: a new connection is not refused but pushes out the oldest one
+    // still waiting, so connections that never sign in cannot lock anybody out.
+    let mut fourth = Client::connect(s.addr).await;
+    assert_eq!(second.close_code().await, Some(close::CLOSE_HELLO_TIMEOUT));
+    let w = fourth
+        .hello("t", ticket("bob", "t", Role::Member), "bob-device", None)
+        .await;
+    assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+}
+
+#[tokio::test]
+async fn one_address_has_only_a_few_connections_waiting_for_hello() {
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.max_connections = 200;
+    config.max_connections_per_ip = 20;
+    let s = start(config).await;
+    let max = s.server.state.relay.max_waiting_per_address();
+    assert_eq!(max, 5, "a quarter of the connections per address");
+    let mut waiting = Vec::new();
+    for _ in 0..max {
+        waiting.push(Client::connect(s.addr).await);
+    }
     let refused = tokio_tungstenite::connect_async(format!("ws://{}/v1/live", s.addr)).await;
     match refused {
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
@@ -1025,12 +1053,12 @@ async fn connections_before_hello_have_their_own_quota() {
         }
         other => panic!("expected 503: {other:?}"),
     }
-    // After its hello the first one counts as a normal connection and frees the slot.
-    let w = first
+    // A hello frees the slot for the next connection.
+    let w = waiting[0]
         .hello("t", ticket("alice", "t", Role::Owner), "alice-device", None)
         .await;
     assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
-    let _third = Client::connect(s.addr).await;
+    let _next = Client::connect(s.addr).await;
 }
 
 #[tokio::test]
@@ -1184,4 +1212,368 @@ async fn timer_waits_for_a_team_skipped_three_times() {
     let started = std::time::Instant::now();
     relay.tick().await;
     assert!(started.elapsed() < quick);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hardening: rekey notes, claim and blob limits per member, frames before hello, shared budget.
+
+fn sealed_note(data: &str) -> Sealed {
+    Sealed {
+        epoch: Epoch(0),
+        data: cipher(data),
+    }
+}
+
+fn reserve_with_note(task: KeyedHash, note: &str) -> ClientMessage {
+    ClientMessage::TaskReserve(TaskReserve {
+        task,
+        epoch: Epoch(0),
+        prev: Vec::new(),
+        note: Some(sealed_note(note)),
+    })
+}
+
+/// The reservations of `team` as a new connection without cursor sees them in its snapshot:
+/// task, holder and note.
+async fn snapshot_reservations(
+    s: &TestServer,
+    team: &str,
+    who: &str,
+) -> Vec<(KeyedHash, MemberId, Option<Sealed>)> {
+    let mut c = Client::connect(s.addr).await;
+    let op = c.op();
+    c.send(
+        &op,
+        Some(team),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket(who, team, Role::Member)).unwrap(),
+            device: device(&format!("{who}-device")),
+            proto: ProtoRange::CURRENT,
+            last_seq: None,
+        }),
+    )
+    .await;
+    let mut seen = Vec::new();
+    loop {
+        let f = c.recv().await.expect("snapshot and welcome");
+        match f.message {
+            ServerMessage::TaskReserved(r) => seen.push((r.task, r.holder.member, r.note)),
+            ServerMessage::Welcome(_) => break,
+            _ => {}
+        }
+    }
+    c.close().await;
+    seen
+}
+
+/// Security: a refused `task.rekey` must not move the sender's note onto someone else's
+/// reservation.
+#[tokio::test]
+async fn refused_rekey_leaves_the_other_reservations_note_alone() {
+    let s = start_official().await;
+    let (mut a, _) = Client::join(s.addr, "t", "alice", Role::Member).await;
+    let (mut b, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
+    assert!(is_ack(
+        &a.request("t", reserve_with_note(h(30), "YWxpY2U")).await
+    ));
+    assert!(is_ack(
+        &b.request("t", reserve_with_note(h(31), "Ym9i")).await
+    ));
+
+    let rekey = ClientMessage::TaskRekey(TaskRekey {
+        from: h(30),
+        to: h(31),
+        epoch: Epoch(0),
+    });
+    let refused = a.request("t", rekey).await;
+    assert!(code(&refused).is_some(), "{refused:?}");
+
+    let seen = snapshot_reservations(&s, "t", "carol").await;
+    let bobs = seen
+        .iter()
+        .find(|(task, _, _)| *task == h(31))
+        .expect("bob's reservation in the snapshot");
+    assert_eq!(bobs.1, member("bob"));
+    assert_eq!(bobs.2, Some(sealed_note("Ym9i")), "bob's note unchanged");
+    let alices = seen
+        .iter()
+        .find(|(task, _, _)| *task == h(30))
+        .expect("alice's reservation in the snapshot");
+    assert_eq!(alices.2, Some(sealed_note("YWxpY2U")));
+
+    // A refused rekey onto a free task leaves no note behind there either: bob reserves it
+    // afterwards without a note and the snapshot shows none.
+    let stale = ClientMessage::TaskRekey(TaskRekey {
+        from: h(30),
+        to: h(32),
+        epoch: Epoch(7),
+    });
+    assert!(code(&a.request("t", stale).await).is_some());
+    assert!(is_ack(&b.request("t", reserve(h(32))).await));
+    let seen = snapshot_reservations(&s, "t", "dave").await;
+    let fresh = seen
+        .iter()
+        .find(|(task, _, _)| *task == h(32))
+        .expect("bob's new reservation");
+    assert_eq!(fresh.2, None, "no note left over from the refused rekey");
+}
+
+/// A small claim with one file of its own (no area, so no overlaps between sessions).
+fn small_claim(key: &str, n: u32) -> ClientMessage {
+    let mut bytes = [0u8; 32];
+    bytes[..4].copy_from_slice(&n.to_be_bytes());
+    bytes[31] = 0xAB;
+    ClientMessage::ClaimSet(ClaimSet {
+        session: session(key),
+        repo: h(1),
+        epoch: Epoch(0),
+        files: vec![PathHashes {
+            area: None,
+            file: KeyedHash::from_bytes(bytes),
+        }],
+        truncated: false,
+        detail: None,
+    })
+}
+
+/// Security: one member holds at most `MAX_SESSIONS_PER_MEMBER` claim sessions in a team, also
+/// spread over many device IDs (each of them limited to `MAX_SESSIONS_PER_DEVICE`).
+#[tokio::test]
+async fn claim_sessions_are_limited_per_member_over_all_devices() {
+    use hangar_server::relay::team::{MAX_SESSIONS_PER_DEVICE, MAX_SESSIONS_PER_MEMBER};
+    let s = start_official().await;
+    let devices = MAX_SESSIONS_PER_MEMBER / MAX_SESSIONS_PER_DEVICE;
+    assert_eq!(devices * MAX_SESSIONS_PER_DEVICE, MAX_SESSIONS_PER_MEMBER);
+    let mut clients = Vec::new();
+    let mut n = 0u32;
+    for d in 0..devices {
+        let mut c = Client::connect(s.addr).await;
+        let w = c
+            .hello(
+                "t",
+                ticket("bulk", "t", Role::Member),
+                &format!("bulk-{d}"),
+                None,
+            )
+            .await;
+        assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+        for k in 0..MAX_SESSIONS_PER_DEVICE {
+            let r = c.request("t", small_claim(&format!("d{d}k{k}"), n)).await;
+            assert!(is_ack(&r), "session {k} of device {d}: {r:?}");
+            n += 1;
+        }
+        // The device limit itself.
+        let over = c.request("t", small_claim("one-too-many", n)).await;
+        assert_eq!(code(&over), Some(ErrorCode::Limit));
+        clients.push(c);
+    }
+    // A further device of the same member: no room any more.
+    let mut extra = Client::connect(s.addr).await;
+    let w = extra
+        .hello("t", ticket("bulk", "t", Role::Member), "bulk-extra", None)
+        .await;
+    assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+    let refused = extra.request("t", small_claim("extra", n)).await;
+    assert_eq!(code(&refused), Some(ErrorCode::Limit), "{refused:?}");
+    // Replacing an existing session is still allowed at the limit.
+    assert!(is_ack(
+        &clients[0].request("t", small_claim("d0k0", n + 1)).await
+    ));
+    // Another member is not affected.
+    let (mut other, _) = Client::join(s.addr, "t", "other", Role::Member).await;
+    assert!(is_ack(&other.request("t", small_claim("o", n + 2)).await));
+    // A cleared session frees a slot for the extra device.
+    let clear = ClientMessage::ClaimClear(ClaimClear {
+        session: session("d0k1"),
+    });
+    assert!(is_ack(&clients[0].request("t", clear).await));
+    assert!(is_ack(
+        &extra.request("t", small_claim("extra", n + 3)).await
+    ));
+}
+
+/// A claim of exactly `claim_size()` bytes as the relay counts them (file hashes plus detail).
+fn sized_claim(key: &str, n: u32) -> ClientMessage {
+    let mut bytes = [0u8; 32];
+    bytes[..4].copy_from_slice(&n.to_be_bytes());
+    ClientMessage::ClaimSet(ClaimSet {
+        session: session(key),
+        repo: h(2),
+        epoch: Epoch(0),
+        files: vec![PathHashes {
+            area: None,
+            file: KeyedHash::from_bytes(bytes),
+        }],
+        truncated: false,
+        detail: Some(Sealed {
+            epoch: Epoch(0),
+            data: Ciphertext::new("C".repeat(1000)).unwrap(),
+        }),
+    })
+}
+
+fn claim_size() -> usize {
+    std::mem::size_of::<PathHashes>() + 1000
+}
+
+/// Security: one member's claims over all loaded teams stay within
+/// `CLAIM_TEAMS_PER_MEMBER` times the budget per team.
+#[tokio::test]
+async fn claim_bytes_are_limited_per_member_over_all_teams() {
+    use hangar_server::relay::team::CLAIM_TEAMS_PER_MEMBER;
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    // Exactly two claims fit per team.
+    config.claim_bytes_per_member = 2 * claim_size();
+    let s = start(config).await;
+    let mut clients = Vec::new();
+    let mut n = 0u32;
+    for t in 0..CLAIM_TEAMS_PER_MEMBER {
+        let team = format!("team{t}");
+        let (mut c, _) = Client::join(s.addr, &team, "spread", Role::Owner).await;
+        for k in 0..2 {
+            let r = c.request(&team, sized_claim(&format!("k{k}"), n)).await;
+            assert!(is_ack(&r), "claim {k} in {team}: {r:?}");
+            n += 1;
+        }
+        let over = c.request(&team, sized_claim("k2", n)).await;
+        assert_eq!(code(&over), Some(ErrorCode::Limit), "per team");
+        clients.push((team, c));
+    }
+    // One more team: the member's budget over all teams is used up.
+    let last = format!("team{CLAIM_TEAMS_PER_MEMBER}");
+    let (mut c, _) = Client::join(s.addr, &last, "spread", Role::Owner).await;
+    let refused = c.request(&last, sized_claim("k0", n)).await;
+    assert_eq!(code(&refused), Some(ErrorCode::Limit), "{refused:?}");
+    // Another member in that team still has room.
+    let (mut other, _) = Client::join(s.addr, &last, "other", Role::Member).await;
+    assert!(is_ack(&other.request(&last, sized_claim("o", n + 1)).await));
+    // Clearing a claim in another team frees room here.
+    let (first, a) = &mut clients[0];
+    let clear = ClientMessage::ClaimClear(ClaimClear {
+        session: session("k0"),
+    });
+    assert!(is_ack(&a.request(first, clear).await));
+    assert!(is_ack(&c.request(&last, sized_claim("k0", n + 2)).await));
+}
+
+/// Security: one member stores at most `BLOB_TEAMS_PER_MEMBER` times the quota of a team over
+/// all teams.
+#[tokio::test]
+async fn blob_bytes_are_limited_per_member_over_all_teams() {
+    use hangar_server::relay::store::BLOB_TEAMS_PER_MEMBER;
+    assert_eq!(BLOB_TEAMS_PER_MEMBER, 2);
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.blob_quota_bytes = 1000;
+    let s = start(config).await;
+    let put = |len: usize| {
+        ClientMessage::BlobPut(BlobPut {
+            kind: BlobKind::Decision,
+            content: Sealed {
+                epoch: Epoch(0),
+                data: Ciphertext::new("D".repeat(len)).unwrap(),
+            },
+        })
+    };
+    let is_stored =
+        |f: &ServerFrame| matches!(f.message, ServerMessage::Ack(Ack { blob: Some(_), .. }));
+    // Two teams filled to their quota each.
+    for team in ["b1", "b2"] {
+        let (mut c, _) = Client::join(s.addr, team, "hoarder", Role::Owner).await;
+        let r = c.request(team, put(1000)).await;
+        assert!(is_stored(&r), "{team}: {r:?}");
+        c.close().await;
+    }
+    // A third team has room of its own, but the member's total is used up.
+    let (mut c, _) = Client::join(s.addr, "b3", "hoarder", Role::Owner).await;
+    let refused = c.request("b3", put(4)).await;
+    assert_eq!(code(&refused), Some(ErrorCode::Limit), "{refused:?}");
+    // Another member can still store in that team.
+    let (mut other, _) = Client::join(s.addr, "b3", "other", Role::Member).await;
+    assert!(is_stored(&other.request("b3", put(1000)).await));
+}
+
+async fn ping(c: &mut Client, id: String) {
+    c.send_raw(&format!(r#"{{"v":1,"id":"{id}","type":"ping"}}"#))
+        .await;
+}
+
+/// Before `hello` every other frame counts as broken: more than 20 close the connection at
+/// once, long before the hello deadline. After `hello` such frames are normal.
+#[tokio::test]
+async fn frames_before_hello_count_as_broken() {
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.hello_timeout_ms = 60_000;
+    let s = start(config).await;
+
+    // 21 frames without hello: closed with the hello close code.
+    let mut flood = Client::connect(s.addr).await;
+    for i in 0..21 {
+        ping(&mut flood, format!("f{i}")).await;
+    }
+    let started = std::time::Instant::now();
+    assert_eq!(flood.close_code().await, Some(close::CLOSE_HELLO_TIMEOUT));
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+
+    // 20 are still tolerated: the hello afterwards works.
+    let mut patient = Client::connect(s.addr).await;
+    for i in 0..20 {
+        ping(&mut patient, format!("p{i}")).await;
+        assert!(is_ack(&patient.answer(&format!("p{i}")).await));
+    }
+    let w = patient
+        .hello("t", ticket("alice", "t", Role::Owner), "alice-device", None)
+        .await;
+    assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
+
+    // After hello: many frames, nothing closes.
+    let (mut a, _) = Client::join(s.addr, "t", "bob", Role::Member).await;
+    for i in 0..40 {
+        ping(&mut a, format!("q{i}")).await;
+        assert!(is_ack(&a.answer(&format!("q{i}")).await), "frame {i}");
+    }
+}
+
+/// The shared budget of the replay windows gives a team's share back once the team is gone.
+#[tokio::test]
+async fn replay_window_budget_is_returned_when_a_team_is_closed() {
+    let s = start_official().await;
+    let relay = s.server.state.relay.clone();
+    let mut clients = std::collections::VecDeque::new();
+    for team in ["w1", "w2"] {
+        let (mut c, _) = Client::join(s.addr, team, "alice", Role::Owner).await;
+        for n in 0..5 {
+            assert!(is_ack(
+                &c.request(team, reserve_with_note(h(40 + n), "d2luZG93"))
+                    .await
+            ));
+        }
+        clients.push_back(c);
+    }
+    let both = relay.budget.window_bytes();
+    assert!(both > 0, "the windows are counted");
+
+    let settle = |want: Box<dyn Fn(usize) -> bool>| {
+        let relay = relay.clone();
+        async move {
+            for _ in 0..100 {
+                if want(relay.budget.window_bytes()) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("window bytes stuck at {}", relay.budget.window_bytes());
+        }
+    };
+    relay.close_team("w1").await.unwrap();
+    let mut gone = clients.pop_front().unwrap();
+    assert_eq!(gone.close_code().await, Some(close::CLOSE_TEAM_DELETED));
+    // The app drops the connection; the relay lets go of the team with it.
+    drop(gone);
+    settle(Box::new(move |bytes| bytes > 0 && bytes < both)).await;
+    relay.close_team("w2").await.unwrap();
+    let mut gone = clients.pop_front().unwrap();
+    assert_eq!(gone.close_code().await, Some(close::CLOSE_TEAM_DELETED));
+    // The app drops the connection; the relay lets go of the team with it.
+    drop(gone);
+    settle(Box::new(|bytes| bytes == 0)).await;
 }

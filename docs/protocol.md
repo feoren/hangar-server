@@ -16,11 +16,15 @@ describes how the relay runs it. Open requests to the crate:
   already rejected by the WebSocket reader). Binary frames: `err badRequest`.
 - The server pings every 25 s; after 60 s without any sign of life it disconnects (close 1001).
 - Limits: `MAX_CONNECTIONS` in total (200) and `MAX_CONNECTIONS_PER_IP` (20) per client address (IPv6 per /64)
-  answer with 503 before the upgrade; so do connections still waiting for their first valid
-  `hello` beyond a quarter of `MAX_CONNECTIONS` (at least 1), so connections that never sign in
-  cannot take every slot (after the first valid ticket the connection counts only in the total); `MAX_CONNECTIONS_PER_MEMBER` per member gives `err limit`;
-  30 frames/s per connection with a burst of 120 (`err rateLimited` with `retryAfterMs`); more than
-  20 malformed frames or rejected `hello`s: close 1008.
+  answer with 503 before the upgrade. Connections still waiting for their first valid `hello`
+  have a quota of a quarter of `MAX_CONNECTIONS` (at least 1); when it is full, a new connection
+  closes the oldest waiting one (1008) instead of being refused, so connections that never sign
+  in cannot lock anybody out (the app sends `hello` right away). One address (IPv4, IPv6 per
+  /48) may have a quarter of `MAX_CONNECTIONS_PER_IP` (at least 4) waiting, beyond that 503.
+  After the first valid ticket the connection counts only in the total;
+  `MAX_CONNECTIONS_PER_MEMBER` per member gives `err limit`; 30 frames/s per connection with a
+  burst of 120 (`err rateLimited` with `retryAfterMs`); more than 20 malformed frames, binary
+  frames, rejected `hello`s or other messages before `hello`: close 1008.
 - Without a valid `hello` within `close::HELLO_TIMEOUT_SECS` (15 s) the server closes with
   `CLOSE_HELLO_TIMEOUT` (1008); pings alone do not hold a connection slot.
 - Maximum age `CONNECTION_MAX_AGE_SECS` (default 10 min) per team, counted from the last verified
@@ -211,10 +215,13 @@ The app verifies the log, discards its team identity and signs in with a new dev
 The crate's `ClaimBoard`: hashes `{area, file}` per file, `sameFile` for an identical file hash
 (with the other side's encrypted `detail`), `sameArea` for an identical area; only for the same
 `repo` and the same epoch, never two sessions of the same holder. Claims exist only in memory
-(2000 sessions per team, 64 per device, and a byte budget: file hashes plus encrypted `detail`
-of all sessions of a member at most 4 MiB, of the whole team at most 32 MiB; the largest
-`claim.set` takes about 240 KB, so a member fits 17 of them. Beyond a limit `err limit`, and a
-replaced session counts with its new size), remain for 24 h after a disconnect and then expire; on
+(2000 sessions per team, 64 per device, 256 per member over all its devices, and a byte budget:
+file hashes plus encrypted `detail` of all sessions of a member at most 4 MiB, of the whole team
+at most 32 MiB; the largest `claim.set` takes about 240 KB, so a member fits 17 of them. Since
+one account can be in many teams, there are limits over all loaded teams as well: a member at
+most four times its limit per team, all claims of the relay together at most 64 MiB. Beyond a
+limit `err limit`, and a replaced session counts with its new size), remain for 24 h after a
+disconnect and then expire; on
 leaving, `clear_member`, on removing a device, `clear_device`. Deliberately not persisted:
 after a restart the board is empty, and every client resends `claim.set` for its sessions after
 every `welcome`.

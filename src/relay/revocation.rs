@@ -163,9 +163,9 @@ pub fn verify(
         return Err(RevocationError::Audience);
     }
     if list.exp <= list.iat
-        || list.exp - list.iat > MAX_LIFETIME_S
-        || list.iat > now_s + CLOCK_SKEW_S
-        || now_s >= list.exp + CLOCK_SKEW_S
+        || list.exp.saturating_sub(list.iat) > MAX_LIFETIME_S
+        || list.iat > now_s.saturating_add(CLOCK_SKEW_S)
+        || now_s >= list.exp.saturating_add(CLOCK_SKEW_S)
     {
         return Err(RevocationError::Time);
     }

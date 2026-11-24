@@ -800,3 +800,46 @@ async fn key_packages_are_numbered_without_gaps() {
     assert_eq!(seqs.len(), 2 * rotate.wrapped.len());
     assert_eq!(seqs, expected);
 }
+
+/// Security: once the verified log lists a device, `device.keys` cannot replace its keys
+/// (`conflict`); sending the same keys again is fine, and devices not in the log yet may still
+/// change theirs.
+#[tokio::test]
+async fn device_keys_are_fixed_once_the_log_lists_the_device() {
+    let s = start_official().await;
+    let (_log, alice, mut a, _bob, _b) = team(&s).await;
+    let impostor = Dev::new("alice", "alice-laptop");
+    let other = a
+        .request("t", ClientMessage::DeviceKeys(impostor.keys("t")))
+        .await;
+    assert_eq!(code(&other), Some(ErrorCode::Conflict), "{other:?}");
+    let same = a
+        .request("t", ClientMessage::DeviceKeys(alice.keys("t")))
+        .await;
+    assert!(is_ack(&same), "{same:?}");
+
+    // The stored keys are still the ones of the log.
+    let ServerMessage::Devices(list) = a.request("t", ClientMessage::DevicesGet).await.message
+    else {
+        panic!("no device list")
+    };
+    let listed = format!("{list:?}");
+    let original = alice.keys("t");
+    assert!(
+        listed.contains(&original.sign.to_base64url()),
+        "original sign key kept: {listed}"
+    );
+    assert!(
+        !listed.contains(&impostor.keys("t").sign.to_base64url()),
+        "replacement not stored: {listed}"
+    );
+
+    // A device outside the log may still renew its keys.
+    let phone = Dev::new("alice", "alice-phone");
+    let mut p = Client::join_device(s.addr, "t", &phone, Role::Owner).await;
+    let renewed = Dev::new("alice", "alice-phone");
+    assert!(is_ack(
+        &p.request("t", ClientMessage::DeviceKeys(renewed.keys("t")))
+            .await
+    ));
+}

@@ -8,12 +8,12 @@ pub mod revocation;
 pub mod store;
 pub mod team;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch, Mutex, OnceCell};
+use tokio::sync::{mpsc, watch, Mutex, Notify, OnceCell};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -23,7 +23,7 @@ use crate::util::{now_ms, now_s};
 use crate::wire::{ErrorCode, MemberId, ProtoRange};
 use hangar_team_protocol::reservation::Policy;
 
-use team::{Attention, HandleLimits, Team};
+use team::{Attention, Budget, HandleLimits, Team};
 
 /// Why a `ticket.renew` was not accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +45,19 @@ pub struct Relay {
     audience: String,
     policy: Policy,
     pub limits: HandleLimits,
+    /// Memory shared by all loaded teams (claims, replay windows).
+    pub budget: Arc<Budget>,
     max_connections: usize,
     /// Connections without a valid `hello` yet: at most a quarter of `max_connections`, so
-    /// connections that never sign in cannot take every slot.
+    /// connections that never sign in cannot take every slot. When the quota is full, a new
+    /// connection closes the oldest waiting one instead of being refused: the app sends its
+    /// `hello` right away, so connections that only wait cannot lock anyone out.
     max_before_hello: usize,
     max_per_member: usize,
     max_per_ip: usize,
+    /// Connections one address may have waiting for `hello` (a quarter of `max_per_ip`, at
+    /// least 4: behind the NAT of an office many apps reconnect at once after a restart).
+    max_waiting_per_address: usize,
     pub connection_max_age: Duration,
     pub hello_timeout: Duration,
     /// Grace period of a removed device for its `memberlog.get` (see `conn`).
@@ -60,7 +67,8 @@ pub struct Relay {
     /// loads outside it, in its entry's cell (see `team`).
     teams: Mutex<HashMap<String, Arc<TeamCell>>>,
     connections: AtomicUsize,
-    before_hello: AtomicUsize,
+    /// Connections waiting for their first valid `hello`, oldest first.
+    waiting: std::sync::Mutex<VecDeque<Waiting>>,
     /// Ticks skipped in a row per team because its lock was held (see `tick`).
     skipped_ticks: std::sync::Mutex<HashMap<String, u32>>,
     /// Test hook: every team load waits this long first (milliseconds, 0 in operation).
@@ -98,17 +106,19 @@ impl Relay {
                 claim_bytes_per_member: config.claim_bytes_per_member,
                 claim_bytes_per_team: config.claim_bytes_per_team,
             },
+            budget: Arc::new(Budget::default()),
             max_connections: config.max_connections,
             max_before_hello: (config.max_connections / 4).max(1),
             max_per_member: config.max_connections_per_member,
             max_per_ip: config.max_connections_per_ip,
+            max_waiting_per_address: (config.max_connections_per_ip / 4).max(4),
             connection_max_age: Duration::from_secs(config.connection_max_age_s.max(60)),
             hello_timeout: Duration::from_millis(config.hello_timeout_ms.max(100)),
             removed_grace: Duration::from_millis(config.removed_grace_ms.clamp(100, 30_000)),
             transcript_retention_ms: config.transcript_retention_days.saturating_mul(86_400_000),
             teams: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),
-            before_hello: AtomicUsize::new(0),
+            waiting: std::sync::Mutex::new(VecDeque::new()),
             skipped_ticks: std::sync::Mutex::new(HashMap::new()),
             load_delay_ms: AtomicU64::new(0),
             per_member: std::sync::Mutex::new(HashMap::new()),
@@ -152,20 +162,41 @@ impl Relay {
         self.connections.fetch_sub(1, Ordering::AcqRel);
     }
 
-    /// Takes a slot among the connections still waiting for their first valid `hello`;
-    /// `false` when a quarter of `MAX_CONNECTIONS` is already waiting.
-    pub fn acquire_before_hello(&self) -> bool {
-        let previous = self.before_hello.fetch_add(1, Ordering::AcqRel);
-        if previous >= self.max_before_hello {
-            self.before_hello.fetch_sub(1, Ordering::AcqRel);
-            return false;
+    /// Takes a slot among the connections still waiting for their first valid `hello`. `None`
+    /// when this address (IPv6 per /48, see `ClientIp::wide_key`) already has
+    /// `max_waiting_per_address` waiting. A full quota closes the oldest waiting connection: it
+    /// receives the signal returned with its own slot.
+    pub fn acquire_before_hello(&self, address: &str) -> Option<(u64, Arc<Notify>)> {
+        let mut waiting = self.waiting.lock().ok()?;
+        if waiting.iter().filter(|w| w.address == address).count() >= self.max_waiting_per_address {
+            return None;
         }
-        true
+        let id = self.next_conn();
+        let close = Arc::new(Notify::new());
+        waiting.push_back(Waiting {
+            id,
+            address: address.to_owned(),
+            close: close.clone(),
+        });
+        if waiting.len() > self.max_before_hello {
+            if let Some(oldest) = waiting.pop_front() {
+                // `notify_one` keeps the signal if the connection is not waiting for it yet.
+                oldest.close.notify_one();
+            }
+        }
+        Some((id, close))
+    }
+
+    /// Connections one address may have waiting for their first `hello`.
+    pub fn max_waiting_per_address(&self) -> usize {
+        self.max_waiting_per_address
     }
 
     /// The connection's first valid `hello`, or its end without one.
-    pub fn release_before_hello(&self) {
-        self.before_hello.fetch_sub(1, Ordering::AcqRel);
+    pub fn release_before_hello(&self, id: u64) {
+        if let Ok(mut waiting) = self.waiting.lock() {
+            waiting.retain(|w| w.id != id);
+        }
     }
 
     pub fn connection_count(&self) -> usize {
@@ -263,7 +294,8 @@ impl Relay {
                 if delay > 0 {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
-                let team = Team::load(&self.db, id, self.policy, now_ms()).await?;
+                let team =
+                    Team::load(&self.db, id, self.policy, self.budget.clone(), now_ms()).await?;
                 Ok::<_, sqlx::Error>(Arc::new(Mutex::new(team)))
             })
             .await
@@ -538,6 +570,14 @@ impl Relay {
 
 /// Skipped ticks in a row after which the timer waits for a team's lock.
 const MAX_SKIPPED_TICKS: u32 = 3;
+
+/// A connection that has not sent a valid `hello` yet.
+struct Waiting {
+    id: u64,
+    address: String,
+    /// Closes the connection when newer ones push it out of the quota.
+    close: Arc<Notify>,
+}
 
 /// A team's entry in the map: empty while it loads.
 type TeamCell = OnceCell<Arc<Mutex<Team>>>;

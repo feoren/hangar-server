@@ -117,13 +117,13 @@ pub fn verify(
     {
         return Err(TicketError::Payload);
     }
-    if claims.exp <= claims.iat || claims.exp - claims.iat > MAX_LIFETIME_S {
+    if claims.exp <= claims.iat || claims.exp.saturating_sub(claims.iat) > MAX_LIFETIME_S {
         return Err(TicketError::Lifetime);
     }
-    if claims.iat > now_s + CLOCK_SKEW_S {
+    if claims.iat > now_s.saturating_add(CLOCK_SKEW_S) {
         return Err(TicketError::NotYetValid);
     }
-    if now_s >= claims.exp + CLOCK_SKEW_S {
+    if now_s >= claims.exp.saturating_add(CLOCK_SKEW_S) {
         return Err(TicketError::Expired);
     }
     if let Some(expected) = audience {

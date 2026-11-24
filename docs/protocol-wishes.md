@@ -72,3 +72,20 @@ Decision by the coordinator (2026-11-09): role changes apply silently on the liv
 from `ticket.renew` and from the revocation list (`role_changed` with `role`);
 `member.role_changed` announces them. 4401 (`CLOSE_ROLE_CHANGED`) only when the new role is unknown.
 Please align the description of `CLOSE_ROLE_CHANGED` in the crate with this.
+
+## 6. Proof of possession at `hello`
+
+The device ID in `hello` is chosen by the client; the relay cannot tell whether the connection
+holds that device's signing key. Consequences (docs/security.md): a blocked device comes back
+with a new ID and reads what any member may read until the next `key.rotate`, and a stolen,
+unused owner or admin ticket together with a listed device ID can overwrite the notes key ring.
+Request: a challenge in `welcome` (random, bound to team, holder and connection) that the device
+signs with its log key in a new message; until it has, a device the verified log lists counts
+as unknown, and an unknown device in a team with a log may only send `device.keys`,
+`memberlog.get` and `devices.get`.
+
+## 7. Deleting blobs
+
+There is no `blob.delete`, so a member can fill its team's storage quota for good, and decisions
+and tasks stay until the team is deleted. Request: `blob.delete {blob}` for the author and for
+owner/admin (frees the quota); the relay would keep only the size and author for the quota.

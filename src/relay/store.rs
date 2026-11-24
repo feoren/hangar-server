@@ -586,6 +586,9 @@ pub async fn purge(db: &Db, now_s: i64, transcript_cutoff_ms: u64) -> Result<()>
     }
 }
 
+/// Blob bytes of one member over all teams, as a multiple of the quota per team.
+pub const BLOB_TEAMS_PER_MEMBER: u64 = 2;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum BlobPut {
     Stored(String),
@@ -610,6 +613,16 @@ pub async fn put_blob(
         .fetch_one(&mut *tx)
         .await?;
     if used.saturating_add(size) > i64_of(quota) {
+        return Ok(BlobPut::Quota);
+    }
+    // Over all teams one member may store `BLOB_TEAMS_PER_MEMBER` times the quota of a team:
+    // otherwise a single account fills the disk through many teams of its own.
+    let of_member: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(size), 0) FROM relay_blobs WHERE member = ?")
+            .bind(holder.member.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+    if of_member.saturating_add(size) > i64_of(quota.saturating_mul(BLOB_TEAMS_PER_MEMBER)) {
         return Ok(BlobPut::Quota);
     }
     let id = random_id();
