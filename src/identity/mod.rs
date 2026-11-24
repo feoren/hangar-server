@@ -94,12 +94,24 @@ fn load_or_create_key(dir: &Path) -> Result<SigningKey, String> {
     }
     let seed = random_bytes::<32>();
     let tmp = dir.join("ticket-signing.key.tmp");
-    std::fs::write(&tmp, hex(&seed)).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    // Created with 0600 from the start, never readable for others in between; a leftover from
+    // an interrupted start is replaced.
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
+        file.write_all(hex(&seed).as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
     }
     std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(SigningKey::from_bytes(&seed))

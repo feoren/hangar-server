@@ -276,18 +276,22 @@ fn safe_return(raw: Option<&str>) -> String {
 /// Browser page of the connected devices; the path is hard-coded in the app (`BaseUrl::devices_page`).
 pub const DEVICES_PAGE: &str = "/account/devices";
 
-/// Return after the magic link. A device code in the target is only honored in the browser that
-/// requested the link: otherwise someone could have a link with their own code sent to another
-/// person's address, and that person would approve the attacker's device with one click.
-fn return_after_magic(stored: &str, bound: Option<&str>, browser: Option<&str>) -> String {
-    let same_browser = match (bound, browser) {
+/// Whether the magic link was requested in this browser (its cookie matches the stored hash).
+fn same_browser(bound: Option<&str>, browser: Option<&str>) -> bool {
+    match (bound, browser) {
         (Some(bound), Some(browser)) => {
             crate::util::ct_eq(bound.as_bytes(), token_hash(browser).as_bytes())
         }
         _ => false,
-    };
+    }
+}
+
+/// Return after the magic link. A device code in the target is only honored in the browser that
+/// requested the link: otherwise someone could have a link with their own code sent to another
+/// person's address, and that person would approve the attacker's device with one click.
+fn return_after_magic(stored: &str, bound: Option<&str>, browser: Option<&str>) -> String {
     // The device list carries no code: it may be the target in any browser.
-    if same_browser || stored == DEVICES_PAGE {
+    if same_browser(bound, browser) || stored == DEVICES_PAGE {
         safe_return(Some(stored))
     } else {
         "/device".into()
@@ -357,6 +361,11 @@ pub async fn request_magic_link(
     let Some(email) = normalize_email(raw_email) else {
         return Err(ApiError::INVALID);
     };
+    // Only addresses that may sign in are counted per address: random addresses would
+    // otherwise fill the table of this scope and lock out every new sign-in.
+    if !identity.mailer.enabled() || !may_sign_in(&identity.db, &identity.config, &email).await? {
+        return Ok(());
+    }
     if !identity.limiter.hit(
         "magic-email",
         &email,
@@ -368,26 +377,29 @@ pub async fn request_magic_link(
     ) {
         return Ok(());
     }
-    if !identity.mailer.enabled() || !may_sign_in(&identity.db, &identity.config, &email).await? {
-        return Ok(());
-    }
-    let token = create_magic_link(
-        &identity.db,
-        &email,
-        &safe_return(return_to),
-        MAGIC_TTL_S,
-        browser,
-    )
-    .await?;
-    let link = identity.url(&format!("/auth/magic/{token}"));
-    identity.mailer.send(
-        &email,
-        lang,
-        MailKind::LoginLink {
-            link,
-            minutes: (MAGIC_TTL_S / 60) as u32,
-        },
-    );
+    // Writing the link and rendering the mail happen after the answer: otherwise the response
+    // time would tell whether the address is known.
+    let db = identity.db.clone();
+    let mailer = identity.mailer.clone();
+    let base = identity.url("/auth/magic/");
+    let return_to = safe_return(return_to);
+    let lang = lang.to_owned();
+    let browser = browser.map(str::to_owned);
+    tokio::spawn(async move {
+        match create_magic_link(&db, &email, &return_to, MAGIC_TTL_S, browser.as_deref()).await {
+            Ok(token) => {
+                mailer.send(
+                    &email,
+                    &lang,
+                    MailKind::LoginLink {
+                        link: format!("{base}{token}"),
+                        minutes: (MAGIC_TTL_S / 60) as u32,
+                    },
+                );
+            }
+            Err(error) => tracing::error!(%error, "magic link not stored"),
+        }
+    });
     Ok(())
 }
 
@@ -497,8 +509,8 @@ pub async fn magic_page(
         return ApiError::NOT_FOUND.into_response();
     };
     let (lang, s) = t(&headers, &identity.config);
-    let email: Option<String> = sqlx::query_scalar(
-        "SELECT email FROM magic_links WHERE hash = ? AND used_at IS NULL AND expires_at > ?",
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT email, browser_hash FROM magic_links WHERE hash = ? AND used_at IS NULL AND expires_at > ?",
     )
     .bind(token_hash(&token))
     .bind(now_s())
@@ -506,7 +518,7 @@ pub async fn magic_page(
     .await
     .ok()
     .flatten();
-    let Some(email) = email else {
+    let Some((email, bound)) = row else {
         return message(
             lang,
             s.page_sign_in,
@@ -515,8 +527,21 @@ pub async fn magic_page(
             StatusCode::NOT_FOUND,
         );
     };
+    // Someone may forward a link requested for their own address, so that the person who opens
+    // it works in their account: a mail link opened in another browser says so plainly. Links
+    // of the operator (`login-link`) are never bound to a browser and carry no note.
+    let browser = pages::read_cookie(&headers, pages::login_cookie_name(&identity.config));
+    let foreign = bound.is_some() && !same_browser(bound.as_deref(), browser);
+    let warning = if foreign {
+        format!(
+            r#"<p class="error" role="alert">{}</p>"#,
+            escape(s.page_magic_foreign)
+        )
+    } else {
+        String::new()
+    };
     let body = format!(
-        r#"<h1>{title}</h1><p>{prompt}</p><form method="post" action="/auth/magic/{token}"><button type="submit">{button}</button></form>"#,
+        r#"<h1>{title}</h1><p>{prompt}</p>{warning}<form method="post" action="/auth/magic/{token}"><button type="submit">{button}</button></form>"#,
         title = escape(s.page_sign_in),
         prompt = escape(&fill(s.page_magic_prompt, &[("email", &email)])),
         token = escape(&token),
@@ -600,6 +625,34 @@ async fn consume_magic(
         return Ok(None);
     };
     let user = find_or_create_user(&mut tx, &email, lang, now).await?;
+    // The first proven sign-in of an account created through an invitation link without mail:
+    // whoever opened that link before (possibly the inviter) loses every session, app
+    // sessions included.
+    let proven = sqlx::query("UPDATE users SET unproven = 0 WHERE id = ? AND unproven = 1")
+        .bind(&user)
+        .execute(&mut *tx)
+        .await?;
+    if proven.rows_affected() == 1 {
+        sqlx::query(
+            "UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(&user)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM auth_tokens WHERE session_id IN (SELECT id FROM auth_sessions WHERE user_id = ?)")
+            .bind(&user)
+            .execute(&mut *tx)
+            .await?;
+        // An approved code that was not fetched yet would still yield tokens.
+        sqlx::query(
+            "UPDATE device_codes SET status = 'denied' WHERE user_id = ? AND status = 'approved'",
+        )
+        .bind(&user)
+        .execute(&mut *tx)
+        .await?;
+        tracing::info!("unproven account proven, earlier sessions ended");
+    }
     let cookie = start_browser_session(&mut tx, &user, now).await?;
     tx.commit().await?;
     tracing::info!("sign-in via link");
@@ -613,16 +666,17 @@ pub async fn browser_logout(State(state): State<AppState>, headers: HeaderMap) -
     let Ok(identity) = identity(&state) else {
         return ApiError::NOT_FOUND.into_response();
     };
+    let mut response = Redirect::to("/device").into_response();
+    // A foreign site must not sign anyone out, not even by dropping the cookie.
     if same_origin(&headers, &identity.config) {
         if let Ok(Some(user)) = browser_user(identity, &headers).await {
             let _ = revoke(&identity.db, &user.id, &user.session_id).await;
         }
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            pages::session_cookie(&identity.config, "", 0),
+        );
     }
-    let mut response = Redirect::to("/device").into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        pages::session_cookie(&identity.config, "", 0),
-    );
     response
 }
 
@@ -1121,6 +1175,25 @@ pub async fn device_page(
     let signed_in = escape(&fill(s.page_signed_in, &[("email", &user.email)]));
     let label = match &code {
         Some(code) => {
+            // Looking up a code names the waiting device: limited like approving, so that a
+            // signed-in account cannot scan for codes.
+            if !identity.limiter.hit(
+                "device-lookup",
+                &user.id,
+                Rule {
+                    limit: 30,
+                    window_s: 900,
+                },
+                now_s(),
+            ) {
+                return message(
+                    lang,
+                    s.page_device_title,
+                    s.page_too_many,
+                    "error",
+                    StatusCode::TOO_MANY_REQUESTS,
+                );
+            }
             let label: Option<(String, Option<String>)> = sqlx::query_as(
                 "SELECT label, platform FROM device_codes WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
             )

@@ -1434,3 +1434,578 @@ async fn expired_license_keeps_members_and_refuses_new_people() {
     let fresh = invite_links(app, &owner, &team, &["late@example.org"], "member").await;
     assert_eq!(accept(app, &late, &fresh[0]).await.status, StatusCode::OK);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Hardening: unproven accounts, withdrawn invitations, logout CSRF, lookup limit, link warning,
+// invisible characters.
+
+/// Whether the browser session behind `cookie` is signed in as `email`, read from `/device`.
+async fn signed_in_as(app: &Router, cookie: &str, email: &str) -> bool {
+    let page = call(
+        app,
+        "GET",
+        "/device",
+        &[("cookie", cookie), ("accept-language", "en")],
+        None,
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    page.body.contains(&format!("Signed in as {email}"))
+}
+
+/// Redeems an operator link (`login-link`) and returns the new session cookie.
+async fn redeem_operator_link(s: &TestServer, email: &str) -> String {
+    let link = hangar_server::identity::auth::admin_login_link(
+        &s.server.state.relay.db,
+        &s.server.state.config,
+        email,
+    )
+    .await
+    .unwrap();
+    let r = call(
+        &s.server.router,
+        "POST",
+        link.trim_start_matches(ORIGIN),
+        &[("origin", ORIGIN)],
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    r.cookie.expect("session cookie")
+}
+
+/// Approves a fresh device code in the browser session `cookie` and returns the app's access
+/// token.
+async fn app_token_through_browser(app: &Router, cookie: &str) -> String {
+    let device = call(
+        app,
+        "POST",
+        "/oauth/device_authorization",
+        &[],
+        Some(form(&[("client_id", "hangar"), ("device_name", "Laptop")])),
+    )
+    .await
+    .json();
+    let device_code = device["device_code"].as_str().unwrap().to_owned();
+    let user_code = device["user_code"].as_str().unwrap().to_owned();
+    let page = call(
+        app,
+        "GET",
+        &format!("/device?code={user_code}"),
+        &[("cookie", cookie)],
+        None,
+    )
+    .await;
+    let csrf = between(&page.body, r#"name="csrf" value=""#, "\"").to_owned();
+    let approved = call(
+        app,
+        "POST",
+        "/device",
+        &[("cookie", cookie), ("origin", ORIGIN)],
+        Some(form(&[
+            ("csrf", &csrf),
+            ("user_code", &user_code),
+            ("decision", "approve"),
+        ])),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    let tokens = call(
+        app,
+        "POST",
+        "/oauth/token",
+        &[],
+        Some(form(&[
+            ("client_id", "hangar"),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ("device_code", &device_code),
+        ])),
+    )
+    .await
+    .json();
+    tokens["access_token"]
+        .as_str()
+        .expect("access token")
+        .to_owned()
+}
+
+/// Security: without mail the inviter receives the invitation link, so an account created
+/// through it is unproven. The first proven sign-in (here the operator's `login-link`) ends
+/// every session started before it, browser and app; later sign-ins end nothing.
+#[tokio::test]
+async fn first_proven_sign_in_ends_sessions_of_an_account_from_an_invitation_link() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let (owner, _) = login(&s, "owner@example.org").await;
+    grant_license(app, &owner, "owner@example.org", 3).await;
+    let team = create_team(app, &owner, "Proof").await;
+    let link = invite_links(app, &owner, &team, &["fresh@example.org"], "member")
+        .await
+        .remove(0);
+
+    // The inviter opens the link without a cookie of their own and gets a session.
+    let joined = call(
+        app,
+        "POST",
+        &format!("/invite/{link}"),
+        &[("origin", ORIGIN)],
+        Some(form(&[])),
+    )
+    .await;
+    assert_eq!(joined.status, StatusCode::OK, "{}", joined.body);
+    let invite_cookie = joined.cookie.expect("session after joining");
+    assert!(signed_in_as(app, &invite_cookie, "fresh@example.org").await);
+    // Through that session an app is connected as well.
+    let invite_app = app_token_through_browser(app, &invite_cookie).await;
+    let me = |token: String| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "GET",
+                "/v1/me",
+                &[("authorization", &bearer(&token))],
+                None,
+            )
+            .await
+            .status
+        }
+    };
+    assert_eq!(me(invite_app.clone()).await, StatusCode::OK);
+
+    // The real person signs in with a proof: everything started before ends.
+    let proven = redeem_operator_link(&s, "fresh@example.org").await;
+    assert!(
+        !signed_in_as(app, &invite_cookie, "fresh@example.org").await,
+        "the session from the invitation link must end"
+    );
+    assert_eq!(
+        me(invite_app).await,
+        StatusCode::UNAUTHORIZED,
+        "the app connected through the invitation session must lose its token"
+    );
+    assert!(signed_in_as(app, &proven, "fresh@example.org").await);
+
+    // The mark is gone: a further sign-in ends nothing.
+    let later = redeem_operator_link(&s, "fresh@example.org").await;
+    assert!(
+        signed_in_as(app, &proven, "fresh@example.org").await,
+        "a second proven sign-in must not end the first one"
+    );
+    assert!(signed_in_as(app, &later, "fresh@example.org").await);
+    // Membership from the invitation stays.
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{team}"),
+        &[("authorization", &bearer(&owner))],
+        None,
+    )
+    .await
+    .json();
+    assert_eq!(detail["seats"]["used"], 2, "{detail}");
+}
+
+/// An account that signed in normally (not through an invitation link) keeps its sessions
+/// when it signs in again: only unproven accounts are cleared.
+#[tokio::test]
+async fn proven_accounts_keep_their_sessions_on_the_next_sign_in() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let first = redeem_operator_link(&s, "steady@example.org").await;
+    let second = redeem_operator_link(&s, "steady@example.org").await;
+    assert!(signed_in_as(app, &first, "steady@example.org").await);
+    assert!(signed_in_as(app, &second, "steady@example.org").await);
+}
+
+/// The id of the account behind an access token.
+async fn user_id(app: &Router, token: &str) -> String {
+    call(
+        app,
+        "GET",
+        "/v1/me",
+        &[("authorization", &bearer(token))],
+        None,
+    )
+    .await
+    .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Owner and admin of a team, with one open invitation sent by each.
+struct InviterSetup {
+    owner: String,
+    team: String,
+    admin_id: String,
+    by_admin: String,
+    by_owner: String,
+}
+
+async fn inviter_setup(s: &TestServer) -> InviterSetup {
+    let app = &s.server.router;
+    let (owner, _) = login(s, "owner@example.org").await;
+    grant_license(app, &owner, "owner@example.org", 5).await;
+    let team = create_team(app, &owner, "Withdraw").await;
+    let links = invite_links(app, &owner, &team, &["admin@example.org"], "admin").await;
+    let (admin, _) = login(s, "admin@example.org").await;
+    assert_eq!(accept(app, &admin, &links[0]).await.status, StatusCode::OK);
+    let admin_id = user_id(app, &admin).await;
+    let by_admin = invite_links(app, &admin, &team, &["x@example.org"], "member")
+        .await
+        .remove(0);
+    let by_owner = invite_links(app, &owner, &team, &["y@example.org"], "member")
+        .await
+        .remove(0);
+    InviterSetup {
+        owner,
+        team,
+        admin_id,
+        by_admin,
+        by_owner,
+    }
+}
+
+/// Security: the open invitations of a removed admin are withdrawn; those of others stay.
+#[tokio::test]
+async fn invitations_of_a_removed_admin_are_withdrawn() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let setup = inviter_setup(&s).await;
+    let r = call(
+        app,
+        "DELETE",
+        &format!("/v1/teams/{}/members/{}", setup.team, setup.admin_id),
+        &[("authorization", &bearer(&setup.owner))],
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+
+    let (x, _) = login(&s, "x@example.org").await;
+    let refused = accept(app, &x, &setup.by_admin).await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND, "{}", refused.body);
+    // Not through the browser page either.
+    let page = call(
+        app,
+        "GET",
+        &format!("/invite/{}", setup.by_admin),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::NOT_FOUND, "{}", page.body);
+    let (y, _) = login(&s, "y@example.org").await;
+    let kept = accept(app, &y, &setup.by_owner).await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
+}
+
+/// Security: a demoted admin's open invitations are withdrawn as well.
+#[tokio::test]
+async fn invitations_of_a_demoted_admin_are_withdrawn() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let setup = inviter_setup(&s).await;
+    let r = call(
+        app,
+        "PATCH",
+        &format!("/v1/teams/{}/members/{}", setup.team, setup.admin_id),
+        &[("authorization", &bearer(&setup.owner))],
+        json_body(json!({ "role": "member" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+
+    // The browser path for a new address fails as well (no account, no session).
+    let joined = call(
+        app,
+        "POST",
+        &format!("/invite/{}", setup.by_admin),
+        &[("origin", ORIGIN)],
+        Some(form(&[])),
+    )
+    .await;
+    assert_ne!(joined.status, StatusCode::OK, "{}", joined.body);
+    assert!(joined.cookie.is_none());
+    let (x, _) = login(&s, "x@example.org").await;
+    assert_eq!(
+        accept(app, &x, &setup.by_admin).await.status,
+        StatusCode::NOT_FOUND
+    );
+    // The owner's view lists only the owner's own invitation.
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{}", setup.team),
+        &[("authorization", &bearer(&setup.owner))],
+        None,
+    )
+    .await
+    .json();
+    let open: Vec<&str> = detail["invitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["email"].as_str().unwrap())
+        .collect();
+    assert_eq!(open, vec!["y@example.org"], "{detail}");
+    let (y, _) = login(&s, "y@example.org").await;
+    assert_eq!(
+        accept(app, &y, &setup.by_owner).await.status,
+        StatusCode::OK
+    );
+}
+
+/// A role change that keeps someone admin withdraws nothing.
+#[tokio::test]
+async fn invitations_of_an_admin_who_stays_admin_remain_valid() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let setup = inviter_setup(&s).await;
+    let r = call(
+        app,
+        "PATCH",
+        &format!("/v1/teams/{}/members/{}", setup.team, setup.admin_id),
+        &[("authorization", &bearer(&setup.owner))],
+        json_body(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    let (x, _) = login(&s, "x@example.org").await;
+    assert_eq!(
+        accept(app, &x, &setup.by_admin).await.status,
+        StatusCode::OK
+    );
+}
+
+/// Security: a foreign site cannot sign anyone out, not even by dropping the cookie.
+#[tokio::test]
+async fn logout_from_a_foreign_origin_changes_nothing() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let cookie = redeem_operator_link(&s, "user@example.org").await;
+    for headers in [
+        vec![
+            ("cookie", cookie.as_str()),
+            ("origin", "https://evil.example"),
+        ],
+        vec![("cookie", cookie.as_str())],
+    ] {
+        let r = call(app, "POST", "/auth/logout", &headers, None).await;
+        assert_eq!(r.cookie, None, "no Set-Cookie for {headers:?}");
+        assert!(signed_in_as(app, &cookie, "user@example.org").await);
+    }
+    // From the own origin the logout works.
+    let r = call(
+        app,
+        "POST",
+        "/auth/logout",
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let cleared = r.cookie.expect("cookie cleared");
+    assert!(cleared.ends_with('='), "{cleared}");
+    assert!(!signed_in_as(app, &cookie, "user@example.org").await);
+}
+
+/// Security: looking up device codes is limited per account (30 per 15 minutes).
+#[tokio::test]
+async fn device_code_lookup_is_limited_per_account() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let cookie = redeem_operator_link(&s, "scanner@example.org").await;
+    let other = redeem_operator_link(&s, "other@example.org").await;
+    let lookup = |cookie: String| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "GET",
+                "/device?code=BCDF-BCDF",
+                &[("cookie", &cookie)],
+                None,
+            )
+            .await
+        }
+    };
+    for n in 0..30 {
+        assert_eq!(
+            lookup(cookie.clone()).await.status,
+            StatusCode::NOT_FOUND,
+            "lookup {n}"
+        );
+    }
+    let limited = lookup(cookie.clone()).await;
+    assert_eq!(
+        limited.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        limited.body
+    );
+    assert!(!limited.body.contains("csrf"), "no approval form");
+    // The page without a code still works, and other accounts are not affected.
+    let plain = call(app, "GET", "/device", &[("cookie", &cookie)], None).await;
+    assert_eq!(plain.status, StatusCode::OK);
+    assert_eq!(lookup(other).await.status, StatusCode::NOT_FOUND);
+}
+
+/// Security: a mailed sign-in link opened in a browser that did not request it carries a
+/// plain warning; in the requesting browser and for operator links it does not.
+#[tokio::test]
+async fn magic_link_page_warns_in_a_foreign_browser() {
+    const WARNING: &str = "Careful: this link was not requested in this browser";
+    let mut config = local_config();
+    config.mail_transport = hangar_server::config::MailTransport::Log;
+    let dir = config.data_dir.join("mail");
+    let s = start(config).await;
+    let app = &s.server.router;
+    login(&s, "victim@example.org").await;
+    let r = call(
+        app,
+        "POST",
+        "/auth/email",
+        &[("origin", ORIGIN), ("accept-language", "en")],
+        Some(form(&[("email", "victim@example.org")])),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let login_cookie = r.cookie.expect("browser cookie");
+    // The mail is written after the answer: `next_mail` waits for it.
+    let mail = next_mail(&dir, 0).await;
+    let from = mail.find("/auth/magic/").expect("link in the mail");
+    let path = mail[from..from + "/auth/magic/".len() + 43].to_owned();
+
+    let foreign = call(app, "GET", &path, &[("accept-language", "en")], None).await;
+    assert_eq!(foreign.status, StatusCode::OK);
+    assert!(foreign.body.contains(WARNING), "{}", foreign.body);
+    let wrong = call(
+        app,
+        "GET",
+        &path,
+        &[
+            ("accept-language", "en"),
+            ("cookie", "hangar_login=someone-else"),
+        ],
+        None,
+    )
+    .await;
+    assert!(wrong.body.contains(WARNING), "{}", wrong.body);
+    let own = call(
+        app,
+        "GET",
+        &path,
+        &[("accept-language", "en"), ("cookie", &login_cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(own.status, StatusCode::OK);
+    assert!(own.body.contains("victim@example.org"));
+    assert!(!own.body.contains(WARNING), "{}", own.body);
+
+    // Operator links are not bound to a browser and carry no warning.
+    let link = hangar_server::identity::auth::admin_login_link(
+        &s.server.state.relay.db,
+        &s.server.state.config,
+        "victim@example.org",
+    )
+    .await
+    .unwrap();
+    let operator = call(
+        app,
+        "GET",
+        link.trim_start_matches(ORIGIN),
+        &[("accept-language", "en")],
+        None,
+    )
+    .await;
+    assert_eq!(operator.status, StatusCode::OK);
+    assert!(!operator.body.contains(WARNING), "{}", operator.body);
+}
+
+/// Security: invisible formatting characters (bidi overrides, zero-width) are dropped from team
+/// names; an address containing one is refused.
+#[tokio::test]
+async fn invisible_characters_are_removed_from_names_and_refused_in_addresses() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let db = &s.server.state.relay.db;
+    let config = &s.server.state.config;
+    let (owner, _) = login(&s, "owner@example.org").await;
+    let name_of = |team: String| {
+        let (app, owner) = (app.clone(), owner.clone());
+        async move {
+            call(
+                &app,
+                "GET",
+                &format!("/v1/teams/{team}"),
+                &[("authorization", &bearer(&owner))],
+                None,
+            )
+            .await
+            .json()["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let bidi = create_team(app, &owner, "Invoice\u{202E}fdp.exe").await;
+    assert_eq!(name_of(bidi).await, "Invoicefdp.exe");
+    let zero = create_team(app, &owner, "\u{200B} Zero\u{200B}Width \u{FEFF}").await;
+    assert_eq!(name_of(zero).await, "ZeroWidth", "trimmed after removal");
+    let visible = create_team(app, &owner, "Größe 日本").await;
+    assert_eq!(
+        name_of(visible).await,
+        "Größe 日本",
+        "visible text untouched"
+    );
+    // A name of invisible characters only is empty.
+    let r = call(
+        app,
+        "POST",
+        "/v1/teams",
+        &[("authorization", &bearer(&owner))],
+        json_body(json!({ "name": "\u{200B}\u{202E}" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    // The host command follows the same rule.
+    let cli = hangar_server::identity::teams::cli_create_team(
+        db,
+        "en",
+        "owner@example.org",
+        "Host\u{202E}Name",
+    )
+    .await
+    .unwrap();
+    assert_eq!(name_of(cli).await, "HostName");
+
+    // Addresses with an invisible character: refused, not silently cleaned.
+    grant_license(app, &owner, "owner@example.org", 3).await;
+    let team = create_team(app, &owner, "Addresses").await;
+    let r = call(
+        app,
+        "POST",
+        &format!("/v1/teams/{team}/invitations"),
+        &[("authorization", &bearer(&owner))],
+        json_body(json!({ "emails": ["vic\u{200B}tim@example.org"], "role": "member" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(
+        hangar_server::identity::auth::admin_login_link(db, config, "a\u{200B}@example.org")
+            .await
+            .is_err()
+    );
+    assert!(hangar_server::identity::teams::cli_invite(
+        db,
+        config,
+        &team,
+        "b\u{202E}@example.org",
+        "member"
+    )
+    .await
+    .is_err());
+}

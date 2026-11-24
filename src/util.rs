@@ -100,12 +100,40 @@ pub fn is_opaque(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 
+/// Invisible formatting characters that let one text pass for another: bidi controls and
+/// zero-width characters. The joiners (U+200C, U+200D) and the tag characters stay allowed in
+/// names: Persian and Indic scripts need the joiners, emoji sequences and flags need both.
+pub fn is_hidden(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+/// Characters allowed in names and mail values from input: no control and no invisible
+/// formatting characters.
+pub fn visible(c: char) -> bool {
+    !c.is_control() && !is_hidden(c)
+}
+
 /// Normalizes an email address for comparisons (lowercase, trimmed). Roughly checks the shape:
-/// exactly one `@`, both parts non-empty, no whitespace or control characters, at most
-/// 254 characters.
+/// exactly one `@`, both parts non-empty, no whitespace, control or invisible characters (the
+/// joiners and tag characters included), at most 254 characters.
 pub fn normalize_email(raw: &str) -> Option<String> {
     let email = raw.trim().to_lowercase();
-    if email.len() > 254 || email.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    let invisible =
+        |c: char| !visible(c) || matches!(c, '\u{200C}' | '\u{200D}' | '\u{E0000}'..='\u{E007F}');
+    if email.len() > 254 || email.chars().any(|c| c.is_whitespace() || invisible(c)) {
         return None;
     }
     let (local, domain) = email.split_once('@')?;
@@ -134,6 +162,27 @@ mod tests {
         assert_eq!(normalize_email("a@@example.org"), None);
         assert_eq!(normalize_email("<a>@example.org"), None);
         assert_eq!(normalize_email("a@example.org\r\nBcc: x@y.z"), None);
+        assert_eq!(normalize_email("a\u{200B}@example.org"), None);
+    }
+
+    #[test]
+    fn invisible_characters_are_recognized() {
+        assert!(!visible('\u{202E}'), "right-to-left override");
+        assert!(!visible('\u{200B}'), "zero width space");
+        assert!(!visible('\u{FEFF}'));
+        assert!(!visible('\n'));
+        assert!(visible('ä') && visible('a') && visible(' ') && visible('日'));
+        // Joiners and tag characters are part of real text: an emoji family, a Persian word
+        // with a zero-width non-joiner, the flag of Scotland.
+        for text in [
+            "👨\u{200D}👩\u{200D}👧",
+            "می\u{200C}خواهم",
+            "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+        ] {
+            assert!(text.chars().all(visible), "{text}");
+        }
+        assert_eq!(normalize_email("a\u{200D}b@example.org"), None);
+        assert_eq!(normalize_email("a\u{E0061}@example.org"), None);
     }
 
     #[test]

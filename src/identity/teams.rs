@@ -61,7 +61,8 @@ fn conflict(code: &'static str) -> ApiError {
 }
 
 fn clean_name(raw: &str) -> Option<String> {
-    let name: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+    let name: String = raw.chars().filter(|c| crate::util::visible(*c)).collect();
+    let name = name.trim().to_owned();
     (!name.is_empty() && name.chars().count() <= 80).then_some(name)
 }
 
@@ -600,6 +601,22 @@ fn can_manage(actor: Role, target: Role) -> bool {
     actor.rank() > target.rank()
 }
 
+/// Withdraws the open invitations someone sent to a team, once they may no longer invite
+/// (removed, left or demoted): otherwise a second address invited beforehand could still join.
+async fn withdraw_invitations_by(
+    tx: &mut SqliteConnection,
+    team: &str,
+    inviter: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE invitations SET revoked_at = ? WHERE team_id = ? AND invited_by = ? AND accepted_at IS NULL AND revoked_at IS NULL")
+        .bind(now_s())
+        .bind(team)
+        .bind(inviter)
+        .execute(tx)
+        .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Handlers (app, bearer)
 
@@ -735,6 +752,9 @@ pub async fn set_role(
         .bind(&target)
         .execute(&mut *tx)
         .await?;
+    if new.rank() < Role::Admin.rank() {
+        withdraw_invitations_by(&mut tx, &team, &target).await?;
+    }
     tx.commit().await?;
     if let Some(relay) = identity.relay() {
         relay
@@ -767,6 +787,7 @@ pub async fn remove_member(
         .bind(&target)
         .execute(&mut *tx)
         .await?;
+    withdraw_invitations_by(&mut tx, &team, &target).await?;
     tx.commit().await?;
     if let Some(relay) = identity.relay() {
         relay.remove_member(&team, &target).await?;
@@ -1065,6 +1086,14 @@ pub async fn invite_accept_page(
             let created = async {
                 let mut tx = begin_write(&identity.db).await?;
                 let id = find_or_create_user(&mut tx, &email, lang, now_s()).await?;
+                // Without mail the inviter holds this link: the account counts as unproven
+                // until its first real sign-in, which ends every session started before.
+                if identity.links_to_admin() {
+                    sqlx::query("UPDATE users SET unproven = 1 WHERE id = ?")
+                        .bind(&id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 tx.commit().await?;
                 Ok::<_, sqlx::Error>(id)
             }

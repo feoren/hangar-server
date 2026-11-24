@@ -49,11 +49,12 @@ pub fn escape(text: &str) -> String {
 }
 
 /// Values from input (team name, addresses) must not contain line breaks or control
-/// characters; in the subject they could otherwise forge header lines.
+/// characters; in the subject they could otherwise forge header lines. Invisible formatting
+/// characters (bidi overrides) are dropped as well, so that a name cannot be shown reversed.
 fn clean(value: &str) -> String {
     value
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| crate::util::visible(*c))
         .take(120)
         .collect()
 }
