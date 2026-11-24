@@ -227,7 +227,9 @@ proxy_help() {
   say "Set up your reverse proxy for https://$DOMAIN with:"
   say "  upstream http://127.0.0.1:$PORT, WebSocket upgrades allowed (path /v1/live),"
   say "  long timeouts (the connection stays open; the server pings every 25 s),"
-  say "  X-Forwarded-For set by the proxy."
+  say "  X-Forwarded-For set by the proxy to the client address (nginx:"
+  say "  proxy_set_header X-Forwarded-For \$remote_addr;). A proxy that passes the client's own"
+  say "  header on lets anyone bypass the per-address limits (TRUST_PROXY=true is set)."
 }
 
 # caddy_configure: installs Caddy if needed and agreed, then adds the site. Returns 1 when the

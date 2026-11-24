@@ -129,11 +129,44 @@ reversed without the key, but they can be compared within the epoch.
 - Rate limiting and operation IDs live in the memory of a single process; multiple nodes would
   need Redis or the database.
 - Passkeys and OIDC (GitHub, self-hosted forges) are planned for later.
+- Without mail (self-hosting, `MAIL_TRANSPORT=none`) the inviter receives the invitation link and
+  could open it before the invited person. An account created that way counts as unproven: its
+  first sign-in with a magic link or a `login-link` of the operator ends every session started
+  before (browser and app) and denies approved device codes not yet fetched; relay tickets already
+  issued stay valid until they expire (60 s), and open relay connections until
+  `CONNECTION_MAX_AGE_SECS` (10 min). If an invited person reports their link as already used, the
+  operator issues `login-link` for the address.
+- Magic links: a link opened in a browser other than the one that requested it shows a warning
+  (someone may have forwarded a link for their own account). Creating the link and the mail runs
+  after the answer, so its timing does not tell whether an address is known. In closed sign-up
+  (`SIGNUP=invite`) only addresses that may sign in count against the limit per address; with
+  `SIGNUP=open` every address may, so anyone with many networks can fill that table (100000
+  addresses per hour) and silence sign-in mails for new addresses for that time.
+- Names and addresses from input lose invisible formatting characters (bidi overrides,
+  zero-width characters); an address containing one is refused.
+- Request headers must arrive within 10 s (`HEADER_READ_TIMEOUT`).
 - Account deletion and data export in self-hosting are still missing (GDPR Art. 17 and 20).
-- Storage has a quota per team and a retention period only for transcripts
-  (`TRANSCRIPT_RETENTION_DAYS`); decisions and tasks remain until the team is deleted.
+- Storage has a quota per team (`BLOB_QUOTA_BYTES`) and per member over all teams (twice that),
+  and a retention period only for transcripts (`TRANSCRIPT_RETENTION_DAYS`); decisions and tasks
+  remain until the team is deleted. The protocol has no way to delete a blob yet, so a member can
+  fill its team's quota for good (protocol wish).
+- Memory over all teams: claims at most 64 MiB in total and four times the per-team limit per
+  member. Replay windows: once all of them together hold more than 32 MiB, every team that
+  writes keeps only 128 KiB (older cursors get a snapshot), so beyond 32 MiB each loaded team
+  adds at most that much. The limits per team alone would let one account with many teams fill
+  the memory.
+- The device ID in `hello` is chosen by the client and not bound to a key. A blocked device
+  (`device.remove`) whose account session on the website is still valid can come back with a new
+  ID and read what the relay hands out to any member (snapshot, claims, blobs, notes key ring);
+  it can decrypt only up to the next `key.rotate`. After `device.remove`, sign the device out on
+  the website as well and rotate the key. A proof of possession at `hello` is a protocol wish.
+- `device.keys` cannot change the keys of a device the verified log already lists (`conflict`).
 - The notes key ring (protocol version 2) is one sealed record per team, readable only with the
   epoch key; the relay keeps the writing device's IDs and the time with it and deletes it with
   the team. Only a device of the verified log with owner or admin as its effective role may
-  replace it, and only on top of the stored version (`conflict` otherwise), so a stolen ticket
-  without a device in the log cannot overwrite it.
+  replace it, and only on top of the stored version (`conflict` otherwise). The relay checks the
+  device ID from `hello`, not the possession of the device: a stolen, unused ticket of an owner
+  or admin, used with the ID of one of that member's devices from the log, could overwrite the
+  ring with garbage (the app does not accept a record whose signature does not verify, so notes
+  become unreadable until an admin writes the ring again). Proof of possession at `hello` is a
+  protocol wish.

@@ -39,7 +39,7 @@ The native service runs as the system user `hangar-server`, listens on `127.0.0.
 is hardened by systemd (`ProtectSystem=strict`, `NoNewPrivileges`, 512 MiB memory limit). If ports
 80 and 443 already belong to another web server, the script leaves Caddy out and prints what the
 reverse proxy needs: upstream `http://127.0.0.1:8080`, WebSocket upgrades on `/v1/live`, long
-timeouts, `X-Forwarded-For`.
+timeouts, `X-Forwarded-For` set to the client address (see "Image only" below).
 
 Removing a native installation: `systemctl disable --now hangar-server`, then delete
 `/etc/systemd/system/hangar-server.service`, `/usr/local/bin/hangar-server`,
@@ -79,8 +79,12 @@ docker run -d --name hangar-server --restart unless-stopped \
   ghcr.io/feoren/hangar-server:<version>
 ```
 
-Point the proxy at `http://127.0.0.1:8080` with WebSocket upgrades and long timeouts. Admin
-commands: `docker exec hangar-server hangar-server teams`.
+Point the proxy at `http://127.0.0.1:8080` with WebSocket upgrades and long timeouts. With
+`TRUST_PROXY=true` the server takes the client address from the last `X-Forwarded-For` entry, so
+the proxy must set that header itself (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`,
+or `$proxy_add_x_forwarded_for`; Caddy and Traefik do it on their
+own). A proxy that passes a client's header on unchanged lets anyone pick their address and
+bypass every per-address limit. Admin commands: `docker exec hangar-server hangar-server teams`.
 
 ## Operation
 
@@ -238,7 +242,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
 | `LICENSE_PUBLIC_KEYS` | the website's keys for license documents (self-hosting); empty = the built-in key of hangar.feoren.com |
 | `SERVER_SECRET` | at least 32 characters (self-hosting) |
 | `MAIL_TRANSPORT` | `smtp`, `log`, `none` |
-| `TRUST_PROXY` | `true` only behind your own Caddy |
+| `TRUST_PROXY` | `true` only behind a reverse proxy that sets `X-Forwarded-For` itself (Caddy does) |
 | `REVOCATION_URL`, `RELAY_REVOCATION_TOKEN` | official: signed revocation list from the website, every 15 s ([docs/revocation-format.md](revocation-format.md)) |
 | `MAX_CONNECTIONS`, `MAX_CONNECTIONS_PER_IP` | default 200 and 20; plan for about 2 MiB of memory per connection plus 64 MiB, the server warns at startup when the memory limit does not fit |
 
@@ -280,7 +284,10 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
    mail via `login-link`) and then opens the link again: since the inviter gets the link, it
    never signs in an existing account. The server checks the seat limit on acceptance. Whatever a script uses further (link, team ID) is the last line on stdout.
    Without a license, the server is for one person (the owner): `invite` refuses with a hint at
-   the license instead of printing a link (step 4).
+   the license instead of printing a link (step 4). Without mail, pass the link on only to the
+   invited person: whoever opens it first gets the new account. Should someone report their link
+   as already used, give them `login-link` for their address; its first use ends every session
+   the account had before.
 
    Via the API, the same is done with `POST /v1/teams` and `POST /v1/teams/{team}/invitations`;
    without mail, the API returns the link to the admin.

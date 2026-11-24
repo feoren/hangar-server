@@ -398,6 +398,9 @@ docker run -d --name hangar-server --restart unless-stopped -p 127.0.0.1:8080:80
 ```
 
 Forward the domain to `http://127.0.0.1:8080` and allow WebSocket upgrades with long timeouts.
+The proxy must set `X-Forwarded-For` to the client address itself (nginx:
+`proxy_set_header X-Forwarded-For $remote_addr;`); otherwise clients can bypass the limits per
+address.
 Server commands then start with `docker exec hangar-server hangar-server`, for example
 `docker exec hangar-server hangar-server create-team you@example.org Team`. To update, create
 the container again with the new tag; the volume `hangar-data` stays.
