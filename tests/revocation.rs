@@ -17,7 +17,10 @@ use hangar_server::relay::team::close;
 use hangar_server::signed::{self, REVOKE_CONTEXT};
 use hangar_server::ticket::Role;
 use hangar_server::util::now_s;
-use hangar_server::wire::{ClientMessage, Epoch, ErrorCode, KeyRotate, ServerMessage, WrappedKey};
+use hangar_server::wire::{
+    ClientMessage, Epoch, ErrorCode, KeyRotate, PresenceState, ServerFrame, ServerMessage,
+    WrappedKey,
+};
 use serde_json::{json, Value};
 
 const TOKEN: &str = "relay-token-relay-token-relay-token-1234";
@@ -251,6 +254,46 @@ async fn role_change_without_role_requires_new_ticket() {
     ));
     assert_eq!(poller(&s, &url, TOKEN).poll_once().await.unwrap(), 1);
     assert_eq!(alice.close_code().await, Some(close::CLOSE_ROLE_CHANGED));
+}
+
+/// The connections a role change without a role closes leave the team: the others see the
+/// device offline, and the book stops counting them. Previously the device stayed online
+/// until the team was unloaded, and a reservation of it never started its offline deadline.
+#[tokio::test]
+async fn role_change_without_role_reports_the_device_offline() {
+    let mock: Shared = Arc::default();
+    let url = website(mock.clone()).await;
+    let s = start(Config::for_tests(IdentityMode::Official, website_keys())).await;
+    let (mut alice, _) = Client::join(s.addr, "317", "1042", Role::Admin).await;
+    let (mut bob, _) = Client::join(s.addr, "317", "1043", Role::Member).await;
+    mock.lock().unwrap().pages.push((
+        "0".into(),
+        list(
+            0,
+            1,
+            false,
+            json!([
+                {"rid": 1, "prj": 317, "sub": 1042, "kind": "role_changed", "at": now_s() - 5}
+            ]),
+            &website_key(),
+        ),
+    ));
+    assert_eq!(poller(&s, &url, TOKEN).poll_once().await.unwrap(), 1);
+    assert_eq!(alice.close_code().await, Some(close::CLOSE_ROLE_CHANGED));
+    let offline = |f: &ServerFrame| {
+        matches!(
+            &f.message,
+            ServerMessage::PresenceUpdate(u)
+                if u.state == PresenceState::Offline && u.holder == holder("1042", "1042-device")
+        )
+    };
+    bob.until(offline).await;
+
+    // Back with a new ticket and gone again: offline again, the closed connection no longer
+    // counts.
+    let (again, _) = Client::join(s.addr, "317", "1042", Role::Member).await;
+    again.close().await;
+    bob.until(offline).await;
 }
 
 /// Security review 2026-11-09: a demoted member hoards valid admin tickets before the demotion.

@@ -405,7 +405,9 @@ impl Relay {
     ) -> Result<(), sqlx::Error> {
         let team = self.team(team_id).await?;
         store::raise_ticket_floor(&self.db, team_id, member, at_ms).await?;
-        team.lock().await.renew_member(member);
+        let mut team = team.lock().await;
+        team.renew_member(&self.db, member, now_ms()).await?;
+        self.forward_attention(&mut team);
         Ok(())
     }
 

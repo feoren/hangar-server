@@ -1308,11 +1308,34 @@ impl Team {
     }
 
     /// Closes a member's connections (4401) because its role changed and the new one is
-    /// unknown; the app comes back with a new ticket.
-    pub fn renew_member(&mut self, member: &str) {
-        self.close_where(close::CLOSE_ROLE_CHANGED, "role changed", |s| {
-            s.holder.member.as_str() == member
-        });
+    /// unknown; the app comes back with a new ticket. They leave the team like any closed
+    /// connection: the book stops counting them and the last one reports the device offline.
+    pub async fn renew_member(
+        &mut self,
+        db: &Db,
+        member: &str,
+        now: u64,
+    ) -> Result<(), sqlx::Error> {
+        let gone: Vec<u64> = self
+            .subscribers
+            .iter()
+            .filter(|(_, s)| s.holder.member.as_str() == member)
+            .map(|(c, _)| *c)
+            .collect();
+        let mut events = Vec::new();
+        for conn in gone {
+            if let Some(sub) = self.subscribers.get(&conn) {
+                sub.tx
+                    .try_send(Outgoing::Close(close::CLOSE_ROLE_CHANGED, "role changed"));
+            }
+            events.extend(self.disconnect(conn, now).unwrap_or_default());
+        }
+        if events.is_empty() {
+            return Ok(());
+        }
+        self.last_activity = now;
+        self.prune_notes();
+        self.emit(db, events, None).await
     }
 
     /// Applies a known new role silently to all connections of the member (from
