@@ -246,6 +246,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
 | `SERVER_SECRET` | at least 32 characters (self-hosting) |
 | `MAIL_TRANSPORT` | `smtp`, `log`, `none` |
 | `TRUST_PROXY` | `true` only behind a reverse proxy that sets `X-Forwarded-For` itself (Caddy does) |
+| `REQUIRE_DEVICE_PROOF` | default `false`. `true` serves only apps of protocol version 3 and newer, which prove at every sign-in that they hold their device key; older apps get "update required". Turn it on once every member runs a version 3 app ([docs/protocol.md](protocol.md), "Proof of possession") |
 | `REVOCATION_URL`, `RELAY_REVOCATION_TOKEN` | official: signed revocation list from the website, every 15 s ([docs/revocation-format.md](revocation-format.md)) |
 | `MAX_CONNECTIONS`, `MAX_CONNECTIONS_PER_IP` | default 200 and 20; plan for about 2 MiB of memory per connection plus 64 MiB, the server warns at startup when the memory limit does not fit |
 

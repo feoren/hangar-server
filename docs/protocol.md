@@ -1,4 +1,4 @@
-# Live protocol (versions 1 and 2)
+# Live protocol (versions 1 to 3)
 
 The protocol belongs to the app: the crates `hangar-team-protocol` (step C) and `hangar-team-crypto`
 (step E), kept here as unmodified copies under `vendor/` (origin in each `ORIGIN.md`). Messages,
@@ -63,7 +63,8 @@ Server: {"v":1,"id":"<op answered>","seq":12,"team":"<team>","type":"task.reserv
   read first; a lower value gets `err outdatedClient`, a higher one `err badRequest`. Which message kinds a connection may
   use is the protocol version negotiated per team in `hello` (see below).
 - `id`: operation ID. For intents with `ClientMessage::deduplicated` (all `task.*`, `blob.put`,
-  `memberlog.append`, `key.rotate`, `key.wrap`, `notes.keys.set`) the relay remembers sender (member and
+  `blob.delete`, `device.remove`, `memberlog.append`, `key.rotate`, `key.wrap`, `notes.keys.set`)
+  the relay remembers sender (member and
   device), team and `id` together with the digest of the content (`RecentOps`, 4096 per team): the same
   intent sent again gets the first answer, a different one under the same `id` gets `badRequest`.
 - `team`: project ID of the website or team ID in self-hosting, opaque. Missing only for `ping`.
@@ -77,9 +78,15 @@ Ticket verification: [ticket-format.md](ticket-format.md). The member comes from
 devices). One connection can sign in to several teams, but belongs to exactly one member.
 
 - **Protocol version.** `hello.proto` offers a range; the relay speaks `ProtoRange::CURRENT`
-  (`{1, 2}`) and answers with the highest version both speak in `welcome.proto` (an app of
-  version 1 offers `{1, 1}` and gets 1). A range that ends below 1 gets `err outdatedClient`,
-  one that starts above 2 `err badRequest`. The version holds per connection and team.
+  (`{1, 3}`), with `REQUIRE_DEVICE_PROOF=true` only `{3, 3}`, and answers with the highest
+  version both speak in `welcome.proto` (an app of version 1 offers `{1, 1}` and gets 1). A
+  range that ends below the relay's oldest version gets `err outdatedClient`, one that starts
+  above 3 `err badRequest`. The version holds per connection and team. From version 3 on the
+  `welcome` carries a `challenge` (see "Proof of possession"); below it the field is left out,
+  so a version 2 connection gets the welcome of before, byte for byte.
+- **Downgrade protection.** A holder (member and device) that once proved itself on version 3
+  in the team (`relay_device_proofs`) gets `err outdatedClient` for a `hello` below version 3;
+  the app asks for an update. This does not count as a broken frame.
 - **Replay** (cursor within the window): `welcome` with the `id` of the `hello`, then the events
   after the cursor in order, then live.
 - **Snapshot**: `resync_required`, then `member.joined`, `task.reserved` per hold (plus
@@ -133,25 +140,31 @@ new ticket.
 - After restoring a backup, the stored stream continues. Clients that had
   seen events after that point are ahead of the head (`ahead`) and fetch a snapshot.
 - Logged: whatever `ServerMessage::loggable` lists. Not logged: `presence.update`,
-  `claim.overlap`, `key.wrapped`, `notify`, `notes.keys.updated`, responses.
+  `claim.overlap`, `key.wrapped`, `notify`, `notes.keys.updated`, responses. Logged events go to
+  every connection of the team, also to one that does not count as a device of the log (see
+  "Proof of possession"): leaving events out for one connection would leave gaps in its cursor.
 - Events go to all of the team's connections, including the one that triggered them; after that the response goes to
-  the triggering connection. Targeted messages (`ServerMessage::recipient`) go only to their
-  recipient. The one exception is `notes.keys.updated`, which announces the answer's own write
+  the triggering connection. Targeted messages (`ServerMessage::recipient`: `claim.overlap`,
+  `key.wrapped`, `notify`) go only to their recipient's connections that count as a device of
+  the log at sending time. The one exception is `notes.keys.updated`, which announces the answer's own write
   and follows the `ack` of `notes.keys.set`.
 - **Version filter.** A client kind newer than the connection's negotiated version
   (`ClientMessage::since`) gets `err badRequest`, as a relay of that version would answer; it is
   neither applied nor remembered for retries. A server kind newer than it
   (`ServerMessage::since`) is never sent to that connection: every frame carries its kind's
   version through the relay's single send path, which drops it for an older connection. Today
-  only the notes key ring kinds are of version 2, and none of them is logged, so replay and
-  snapshot are the same for both versions.
+  only the notes key ring kinds are of version 2 and none of them is logged, so replay and
+  snapshot are the same for every version. Version 3 adds two client kinds (`device.prove`,
+  `blob.delete`) and the `welcome`'s `challenge`, no server kind.
 
 ## Reservations
 
 Rules: the crate's `ReservationBook` ("first wins" in order of arrival per team, 30 min timeout
 only while offline with a warning 5 min before, release requests with a 10 min timeout and cooldown, `withdraw`,
 `force_release` for owner/admin, rekey with `prev` and a grace period after a rotation). Time-driven
-events (`Applied::timing`) are sent even when the intent is rejected. Presence is counted per connection.
+events (`Applied::timing`) are sent even when the intent is rejected. Presence is counted per
+connection that counts as a device of the log (see "Proof of possession"): an unproven twin
+neither stops a holder's deadlines by joining nor reports it offline by leaving.
 
 After every operation the relay stores `ReservationBook::export()` (BookSnapshot v1) together with
 the log position and the encrypted notes (`note`) that it keeps next to the book. On
@@ -167,8 +180,9 @@ to the database's epoch on load.
 The crate's `Notify::attention`: for `task.release_requested` and `reservation.expiring` when
 no device of the holding member is connected to the team. Targeted (only to the member), never
 logged. Per member and team only the newest undelivered one is kept (`relay_pending_notify`,
-survives restarts); it is sent right after the next `welcome` to all of the
-member's connections and then deleted. In self-hosting a notification email without content is also sent.
+survives restarts); it is sent to all of the member's connections that count as soon as one
+starts to count (right after `welcome` on versions 1 and 2, after the proof on version 3) and
+then deleted. In self-hosting a notification email without content is also sent.
 
 ## device.remove
 
@@ -194,15 +208,16 @@ relay does not close immediately:
 - After that a grace period runs (`Config::removed_grace_ms`, 5 s, not configurable through the
   environment). During it the relay only answers `memberlog.get` for this team, with entries after `after` up to
   and including the removing entry (`relay_removed_devices.log_index`); the device never gets later entries
-  (new members, devices, epochs). Everything else for this team is answered with
-  `err forbidden` and nothing is written.
+  (new members, devices, epochs). `device.keys` and `device.prove` get `ack` without any effect
+  (no key registered, nothing verified or recorded): the app sends both before its log fetch.
+  Everything else for this team is answered with `err forbidden` and nothing is written.
 - The grace period applies per team: other teams the same connection has joined keep working
   as usual. Only while every joined team is in its grace period are frames without a team
   (`ping`) and `hello` for further teams also answered with `err forbidden`.
 - After the last page (`more: false`) or when the grace period ends, the connection leaves the
   team; close 4403 only when no other team is left on it.
 - If the connection was already gone: a later `hello` from this device with a valid ticket gets
-  only `welcome` (stream, head, epoch; no snapshot, no replay, no join events,
+  only `welcome` (stream, head, epoch, on version 3 a fresh challenge; no snapshot, no replay, no join events,
   no `see_member`) and then the same grace period. This applies only to a connection without another team and
   only with a ticket that `ticket.renew` would also accept (`ticket_age`: not issued up to a
   removal of the member or a role change); otherwise `err forbidden` as
@@ -289,6 +304,56 @@ relay cannot read it; it checks role, epoch and version and keeps only the newes
   rotation re-seals it in the app.
 - A connection of version 1 gets `err badRequest` for both client kinds and never sees either
   server kind.
+
+## Proof of possession (version 3)
+
+The device ID in `hello` is the client's word. From version 3 on a connection shows that it
+holds the signing key the membership log lists for the device it named (ADR 0020 and
+`relay-v3-server-spec.md` in the app repository; the crates' `possession` module):
+
+- **Challenge.** Every `welcome` of version 3 or newer carries 32 bytes from the operating
+  system's random number generator (`welcome.challenge`, 43 characters of base64url), new per
+  `hello`, kept in the connection's memory only, never stored or logged.
+- **`device.prove {sign, signature}`**, not deduplicated:
+  `possession::verify_connection_proof(team, holder, version, challenge)`. Passing: the
+  connection keeps `sign` as its proven key, `ack`. Refused: `err forbidden`, an earlier proven
+  key stays, and it counts as a broken frame (more than 20: close 1008). Before the team's
+  `hello` `err forbidden`, on versions 1 and 2 `err badRequest`.
+- **Who counts.** In a team without a log every connection counts. With a log a connection
+  counts as the log's device when the log lists its holder and, on version 3, the proven key is
+  the log's sign key for it now; on versions 1 and 2 a listed device counts as before (transition
+  rule). This is evaluated against the current log on every intent: an admission makes a proven
+  pending device count, a removal or a new key stops it.
+- **The rule.** Before every intent, after the version check and before the op ID lookup,
+  `possession::check_restricted`: a connection that does not count may only send `hello`,
+  `ticket.renew`, `device.keys`, `device.prove`, `devices.get`, `memberlog.get` and `ping`
+  (`ClientMessage::allowed_before_proof`); everything else is `err forbidden` and is not
+  remembered by op ID, so the app's retry after the proof is applied. This holds on every
+  version for devices the log does not list. Frames of one connection are checked in arrival
+  order, so the app can send `device.keys`, `device.prove` and `memberlog.get` without waiting.
+- **Join and leave side effects** (the book's online counting, `presence.update` offline, the
+  remembered `notify`) only for connections that count: on version 3 from the proof on (or
+  from the entry that admits a proven pending device), and on leaving only if it counted.
+- **Proof rows** (`relay_device_proofs`, migration 0016): written once a connection counts with
+  a proven key. Writing one closes the holder's open connections of versions 1 and 2 in the team
+  with 4401; their next `hello` below version 3 gets `outdatedClient`. A proof with a key the log
+  does not list writes none. The row goes when the device leaves the log (`device.remove`, a
+  removed member) and with the team.
+- **`REQUIRE_DEVICE_PROOF=true`** offers only `{3, 3}`: every `hello` below version 3 gets
+  `outdatedClient`, and switching it on (`Relay::set_require_device_proof`, at startup there is
+  nothing to close) closes every open connection of versions 1 and 2 with 4401.
+
+## blob.delete (version 3)
+
+`blob.delete {blob}`, deduplicated by op id, no epoch, answered with `ack` without fields.
+
+1. The rule above: in a team with a log the sender must count as a device of the log.
+2. The blob by team and ID; none (also deleted before, or another team's ID): `notFound`.
+3. `relay::check_blob_delete(state, ticket_role, sender, author)`: the author (the member that
+   stored it) deletes from any of its listed devices; anyone else needs owner or admin by the
+   lower of log role and ticket role (without a log, the ticket role). Otherwise `forbidden`.
+4. In one write transaction the row goes and its size leaves `relay_teams.blob_bytes`; a
+   concurrent delete that won answers `notFound`. Nothing of the blob stays, no event.
 
 ## Revocation list (official mode)
 

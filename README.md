@@ -236,6 +236,11 @@ on [hangar.feoren.com](https://hangar.feoren.com/pricing), then:
 **Updates.** Run the install command from step 3 again. It keeps data and settings, only
 replaces the program and migrates the database. Hangar reconnects on its own.
 
+**Older apps.** Newer Hangar apps prove at every sign-in that they hold their device's key.
+Older apps still work, until you set `REQUIRE_DEVICE_PROOF=true` in the `.env` file once every
+member has updated; then the server asks older apps to update
+([docs/operations.md](docs/operations.md)).
+
 **Backups.** All data lives in the Docker volume `hangar-server_team-data` (native:
 `/var/lib/hangar-server`). Back it up regularly, for example once a week, as shown in
 [docs/operations.md](docs/operations.md), and keep the copy on another machine.

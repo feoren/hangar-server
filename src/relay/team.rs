@@ -14,7 +14,10 @@ use std::sync::Arc;
 use axum::extract::ws::Utf8Bytes;
 use hangar_team_crypto::identity::DevicePublicKeys;
 use hangar_team_crypto::memberlog::{Admitted, EntryBody, LogError, LogVerifier};
-use hangar_team_crypto::relay::{check_registered_keys, check_wrap};
+use hangar_team_crypto::possession::{
+    check_restricted, counts_as_listed, verify_connection_proof, Possession,
+};
+use hangar_team_crypto::relay::{check_blob_delete, check_registered_keys, check_wrap};
 use hangar_team_protocol::log::{EventLog, OpKey, RecentOps, Replay, Retry};
 use hangar_team_protocol::overlap::{ClaimBoard, OverlapNotice, SessionClaims};
 use hangar_team_protocol::reservation::{
@@ -29,14 +32,14 @@ use crate::db::Db;
 use crate::ticket::Role;
 use crate::wire::{
     self, ack, check_rotate, error, limits::MAX_DEVICES_PER_MEMBER, limits::MAX_LOG_ENTRIES,
-    limits::MAX_WRAPPED_KEYS, Ack, BlobKind, Ciphertext, ClientMessage, Cursor, DeviceList,
-    DeviceRemoved, Epoch, ErrorBody, ErrorCode, Holder, KeyRotated, KeyWrapped, KeyedHash,
-    MemberId, MemberJoined, MemberLogAppended, MemberLogEntries, MemberRemoved, MemberRoleChanged,
-    NotesKeys, NotesKeysUpdated, Notify as NotifyMessage, OpId, PathHashes, PresenceState,
-    PresenceUpdate, ReservationExpired, ReservationExpiring, ResyncRequired, Sealed, Seq,
-    ServerFrame, ServerMessage, SessionKey, SessionRef, StreamId, TaskReleaseAnswered,
-    TaskReleaseRequestEnded, TaskReleaseRequested, TaskReleased, TaskReserved, TeamId, UnixMillis,
-    Welcome,
+    limits::MAX_WRAPPED_KEYS, Ack, BlobKind, Challenge, Ciphertext, ClientMessage, Cursor,
+    DeviceList, DeviceProve, DeviceRemoved, Epoch, ErrorBody, ErrorCode, Holder, KeyRotated,
+    KeyWrapped, KeyedHash, MemberId, MemberJoined, MemberLogAppended, MemberLogEntries,
+    MemberRemoved, MemberRoleChanged, NotesKeys, NotesKeysUpdated, Notify as NotifyMessage, OpId,
+    PathHashes, PresenceState, PresenceUpdate, PublicKey, ReservationExpired, ReservationExpiring,
+    ResyncRequired, Sealed, Seq, ServerFrame, ServerMessage, SessionKey, SessionRef, StreamId,
+    TaskReleaseAnswered, TaskReleaseRequestEnded, TaskReleaseRequested, TaskReleased, TaskReserved,
+    TeamId, UnixMillis, Welcome, PROOF_PROTOCOL_VERSION,
 };
 
 /// Events kept in memory for replay; older ones require a snapshot.
@@ -158,6 +161,45 @@ pub struct Subscriber {
     /// starts the grace period for this team, during which it may only send `memberlog.get`
     /// here; its other teams are not affected.
     pub removed: tokio::sync::mpsc::UnboundedSender<String>,
+    /// What the connection has shown of its device's key in this team (protocol version 3).
+    pub possession: ConnectionProof,
+}
+
+/// The proof of possession of one connection in one team (protocol version 3,
+/// `docs/protocol.md`). In memory only: the challenge is never stored or logged.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectionProof {
+    /// The challenge of this connection's `welcome` (version 3 and newer).
+    challenge: Option<Challenge>,
+    /// The signing key the last passing `device.prove` showed. A refused proof keeps it.
+    proven: Option<PublicKey>,
+    /// The connection counts as the log's device and its joining took effect (the book's
+    /// online counting, delivered `notify`): see `Team::refresh_counting`.
+    counted: bool,
+    /// Its proof row is written (`relay_device_proofs`).
+    recorded: bool,
+}
+
+impl Subscriber {
+    fn possession(&self) -> Possession<'_> {
+        Possession::of_connection(self.proto, self.possession.proven.as_ref())
+    }
+}
+
+/// What `Team::handle` tells the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handled {
+    Done,
+    /// The frame counts as a bad frame (a refused `device.prove`): a connection cannot try
+    /// signatures without bound.
+    BadFrame,
+}
+
+/// 32 bytes from the operating system's random number generator, new for every `welcome` of
+/// version 3 or newer.
+fn new_challenge(proto: u16) -> Option<Challenge> {
+    (proto >= PROOF_PROTOCOL_VERSION)
+        .then(|| Challenge::from_bytes(crate::util::random_bytes::<32>()))
 }
 
 /// A connection of a removed device in its grace period: no member, no presence, no receiver of
@@ -410,14 +452,37 @@ impl Team {
             && now.saturating_sub(self.last_activity) > 10 * 60 * 1000
     }
 
+    /// Whether a connection of `holder` counts (presence and the book count only those).
     fn online(&self, holder: &Holder) -> bool {
-        self.subscribers.values().any(|s| s.holder == *holder)
+        self.subscribers
+            .values()
+            .any(|s| s.holder == *holder && s.possession.counted)
     }
 
     fn member_online(&self, member: &MemberId) -> bool {
         self.subscribers
             .values()
-            .any(|s| s.holder.member == *member)
+            .any(|s| s.holder.member == *member && s.possession.counted)
+    }
+
+    /// Whether the connection counts as the log's device now: in a team without a log every
+    /// connection does, with a log `counts_as_listed` decides (a listed device on version 1 or 2,
+    /// or on version 3 with the key the log lists for it). Evaluated against the current log,
+    /// never cached: an admission or a removal changes it under a live connection.
+    fn counts(&self, sub: &Subscriber) -> bool {
+        match self.verifier.state() {
+            None => true,
+            Some(state) => counts_as_listed(state, &sub.holder, sub.possession()),
+        }
+    }
+
+    /// The connections `pred` selects that count; targeted unlogged messages go only to them.
+    fn counting(&self, pred: impl Fn(&Subscriber) -> bool) -> Vec<u64> {
+        self.subscribers
+            .iter()
+            .filter(|(_, s)| pred(s) && self.counts(s))
+            .map(|(c, _)| *c)
+            .collect()
     }
 
     fn frame(&self, id: Option<&OpId>, seq: Option<Seq>, message: ServerMessage) -> Option<Framed> {
@@ -771,16 +836,15 @@ impl Team {
 
     /// Sends a member's remembered `notify` to all of its connections (after `welcome`).
     async fn deliver_pending(&mut self, db: &Db, member: &MemberId) -> Result<(), sqlx::Error> {
+        // Kept until a connection that counts takes it.
+        let conns = self.counting(|s| s.holder.member == *member);
+        if conns.is_empty() {
+            return Ok(());
+        }
         let Some(notify) = self.pending.remove(member) else {
             return Ok(());
         };
         let text = self.frame(None, None, ServerMessage::Notify(notify));
-        let conns: Vec<u64> = self
-            .subscribers
-            .iter()
-            .filter(|(_, s)| s.holder.member == *member)
-            .map(|(c, _)| *c)
-            .collect();
         for conn in conns {
             self.send(conn, text.clone());
         }
@@ -817,6 +881,14 @@ impl Team {
         now: u64,
         allow_departing: bool,
     ) -> Result<Result<Joined, ErrorCode>, sqlx::Error> {
+        // Downgrade protection: a holder that proved itself on version 3 is not served on an
+        // older version again (the app asks for an update).
+        if sub.proto < PROOF_PROTOCOL_VERSION
+            && store::device_proven(db, &self.id, &sub.holder).await?
+        {
+            tracing::info!("hello below version 3 from a device that proved itself refused");
+            return Ok(Err(ErrorCode::OutdatedClient));
+        }
         // The blocked device first, without writing anything: it does not count as a member.
         if let Some(until) = store::device_removed(
             db,
@@ -833,12 +905,15 @@ impl Team {
                 return Ok(Err(ErrorCode::Forbidden));
             }
             tracing::info!("hello from a removed device: only memberlog.get up to the removal");
+            // A fresh challenge like every welcome of version 3; `device.keys` and
+            // `device.prove` are acknowledged without effect here (`departing_ack`).
             let welcome = ServerMessage::Welcome(Welcome {
                 proto: sub.proto,
                 stream: self.log.stream().clone(),
                 head: self.log.head(),
                 member: sub.holder.member.clone(),
                 epoch: self.book.epoch(),
+                challenge: new_challenge(sub.proto),
             });
             let departing = Departing {
                 holder: sub.holder,
@@ -866,6 +941,12 @@ impl Team {
         let holder = sub.holder.clone();
         let role = sub.role;
         let proto = sub.proto;
+        let challenge = new_challenge(proto);
+        let mut sub = sub;
+        sub.possession = ConnectionProof {
+            challenge,
+            ..ConnectionProof::default()
+        };
         self.subscribers.insert(conn, sub);
         let welcome = ServerMessage::Welcome(Welcome {
             proto,
@@ -873,6 +954,7 @@ impl Team {
             head: self.log.head(),
             member: holder.member.clone(),
             epoch: self.book.epoch(),
+            challenge,
         });
         let replay = match self.log.replay(cursor) {
             Replay::Events(events) => Ok(events
@@ -929,13 +1011,10 @@ impl Team {
             _ => {}
         }
         self.members.insert(holder.member.as_str().to_owned(), role);
-        self.offline_since.remove(&holder);
-        let presence = self.book.presence(&holder, true, UnixMillis(now));
-        self.dirty = true;
-        events.extend(self.book_messages(presence));
-        self.prune_notes();
         self.emit(db, events, None).await?;
-        self.deliver_pending(db, &holder.member).await?;
+        // The book's online counting and the remembered `notify` only for a connection that
+        // counts as the log's device: on version 3 from its proof on.
+        self.refresh_counting(db, now).await?;
         Ok(Ok(Joined::Member))
     }
 
@@ -1015,23 +1094,134 @@ impl Team {
     /// A connection leaves (disconnected, too slow, ticket age reached).
     pub async fn leave(&mut self, db: &Db, conn: u64, now: u64) -> Result<(), sqlx::Error> {
         self.departing.remove(&conn);
-        let Some(sub) = self.subscribers.remove(&conn) else {
+        let Some(events) = self.disconnect(conn, now) else {
             return Ok(());
         };
         self.last_activity = now;
-        let presence = self.book.presence(&sub.holder, false, UnixMillis(now));
+        self.prune_notes();
+        self.emit(db, events, None).await
+    }
+
+    /// Takes a connection out of the team; the events of its leaving if it counted.
+    fn disconnect(&mut self, conn: u64, now: u64) -> Option<Vec<ServerMessage>> {
+        let sub = self.subscribers.remove(&conn)?;
+        Some(if sub.possession.counted {
+            self.stop_counting(&sub.holder, now)
+        } else {
+            Vec::new()
+        })
+    }
+
+    /// A connection of `holder` starts to count: the book counts it online.
+    fn start_counting(&mut self, holder: &Holder, now: u64) -> Vec<ServerMessage> {
+        self.offline_since.remove(holder);
+        let presence = self.book.presence(holder, true, UnixMillis(now));
+        self.dirty = true;
+        self.book_messages(presence)
+    }
+
+    /// A connection of `holder` stopped counting (left, or the log no longer lists its key);
+    /// the caller has already taken it out or unmarked it. The last one reports the holder
+    /// offline.
+    fn stop_counting(&mut self, holder: &Holder, now: u64) -> Vec<ServerMessage> {
+        let presence = self.book.presence(holder, false, UnixMillis(now));
         self.dirty = true;
         let mut events = self.book_messages(presence);
-        if !self.online(&sub.holder) {
-            self.offline_since.insert(sub.holder.clone(), now);
-            self.presence.remove(&sub.holder);
+        if !self.online(holder) {
+            self.offline_since.insert(holder.clone(), now);
+            self.presence.remove(holder);
             events.push(ServerMessage::PresenceUpdate(PresenceUpdate {
-                holder: sub.holder.clone(),
+                holder: holder.clone(),
                 state: PresenceState::Offline,
                 status: None,
                 at: UnixMillis(now),
             }));
         }
+        events
+    }
+
+    /// Brings every connection's counting in line with the current log: a connection that
+    /// starts to count joins (book, remembered `notify`), one that stops leaves (book,
+    /// presence). A connection that counts with a key it proved on version 3 gets its proof
+    /// row, which closes the holder's connections of older versions. Runs after `hello`, after
+    /// a passing `device.prove` and after every stored log entry.
+    async fn refresh_counting(&mut self, db: &Db, now: u64) -> Result<(), sqlx::Error> {
+        let mut events = Vec::new();
+        let mut joined = Vec::new();
+        let mut record = Vec::new();
+        let has_log = self.verifier.state().is_some();
+        let conns: Vec<u64> = self.subscribers.keys().copied().collect();
+        for conn in conns {
+            let Some(sub) = self.subscribers.get(&conn) else {
+                continue;
+            };
+            let counts = self.counts(sub);
+            let holder = sub.holder.clone();
+            let was = sub.possession.counted;
+            let row = counts
+                && has_log
+                && !sub.possession.recorded
+                && matches!(sub.possession(), Possession::Proven(_));
+            if let Some(sub) = self.subscribers.get_mut(&conn) {
+                sub.possession.counted = counts;
+                sub.possession.recorded |= row;
+            }
+            if counts && !was {
+                events.extend(self.start_counting(&holder, now));
+                if !joined.contains(&holder.member) {
+                    joined.push(holder.member.clone());
+                }
+            } else if was && !counts {
+                events.extend(self.stop_counting(&holder, now));
+            }
+            if row {
+                record.push(holder);
+            }
+        }
+        for holder in record {
+            if store::record_device_proof(db, &self.id, &holder, now).await? {
+                tracing::info!("device proved itself on version 3, older versions refused");
+            }
+            events.extend(self.close_legacy(|s| s.holder == holder, now));
+        }
+        if events.is_empty() && joined.is_empty() {
+            return Ok(());
+        }
+        self.prune_notes();
+        self.emit(db, events, None).await?;
+        for member in joined {
+            self.deliver_pending(db, &member).await?;
+        }
+        Ok(())
+    }
+
+    /// Closes the connections of protocol version 1 or 2 that `pred` selects with 4401: the app
+    /// fetches a new ticket and reconnects, and its `hello` below version 3 then gets
+    /// `outdatedClient`. Returns the events of their leaving.
+    fn close_legacy(&mut self, pred: impl Fn(&Subscriber) -> bool, now: u64) -> Vec<ServerMessage> {
+        let gone: Vec<u64> = self
+            .subscribers
+            .iter()
+            .filter(|(_, s)| s.proto < PROOF_PROTOCOL_VERSION && pred(s))
+            .map(|(c, _)| *c)
+            .collect();
+        let mut events = Vec::new();
+        for conn in gone {
+            if let Some(sub) = self.subscribers.get(&conn) {
+                sub.tx.try_send(Outgoing::Close(
+                    close::CLOSE_ROLE_CHANGED,
+                    "device proof required",
+                ));
+            }
+            events.extend(self.disconnect(conn, now).unwrap_or_default());
+        }
+        events
+    }
+
+    /// `REQUIRE_DEVICE_PROOF` took effect: every connection of protocol version 1 or 2 closes
+    /// with 4401.
+    pub async fn require_device_proof(&mut self, db: &Db, now: u64) -> Result<(), sqlx::Error> {
+        let events = self.close_legacy(|_| true, now);
         self.prune_notes();
         self.emit(db, events, None).await
     }
@@ -1173,12 +1363,9 @@ impl Team {
 
     fn deliver_overlaps(&mut self, notices: Vec<OverlapNotice>) {
         for notice in notices {
-            let conns: Vec<u64> = self
-                .subscribers
-                .iter()
-                .filter(|(_, s)| s.holder == notice.to.holder)
-                .map(|(c, _)| *c)
-                .collect();
+            // Only connections that count: a twin with a stolen ticket and the holder's device
+            // ID gets nothing of the other side's sealed detail.
+            let conns = self.counting(|s| s.holder == notice.to.holder);
             let text = self.frame(None, None, ServerMessage::ClaimOverlap(notice.overlap));
             for conn in conns {
                 self.send(conn, text.clone());
@@ -1219,22 +1406,62 @@ impl Team {
         op: &OpId,
         message: ClientMessage,
         now: u64,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<Handled, sqlx::Error> {
         let Some(sub) = self.subscribers.get(&conn).cloned() else {
             // Removed while the frame was already in flight: a `memberlog.get` gets the grace
             // period answer, so the app does not wait for an answer that never comes.
-            if let ClientMessage::MemberLogGet(get) = message {
-                self.departing_log_get(db, conn, op, get.after).await?;
+            match message {
+                ClientMessage::MemberLogGet(get) => {
+                    self.departing_log_get(db, conn, op, get.after).await?;
+                }
+                ClientMessage::DeviceKeys(_) | ClientMessage::DeviceProve(_) => {
+                    self.departing_ack(conn, op, &message);
+                }
+                _ => {}
             }
-            return Ok(());
+            return Ok(Handled::Done);
         };
         self.last_activity = now;
         // A kind newer than this connection's negotiated version is refused as a relay of that
         // version would refuse it: nothing applied, nothing remembered for retries.
         if message.since() > sub.proto {
             self.reply(conn, op, Err(error(ErrorCode::BadRequest)));
-            return Ok(());
+            return Ok(Handled::Done);
         }
+        // First the possession rule: in a team with a log, a device that does not count as the
+        // log's device may only register, prove itself and read. Before the op ID lookup, so a
+        // refused intent is not remembered and its retry after the proof is applied.
+        if let Err(restricted) = check_restricted(
+            self.verifier.state(),
+            &sub.holder,
+            sub.possession(),
+            &message,
+        ) {
+            tracing::debug!(
+                kind = message.kind(),
+                "intent of a device that does not count refused"
+            );
+            self.reply(conn, op, Err(error(restricted.code())));
+            return Ok(Handled::Done);
+        }
+        if let ClientMessage::DeviceProve(prove) = &message {
+            // Not deduplicated: the same proof verifies to the same result.
+            let proved = self.prove(conn, &sub, prove);
+            let passed = proved.is_ok();
+            self.reply(conn, op, proved.map(|()| ack()).map_err(error));
+            if !passed {
+                return Ok(Handled::BadFrame);
+            }
+            self.refresh_counting(db, now).await?;
+            return Ok(Handled::Done);
+        }
+        // Entries that change the log can make a connection start or stop counting.
+        let changes_log = matches!(
+            message,
+            ClientMessage::MemberLogAppend(_)
+                | ClientMessage::DeviceRemove(_)
+                | ClientMessage::KeyRotate(_)
+        );
         let who = sub.holder.clone();
         let at = UnixMillis(now);
         let dedup = message.deduplicated().then(|| {
@@ -1250,11 +1477,11 @@ impl Team {
                 Retry::Same(reply) => {
                     let reply = reply.clone();
                     self.reply(conn, op, reply);
-                    return Ok(());
+                    return Ok(Handled::Done);
                 }
                 Retry::Mismatch => {
                     self.reply(conn, op, Err(error(ErrorCode::BadRequest)));
-                    return Ok(());
+                    return Ok(Handled::Done);
                 }
                 Retry::New => {}
             }
@@ -1264,7 +1491,7 @@ impl Team {
             Ok(()) => self.apply(db, limits, conn, op, &sub, message, at).await?,
         };
         let Some(reply) = reply else {
-            return Ok(());
+            return Ok(Handled::Done);
         };
         // Live hints that announce the answer's own write follow the answer (`notes.keys.updated`
         // after the `ack` of `notes.keys.set`); every other event goes out before it.
@@ -1276,8 +1503,13 @@ impl Team {
         if let Some((key, digest)) = dedup {
             self.ops.remember(key, digest, reply.clone());
         }
+        let applied = reply.is_ok();
         self.reply(conn, op, reply);
-        self.emit(db, hints, None).await
+        self.emit(db, hints, None).await?;
+        if changes_log && applied {
+            self.refresh_counting(db, now).await?;
+        }
+        Ok(Handled::Done)
     }
 
     /// Applies an intent. `None` as reply: the reply has already been sent (reads).
@@ -1314,7 +1546,11 @@ impl Team {
             )
         };
         Ok(match message {
-            ClientMessage::Hello(_) | ClientMessage::Ping | ClientMessage::TicketRenew(_) => {
+            // `device.prove` is answered in `handle`.
+            ClientMessage::Hello(_)
+            | ClientMessage::Ping
+            | ClientMessage::TicketRenew(_)
+            | ClientMessage::DeviceProve(_) => {
                 (Vec::new(), Some(Err(error(ErrorCode::BadRequest))), None)
             }
             ClientMessage::PresenceSet(m) => {
@@ -1544,6 +1780,34 @@ impl Team {
                     },
                     BlobPut::Quota => (Vec::new(), Some(Err(error(ErrorCode::Limit))), None),
                 }
+            }
+            ClientMessage::BlobDelete(m) => {
+                // `notFound` before any right is checked, also for another team's ID: nothing
+                // is told about other teams.
+                let reply = match store::blob_author(db, &self.id, m.blob.as_str()).await? {
+                    None => Err(error(ErrorCode::NotFound)),
+                    Some(author) => {
+                        let allowed = match MemberId::new(author) {
+                            Ok(author) => check_blob_delete(
+                                self.verifier.state(),
+                                wire::role(sub.role),
+                                &who,
+                                &author,
+                            )
+                            .map_err(|refused| refused.code()),
+                            Err(_) => Err(ErrorCode::Forbidden),
+                        };
+                        match allowed {
+                            Err(code) => Err(error(code)),
+                            Ok(()) if store::delete_blob(db, &self.id, m.blob.as_str()).await? => {
+                                Ok(ack())
+                            }
+                            // A concurrent delete won.
+                            Ok(()) => Err(error(ErrorCode::NotFound)),
+                        }
+                    }
+                };
+                (Vec::new(), Some(reply), None)
             }
             ClientMessage::BlobGet(m) => {
                 match store::get_blob(db, &self.id, m.blob.as_str()).await? {
@@ -1873,14 +2137,47 @@ impl Team {
                 holder: holder.clone(),
             }),
         );
-        let conns: Vec<u64> = self
-            .subscribers
-            .iter()
-            .filter(|(_, s)| s.holder == *holder)
-            .map(|(c, _)| *c)
-            .collect();
+        let conns = self.counting(|s| s.holder == *holder);
         for conn in conns {
             self.send(conn, text.clone());
+        }
+    }
+
+    /// `device.keys` or `device.prove` of a connection in its grace period: acknowledged
+    /// without effect (no key registered, nothing verified or recorded), so the app goes on
+    /// to read the log up to its removal. `false`: the connection is not in its grace period
+    /// here.
+    pub fn departing_ack(&self, conn: u64, op: &OpId, message: &ClientMessage) -> bool {
+        let Some(departing) = self.departing.get(&conn) else {
+            return false;
+        };
+        let reply = if message.since() > departing.proto {
+            ServerMessage::Err(error(ErrorCode::BadRequest))
+        } else {
+            ServerMessage::Ack(ack())
+        };
+        departing.send(self.frame(Some(op), None, reply).as_ref());
+        true
+    }
+
+    /// `device.prove`: verifies the proof against this connection's challenge and holder. A
+    /// passing proof keeps its key (`Proven`); a refused one changes nothing.
+    fn prove(&mut self, conn: u64, sub: &Subscriber, prove: &DeviceProve) -> Result<(), ErrorCode> {
+        let Some(challenge) = sub.possession.challenge else {
+            return Err(ErrorCode::BadRequest);
+        };
+        match verify_connection_proof(&self.team, &sub.holder, sub.proto, &challenge, prove) {
+            Ok(key) => {
+                if let Some(sub) = self.subscribers.get_mut(&conn) {
+                    sub.possession.proven = Some(key);
+                }
+                tracing::info!("connection proof passed");
+                Ok(())
+            }
+            Err(refused) => {
+                tracing::info!(reason = %refused, "connection proof refused");
+                Err(refused.code())
+            }
         }
     }
 }

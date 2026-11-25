@@ -73,6 +73,10 @@ from `ticket.renew` and from the revocation list (`role_changed` with `role`);
 `member.role_changed` announces them. 4401 (`CLOSE_ROLE_CHANGED`) only when the new role is unknown.
 Please align the description of `CLOSE_ROLE_CHANGED` in the crate with this.
 
+Wishes 6 and 7 are implemented in protocol version 3 (app commit 87d47af, ADR 0020) and wired
+up in the relay ([protocol.md](protocol.md), "Proof of possession" and "blob.delete"). The text
+remains as history.
+
 ## 6. Proof of possession at `hello`
 
 The device ID in `hello` is chosen by the client; the relay cannot tell whether the connection

@@ -26,6 +26,11 @@ fn v1() -> ProtoRange {
     ProtoRange::new(1, 1).unwrap()
 }
 
+/// An app of version 2: no proof of possession (version 3) in these tests.
+fn v2() -> ProtoRange {
+    ProtoRange::new(1, 2).unwrap()
+}
+
 fn sealed(epoch: u32, data: &str) -> Sealed {
     Sealed {
         epoch: Epoch(epoch),
@@ -100,7 +105,7 @@ struct Team {
 async fn team(addr: SocketAddr) -> Team {
     let mut log = Log::new("t");
     let alice = Dev::new("alice", "alice-laptop");
-    let (mut a, proto) = join_with(addr, "t", &alice, Role::Owner, ProtoRange::CURRENT).await;
+    let (mut a, proto) = join_with(addr, "t", &alice, Role::Owner, v2()).await;
     assert_eq!(proto, 2);
     let create = log.create(&alice);
     assert!(is_ack(
@@ -109,9 +114,9 @@ async fn team(addr: SocketAddr) -> Team {
     ));
     log.accept(&create, &alice.holder);
     let bob = Dev::new("bob", "bob-laptop");
-    let (b, _) = join_with(addr, "t", &bob, Role::Member, ProtoRange::CURRENT).await;
+    let (b, _) = join_with(addr, "t", &bob, Role::Member, v2()).await;
     let carol = Dev::new("carol", "carol-pc");
-    let (c, _) = join_with(addr, "t", &carol, Role::Admin, ProtoRange::CURRENT).await;
+    let (c, _) = join_with(addr, "t", &carol, Role::Admin, v2()).await;
     for (dev, role) in [(&bob, LogRole::Member), (&carol, LogRole::Admin)] {
         let add = log.add_member(&alice, dev, role);
         assert!(is_ack(
@@ -140,6 +145,20 @@ async fn team(addr: SocketAddr) -> Team {
 async fn hello_negotiates_the_highest_common_version() {
     let s = start_official().await;
     let (_a, welcome) = Client::join(s.addr, "t", "alice", Role::Owner).await;
+    assert_eq!(welcome.proto, 3);
+    let mut two = Client::connect(s.addr).await;
+    let frame = two
+        .hello_with(
+            "t",
+            ticket("dave", "t", Role::Member),
+            "dave-pc",
+            v2(),
+            None,
+        )
+        .await;
+    let ServerMessage::Welcome(welcome) = frame.message else {
+        panic!("{frame:?}")
+    };
     assert_eq!(welcome.proto, 2);
     let mut old = Client::connect(s.addr).await;
     let frame = old
@@ -162,7 +181,7 @@ async fn hello_negotiates_the_highest_common_version() {
     let ServerMessage::Welcome(welcome) = frame.message else {
         panic!("{frame:?}")
     };
-    assert_eq!(welcome.proto, 2);
+    assert_eq!(welcome.proto, 3);
 }
 
 #[tokio::test]
@@ -215,7 +234,13 @@ async fn writes_are_checked_for_role_version_and_epoch() {
     // The lower of log role and ticket role: carol is admin in the log, her ticket says member.
     let mut demoted = Client::connect(s.addr).await;
     let w = demoted
-        .hello("t", ticket("carol", "t", Role::Member), "carol-pc", None)
+        .hello_with(
+            "t",
+            ticket("carol", "t", Role::Member),
+            "carol-pc",
+            v2(),
+            None,
+        )
         .await;
     assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
     let r = demoted.request("t", set(0, sealed(1, "Y2Fyb2w"))).await;
@@ -223,7 +248,13 @@ async fn writes_are_checked_for_role_version_and_epoch() {
     // An owner's device the log does not list.
     let mut spare = Client::connect(s.addr).await;
     let w = spare
-        .hello("t", ticket("alice", "t", Role::Owner), "alice-spare", None)
+        .hello_with(
+            "t",
+            ticket("alice", "t", Role::Owner),
+            "alice-spare",
+            v2(),
+            None,
+        )
         .await;
     assert!(matches!(w.message, ServerMessage::Welcome(_)), "{w:?}");
     let r = spare.request("t", set(0, sealed(1, "c3BhcmU"))).await;
@@ -266,7 +297,7 @@ async fn retry_gets_the_first_answer() {
 async fn a_team_without_a_log_has_no_one_to_write_the_ring() {
     let s = start_official().await;
     let (mut a, welcome) = Client::join(s.addr, "solo", "alice", Role::Owner).await;
-    assert_eq!(welcome.proto, 2);
+    assert_eq!(welcome.proto, 3);
     let r = a.request("solo", set(0, sealed(0, "cmluZw"))).await;
     assert_eq!(code(&r), Some(ErrorCode::Forbidden));
     assert_eq!(get(&mut a, "solo").await, None);

@@ -113,6 +113,10 @@ pub struct Config {
     pub revocation: Option<RevocationSource>,
     pub allowed_origins: Vec<String>,
     pub trust_proxy: bool,
+    /// `REQUIRE_DEVICE_PROOF`: serve only protocol version 3 and newer, so every device proves
+    /// possession of its signing key at `hello`. Off by default while released apps of version
+    /// 1 and 2 are still in use (`docs/operations.md`).
+    pub require_device_proof: bool,
     pub max_connections: usize,
     pub max_connections_per_member: usize,
     pub max_connections_per_ip: usize,
@@ -416,6 +420,7 @@ impl Config {
             revocation,
             allowed_origins,
             trust_proxy: flag("TRUST_PROXY", false)?,
+            require_device_proof: flag("REQUIRE_DEVICE_PROOF", false)?,
             max_connections: number("MAX_CONNECTIONS", 200)?,
             max_connections_per_member: number("MAX_CONNECTIONS_PER_MEMBER", 8)?,
             max_connections_per_ip: number("MAX_CONNECTIONS_PER_IP", 20)?,
@@ -470,6 +475,7 @@ impl Config {
             revocation: None,
             allowed_origins: Vec::new(),
             trust_proxy: false,
+            require_device_proof: false,
             max_connections: 100,
             max_connections_per_member: 8,
             max_connections_per_ip: 200,

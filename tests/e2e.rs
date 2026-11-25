@@ -428,7 +428,8 @@ async fn removed_device_reads_log_up_to_removal_then_4403() {
             other => panic!("removed device got {other:?}"),
         }
     }
-    // During the grace period everything except memberlog.get is rejected and writes nothing.
+    // During the grace period everything except memberlog.get is rejected and writes nothing;
+    // device.keys gets ack without effect (the app sends it before its log fetch).
     assert_eq!(
         code(&p.request("t", reserve_task(9)).await),
         Some(ErrorCode::Forbidden)
@@ -437,13 +438,10 @@ async fn removed_device_reads_log_up_to_removal_then_4403() {
         code(&p.request("t", ClientMessage::DevicesGet).await),
         Some(ErrorCode::Forbidden)
     );
-    assert_eq!(
-        code(
-            &p.request("t", ClientMessage::DeviceKeys(phone.keys("t")))
-                .await
-        ),
-        Some(ErrorCode::Forbidden)
-    );
+    assert!(is_ack(
+        &p.request("t", ClientMessage::DeviceKeys(phone.keys("t")))
+            .await
+    ));
     assert!(
         is_ack(&b.request("t", reserve_task(9)).await),
         "nothing reserved"
@@ -521,15 +519,26 @@ async fn hello_from_removed_device_only_gets_log_up_to_removal() {
             }),
         )
         .await;
-    // Only welcome: no snapshot, no reservations, no presence.
+    // Only welcome: no snapshot, no reservations, no presence. On version 3 it carries a
+    // challenge like every welcome.
     let first = again.recv().await.expect("reply to hello");
-    assert!(
-        matches!(first.message, ServerMessage::Welcome(_)),
-        "{:?}",
-        first.message
-    );
+    let ServerMessage::Welcome(welcome) = first.message else {
+        panic!("{:?}", first.message);
+    };
+    assert_eq!(welcome.proto, 3);
+    assert!(welcome.challenge.is_some());
+    // device.keys and device.prove: ack without effect (no key registered, no proof row).
     for message in [
         ClientMessage::DeviceKeys(phone.keys("t")),
+        phone.prove("t", &welcome),
+    ] {
+        let op = again.op();
+        again.send(&op, Some("t"), message).await;
+        let answer = again.recv().await.expect("reply during the grace period");
+        assert_eq!(answer.id.as_ref().map(|i| i.as_str()), Some(op.as_str()));
+        assert!(is_ack(&answer), "{answer:?}");
+    }
+    for message in [
         reserve_task(10),
         ClientMessage::DevicesGet,
         ClientMessage::PresenceSet(PresenceSet {
@@ -560,8 +569,15 @@ async fn hello_from_removed_device_only_gets_log_up_to_removal() {
     check.apply_all(&page.entries).expect("log verifiable");
     assert!(check.state().unwrap().device(&phone.holder).is_none());
     assert_eq!(again.close_code().await, Some(close::CLOSE_REMOVED));
-    // Nothing written: no keys, no reservation, not among the devices.
+    // Nothing written: no keys, no proof, no reservation, not among the devices.
     assert!(is_ack(&b.request("t", reserve_task(10)).await));
+    let proofs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relay_device_proofs WHERE member = 'bob' AND device = 'bob-phone'",
+    )
+    .fetch_one(&s.server.state.relay.db)
+    .await
+    .unwrap();
+    assert_eq!(proofs, 0);
     // Up to the reply to devices.get alice received nothing about the removed device
     // (no presence, no join): everything before that arrived before the hello.
     let op = a.op();

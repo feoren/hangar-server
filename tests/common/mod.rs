@@ -163,6 +163,23 @@ impl Client {
         }
     }
 
+    /// Next server frame as the relay sent it (pings skipped); `None` on timeout or end.
+    pub async fn recv_text(&mut self) -> Option<String> {
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(5), self.ws.next())
+                .await
+                .ok()??;
+            match next.ok()? {
+                Message::Text(t) => return Some(t.as_str().to_owned()),
+                Message::Close(frame) => {
+                    self.closed = frame.map(|f| u16::from(f.code));
+                    return None;
+                }
+                _ => continue,
+            }
+        }
+    }
+
     /// Reads until the server closes and returns the close code.
     pub async fn close_code(&mut self) -> Option<u16> {
         while self.recv().await.is_some() {}
@@ -443,26 +460,61 @@ impl Log {
     }
 }
 
+impl Dev {
+    /// `device.prove` for the `welcome` of this device's connection to `team`.
+    pub fn prove(&self, team: &str, welcome: &wire::Welcome) -> ClientMessage {
+        let challenge = welcome
+            .challenge
+            .expect("welcome of version 3 carries a challenge");
+        ClientMessage::DeviceProve(self.identity.prove_connection(
+            &team_id(team),
+            &self.holder,
+            welcome.proto,
+            &challenge,
+        ))
+    }
+}
+
 impl Client {
-    /// Connects as `dev` and sends `device.keys`.
+    /// Connects as `dev` and does what the app does after `welcome`: `device.keys`, then on
+    /// version 3 `device.prove`.
     pub async fn join_device(addr: SocketAddr, team: &str, dev: &Dev, role: Role) -> Client {
+        Client::join_device_with(addr, team, dev, role, ProtoRange::CURRENT).await
+    }
+
+    pub async fn join_device_with(
+        addr: SocketAddr,
+        team: &str,
+        dev: &Dev,
+        role: Role,
+        proto: ProtoRange,
+    ) -> Client {
         let mut client = Client::connect(addr).await;
         let frame = client
-            .hello(
+            .hello_with(
                 team,
                 ticket(dev.holder.member.as_str(), team, role),
                 dev.holder.device.as_str(),
+                proto,
                 None,
             )
             .await;
-        assert!(
-            matches!(frame.message, ServerMessage::Welcome(_)),
-            "{frame:?}"
-        );
-        let r = client
+        let ServerMessage::Welcome(welcome) = frame.message else {
+            panic!("no welcome: {frame:?}");
+        };
+        client.register(team, dev, &welcome).await;
+        client
+    }
+
+    /// `device.keys` and, on version 3, `device.prove` after `welcome`.
+    pub async fn register(&mut self, team: &str, dev: &Dev, welcome: &wire::Welcome) {
+        let r = self
             .request(team, ClientMessage::DeviceKeys(dev.keys(team)))
             .await;
         assert!(matches!(r.message, ServerMessage::Ack(_)), "{r:?}");
-        client
+        if welcome.challenge.is_some() {
+            let r = self.request(team, dev.prove(team, welcome)).await;
+            assert!(matches!(r.message, ServerMessage::Ack(_)), "{r:?}");
+        }
     }
 }

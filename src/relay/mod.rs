@@ -9,7 +9,7 @@ pub mod store;
 pub mod team;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use crate::db::Db;
 use crate::signed::KeySet;
 use crate::ticket::{self, Role, TicketClaims};
 use crate::util::{now_ms, now_s};
-use crate::wire::{ErrorCode, MemberId, ProtoRange};
+use crate::wire::{ErrorCode, MemberId, ProtoRange, PROOF_PROTOCOL_VERSION};
 use hangar_team_protocol::reservation::Policy;
 
 use team::{Attention, Budget, HandleLimits, Team};
@@ -62,6 +62,8 @@ pub struct Relay {
     pub hello_timeout: Duration,
     /// Grace period of a removed device for its `memberlog.get` (see `conn`).
     pub removed_grace: Duration,
+    /// `REQUIRE_DEVICE_PROOF`: only protocol version 3 and newer (`proto_range`).
+    require_device_proof: AtomicBool,
     transcript_retention_ms: u64,
     /// Loaded teams. The map's lock is held only to find or insert an entry; the team itself
     /// loads outside it, in its entry's cell (see `team`).
@@ -115,6 +117,7 @@ impl Relay {
             connection_max_age: Duration::from_secs(config.connection_max_age_s.max(60)),
             hello_timeout: Duration::from_millis(config.hello_timeout_ms.max(100)),
             removed_grace: Duration::from_millis(config.removed_grace_ms.clamp(100, 30_000)),
+            require_device_proof: AtomicBool::new(config.require_device_proof),
             transcript_retention_ms: config.transcript_retention_days.saturating_mul(86_400_000),
             teams: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),
@@ -220,6 +223,41 @@ impl Relay {
         release(&self.per_ip, key);
     }
 
+    /// The protocol versions this relay offers: `SERVER_PROTO`, or only 3 and newer with
+    /// `REQUIRE_DEVICE_PROOF`.
+    pub fn proto_range(&self) -> ProtoRange {
+        if self.require_device_proof.load(Ordering::SeqCst) {
+            ProtoRange::new(PROOF_PROTOCOL_VERSION, SERVER_PROTO.max()).unwrap_or(SERVER_PROTO)
+        } else {
+            SERVER_PROTO
+        }
+    }
+
+    /// Switches `REQUIRE_DEVICE_PROOF` on a running relay. Switching it on closes every open
+    /// connection of protocol version 1 or 2 with 4401; their next `hello` gets
+    /// `outdatedClient`.
+    pub async fn set_require_device_proof(&self, on: bool) -> Result<(), sqlx::Error> {
+        // Set before any team lock is taken: a `hello` joining meanwhile reads it again under
+        // its team's lock (`conn`).
+        let was = self.require_device_proof.swap(on, Ordering::SeqCst);
+        if !on || was {
+            return Ok(());
+        }
+        let teams: Vec<Arc<Mutex<Team>>> = self
+            .teams
+            .lock()
+            .await
+            .values()
+            .filter_map(|cell| cell.get().cloned())
+            .collect();
+        for team in teams {
+            let mut guard = team.lock().await;
+            guard.require_device_proof(&self.db, now_ms()).await?;
+            self.forward_attention(&mut guard);
+        }
+        Ok(())
+    }
+
     /// Checks `hello`: ticket, team, seat, protocol, single-use `jti`, device binding.
     pub async fn check_hello(
         &self,
@@ -228,8 +266,9 @@ impl Relay {
         device: &str,
         proto: ProtoRange,
     ) -> Result<(TicketClaims, u16), ErrorCode> {
-        let Some(version) = proto.negotiate(SERVER_PROTO) else {
-            return Err(if proto.max() < SERVER_PROTO.min() {
+        let offered = self.proto_range();
+        let Some(version) = proto.negotiate(offered) else {
+            return Err(if proto.max() < offered.min() {
                 ErrorCode::OutdatedClient
             } else {
                 ErrorCode::BadRequest

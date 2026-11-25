@@ -147,19 +147,32 @@ reversed without the key, but they can be compared within the epoch.
 - Request headers must arrive within 10 s (`HEADER_READ_TIMEOUT`).
 - Account deletion and data export in self-hosting are still missing (GDPR Art. 17 and 20).
 - Storage has a quota per team (`BLOB_QUOTA_BYTES`) and per member over all teams (twice that),
-  and a retention period only for transcripts (`TRANSCRIPT_RETENTION_DAYS`); decisions and tasks
-  remain until the team is deleted. The protocol has no way to delete a blob yet, so a member can
-  fill its team's quota for good (protocol wish).
+  and a retention period only for transcripts (`TRANSCRIPT_RETENTION_DAYS`). On protocol version
+  3 the author, an owner or an admin deletes a blob with `blob.delete`, which frees the quota;
+  nothing of it stays. The app stores no blob yet, so it deletes none.
 - Memory over all teams: claims at most 64 MiB in total and four times the per-team limit per
   member. Replay windows: once all of them together hold more than 32 MiB, every team that
   writes keeps only 128 KiB (older cursors get a snapshot), so beyond 32 MiB each loaded team
   adds at most that much. The limits per team alone would let one account with many teams fill
   the memory.
-- The device ID in `hello` is chosen by the client and not bound to a key. A blocked device
-  (`device.remove`) whose account session on the website is still valid can come back with a new
-  ID and read what the relay hands out to any member (snapshot, claims, blobs, notes key ring);
-  it can decrypt only up to the next `key.rotate`. After `device.remove`, sign the device out on
-  the website as well and rotate the key. A proof of possession at `hello` is a protocol wish.
+- The device ID in `hello` is chosen by the client. On protocol version 3 the connection proves
+  that it holds the signing key the membership log lists for it (`device.prove` against the
+  `welcome`'s random challenge); until then, and on every version for a device the log does not
+  list, it may only register (`device.keys`, `device.prove`), read the log and the device
+  directory, renew its ticket and ping (docs/protocol.md, "Proof of possession"). A blocked device
+  (`device.remove`) that comes back with a new ID therefore reads only the log and the device
+  directory, no snapshot of reservations, claims, blobs or the notes key ring. A second
+  connection with a stolen ticket and a listed device ID acts as nothing on version 3, receives
+  no targeted message (`claim.overlap`, `key.wrapped`, `notify`) and causes no presence or
+  reservation change. What stays open:
+  - every connection with a valid ticket receives the logged event stream (hashes, sealed small
+    notes and statuses, readable only with an epoch key it may still have); `key.rotate` after a
+    removal stays the cure, so after `device.remove` sign the device out on the website as well
+    and rotate the key;
+  - until `REQUIRE_DEVICE_PROOF=true`, a stolen, unused ticket with the ID of a listed device that
+    never ran a version 3 app still acts as that device on versions 1 and 2. Once a holder has
+    proved itself on version 3, the relay refuses its `hello` below version 3 and closes its open
+    connections of older versions (`relay_device_proofs`).
 - `device.keys` cannot change the keys of a device the verified log already lists (`conflict`).
 - The notes key ring (protocol version 2) is one sealed record per team, readable only with the
   epoch key; the relay keeps the writing device's IDs and the time with it and deletes it with
@@ -168,5 +181,6 @@ reversed without the key, but they can be compared within the epoch.
   device ID from `hello`, not the possession of the device: a stolen, unused ticket of an owner
   or admin, used with the ID of one of that member's devices from the log, could overwrite the
   ring with garbage (the app does not accept a record whose signature does not verify, so notes
-  become unreadable until an admin writes the ring again). Proof of possession at `hello` is a
-  protocol wish.
+  become unreadable until an admin writes the ring again). On protocol version 3 such a ticket
+  cannot act as the device (proof of possession, see above); the case stays open on versions 1
+  and 2 for a device that never proved itself, until `REQUIRE_DEVICE_PROOF=true`.

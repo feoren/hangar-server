@@ -23,7 +23,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::outbox::{outbox, Outbox};
-use super::team::{close, Joined as JoinOutcome, Outgoing, Subscriber, Team};
+use super::team::{close, Handled, Joined as JoinOutcome, Outgoing, Subscriber, Team};
 use super::{Relay, RenewRefused};
 use crate::http::{AppState, ClientIp};
 use crate::util::now_ms;
@@ -349,7 +349,16 @@ async fn run(
         let only_departing = !joined.is_empty() && joined.values().all(|j| j.departing.is_some());
         if departing.is_some() || only_departing {
             // During the grace period of this team (or of every team): only `memberlog.get` of
-            // a team that removed the device.
+            // a team that removed the device. `device.keys` and `device.prove` there get `ack`
+            // without effect: the app sends both before its log fetch.
+            if let (Some(team), ClientMessage::DeviceKeys(_) | ClientMessage::DeviceProve(_)) =
+                (departing.as_ref(), &frame.message)
+            {
+                if !team.lock().await.departing_ack(conn, &op, &frame.message) {
+                    send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
+                }
+                continue;
+            }
             let ClientMessage::MemberLogGet(get) = frame.message else {
                 send(&tx, err(Some(op), team_id, error(ErrorCode::Forbidden)));
                 continue;
@@ -453,6 +462,7 @@ async fn run(
                     tx: tx.clone(),
                     kick: kick.clone(),
                     removed: removed.clone(),
+                    possession: Default::default(),
                 };
                 let iat_ms = u64::try_from(claims.iat).unwrap_or(0).saturating_mul(1000);
                 let result = {
@@ -471,6 +481,17 @@ async fn run(
                             joined.is_empty(),
                         )
                         .await;
+                    // `REQUIRE_DEVICE_PROOF` switched on after this `hello` was checked: read
+                    // again under the team lock, which the switch also takes, so the
+                    // connection cannot slip past it.
+                    if matches!(result, Ok(Ok(JoinOutcome::Member)))
+                        && proto < relay.proto_range().min()
+                    {
+                        if let Err(failure) = guard.require_device_proof(&relay.db, now_ms()).await
+                        {
+                            tracing::error!(error = %failure, "older versions not closed");
+                        }
+                    }
                     relay.forward_attention(&mut guard);
                     result
                 };
@@ -566,19 +587,28 @@ async fn run(
                     continue;
                 };
                 let mut guard = entry.team.lock().await;
-                if let Err(failure) = guard
+                let handled = guard
                     .handle(&relay.db, &relay.limits, conn, &op, other, now_ms())
-                    .await
-                {
-                    tracing::error!(error = %failure, "intent not processed");
-                    drop(guard);
-                    send(
-                        &tx,
-                        err(Some(op), Some(team_id), error(ErrorCode::BadRequest)),
-                    );
-                    continue;
-                }
+                    .await;
                 relay.forward_attention(&mut guard);
+                drop(guard);
+                match handled {
+                    Ok(Handled::Done) => {}
+                    // A refused `device.prove`: no trying signatures without bound.
+                    Ok(Handled::BadFrame) => {
+                        bad += 1;
+                        if bad > MAX_BAD_FRAMES {
+                            break Some((close::CLOSE_HELLO_TIMEOUT, "bad frames"));
+                        }
+                    }
+                    Err(failure) => {
+                        tracing::error!(error = %failure, "intent not processed");
+                        send(
+                            &tx,
+                            err(Some(op), Some(team_id), error(ErrorCode::BadRequest)),
+                        );
+                    }
+                }
             }
         }
     };

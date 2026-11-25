@@ -3,7 +3,7 @@
 //! crate in a single place. What the crate still lacks for the relay: `docs/protocol-wishes.md`.
 
 pub use hangar_team_protocol::e2e::{
-    check_append, check_rotate, ChainError, ChainHead, KeyProof, LogHash, PublicKey,
+    check_append, check_rotate, ChainError, ChainHead, Challenge, KeyProof, LogHash, PublicKey,
 };
 pub use hangar_team_protocol::hash::{KeyedHash, PathHashes};
 pub use hangar_team_protocol::ids::{
@@ -12,7 +12,7 @@ pub use hangar_team_protocol::ids::{
 };
 pub use hangar_team_protocol::wire::*;
 pub use hangar_team_protocol::{close, limits};
-pub use hangar_team_protocol::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
+pub use hangar_team_protocol::{MIN_PROTOCOL_VERSION, PROOF_PROTOCOL_VERSION, PROTOCOL_VERSION};
 
 /// Maps the role from the ticket to the protocol role.
 pub fn role(role: crate::ticket::Role) -> Role {

@@ -168,8 +168,46 @@ async fn drop_devices(
         .bind(holder.device.as_str())
         .execute(&mut **tx)
         .await?;
+        // A holder admitted again under the same IDs starts without a proof.
+        sqlx::query(
+            "DELETE FROM relay_device_proofs WHERE team_id = ? AND member = ? AND device = ?",
+        )
+        .bind(team)
+        .bind(holder.member.as_str())
+        .bind(holder.device.as_str())
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
+}
+
+/// Whether the holder once proved possession of its listed signing key on protocol version 3
+/// in this team (downgrade protection: its `hello` of an older version is refused).
+pub async fn device_proven(db: &Db, team: &str, holder: &Holder) -> Result<bool> {
+    let row: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM relay_device_proofs WHERE team_id = ? AND member = ? AND device = ?",
+    )
+    .bind(team)
+    .bind(holder.member.as_str())
+    .bind(holder.device.as_str())
+    .fetch_optional(db)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Records that the holder counts as the log's device with a proven key. `true`: the row is
+/// new.
+pub async fn record_device_proof(db: &Db, team: &str, holder: &Holder, now: u64) -> Result<bool> {
+    let done = sqlx::query(
+        "INSERT INTO relay_device_proofs (team_id, member, device, proven_at) VALUES (?, ?, ?, ?)          ON CONFLICT DO NOTHING",
+    )
+    .bind(team)
+    .bind(holder.member.as_str())
+    .bind(holder.device.as_str())
+    .bind(i64_of(now))
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected() > 0)
 }
 
 /// Was this device removed from the team? `Some(index)`: yes, by the log entry `index` (for
@@ -648,6 +686,37 @@ pub async fn put_blob(
         .await?;
     tx.commit().await?;
     Ok(BlobPut::Stored(id))
+}
+
+/// The member that stored a blob of the team, `None` if the team has no blob with this ID.
+pub async fn blob_author(db: &Db, team: &str, id: &str) -> Result<Option<String>> {
+    sqlx::query_scalar("SELECT member FROM relay_blobs WHERE team_id = ? AND id = ?")
+        .bind(team)
+        .bind(id)
+        .fetch_optional(db)
+        .await
+}
+
+/// `blob.delete`: removes the blob and frees its size in the team's quota in one transaction.
+/// `false`: there was no such blob (any more; a concurrent delete won).
+pub async fn delete_blob(db: &Db, team: &str, id: &str) -> Result<bool> {
+    let mut tx = begin_write(db).await?;
+    let size: Option<i64> =
+        sqlx::query_scalar("DELETE FROM relay_blobs WHERE team_id = ? AND id = ? RETURNING size")
+            .bind(team)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(size) = size else {
+        return Ok(false);
+    };
+    sqlx::query("UPDATE relay_teams SET blob_bytes = MAX(blob_bytes - ?, 0) WHERE id = ?")
+        .bind(size)
+        .bind(team)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub async fn get_blob(db: &Db, team: &str, id: &str) -> Result<Option<(Epoch, Ciphertext)>> {
