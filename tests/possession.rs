@@ -153,6 +153,10 @@ async fn team(s: &TestServer) -> (Log, Dev, Client, Dev, Client) {
     let add = log.add_member(&alice, &bob, LogRole::Member);
     assert!(is_ack(&append(&mut a, "t", &add).await));
     log.accept(&add, &alice.holder);
+    // The relay writes the proof rows after the append's answer, still under the team's lock:
+    // one more round trip through the team, and they are stored.
+    let r = a.request("t", ClientMessage::DevicesGet).await;
+    assert!(matches!(r.message, ServerMessage::Devices(_)), "{r:?}");
     (log, alice, a, bob, b)
 }
 
