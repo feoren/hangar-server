@@ -34,6 +34,7 @@ continues with the same settings and creates the team only once. Values in `.env
 | Admin commands | `cd /opt/hangar-server && docker compose run --rm server teams` | `sudo hangar-server teams` |
 | Logs | `docker compose logs -f server` | `journalctl -u hangar-server -f` |
 | Restart | `docker compose restart server` | `systemctl restart hangar-server` |
+| Apply a changed `.env` | `docker compose up -d` (a restart keeps the old values) | `systemctl restart hangar-server` |
 
 The native service runs as the system user `hangar-server`, listens on `127.0.0.1:8080` only and
 is hardened by systemd (`ProtectSystem=strict`, `NoNewPrivileges`, 512 MiB memory limit). If ports

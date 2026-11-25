@@ -24,9 +24,18 @@
 
 [Hangar](https://github.com/feoren/hangar) is the desktop app for running AI coding agents as a
 team. This server connects the Hangar apps of your team: who is working on what right now, who
-has reserved which task, which files an agent is changing, plus shared notes. Everything your
-team shares is encrypted on the device, so the server only stores and passes on data it cannot
-read.
+has reserved which task, which files an agent is changing, plus shared notes and the team's
+decisions. Everything your team shares is encrypted on the device, so the server only stores
+and passes on data it cannot read.
+
+- **One command to install.** The script sets up HTTPS, creates your first team and prints your
+  sign-in link.
+- **End-to-end encrypted.** Tasks, notes and decisions are encrypted on each device, file paths
+  reach the server only as hashes. The server holds no keys.
+- **Small.** The smallest rented server with 1 GB of memory is enough, with or without Docker.
+- **Little upkeep.** Updates use the same command, the database updates itself, and Hangar
+  reconnects on its own.
+- **Free for one person.** Teams need a license for the seats they use.
 
 ## Do I need this?
 
@@ -200,6 +209,7 @@ it on and stores it, but holds no keys.
 | who is connected, and when | file paths and changed lines |
 | presence (active, idle, away) | status texts, decisions, transcripts |
 | that two people work on the same file, as hashes | which file it is |
+| who stored a note or decision, when, and its size | what it says |
 | team names (they appear in invitations) | |
 
 The full list is in [docs/security.md](docs/security.md).
@@ -210,7 +220,7 @@ The full list is in [docs/security.md](docs/security.md).
 
 ## Requirements
 
-| | |
+| | Minimum |
 | --- | --- |
 | System | Linux, 64-bit (x86_64 or ARM64); the install script supports Debian and Ubuntu |
 | Memory | 512 MB free; about 2 MB per connected device plus 64 MB |
@@ -236,10 +246,16 @@ on [hangar.feoren.com](https://hangar.feoren.com/pricing), then:
 **Updates.** Run the install command from step 3 again. It keeps data and settings, only
 replaces the program and migrates the database. Hangar reconnects on its own.
 
-**Older apps.** Newer Hangar apps prove at every sign-in that they hold their device's key.
-Older apps still work, until you set `REQUIRE_DEVICE_PROOF=true` in the `.env` file once every
-member has updated; then the server asks older apps to update
-([docs/operations.md](docs/operations.md)).
+**Older Hangar apps** keep working; there is nothing to do. Current apps also prove at every
+sign-in that they hold their device's key. Optional, once everyone in your team has updated
+Hangar: add the line `REQUIRE_DEVICE_PROOF=true` to `/opt/hangar-server/.env` (native:
+`/etc/hangar-server/.env`) and apply it with the line for your way. From then on the server
+asks older apps to update ([docs/operations.md](docs/operations.md)).
+
+```sh
+cd /opt/hangar-server && docker compose up -d   # docker
+sudo systemctl restart hangar-server            # native
+```
 
 **Backups.** All data lives in the Docker volume `hangar-server_team-data` (native:
 `/var/lib/hangar-server`). Back it up regularly, for example once a week, as shown in
@@ -247,7 +263,8 @@ member has updated; then the server asks older apps to update
 
 **Mail.** Optional. Without it, the server prints invitation and sign-in links for you to pass
 on. To send them by mail, fill in the `SMTP_*` lines in `/opt/hangar-server/.env` (native:
-`/etc/hangar-server/.env`), set `MAIL_TRANSPORT=smtp` and restart the server.
+`/etc/hangar-server/.env`), set `MAIL_TRANSPORT=smtp` and apply it with
+`cd /opt/hangar-server && docker compose up -d` (native: `sudo systemctl restart hangar-server`).
 
 ## Troubleshooting
 
