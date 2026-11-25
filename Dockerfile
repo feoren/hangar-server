@@ -9,7 +9,7 @@
 # reproducible; Dependabot proposes new digests. To update by hand:
 #   docker buildx imagetools inspect rust:1-alpine   (first "Digest:" line)
 
-FROM rust:1-alpine@sha256:2cccd8b212b37dad15a555589c1b6787da4ab913fe24d8a9b2d99d3498869409 AS build
+FROM rust:1-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
