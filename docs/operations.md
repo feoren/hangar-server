@@ -94,7 +94,10 @@ bypass every per-address limit. Admin commands: `docker exec hangar-server hanga
   the server stopped; back up `ticket-signing.key` as well. Reservations, the log position,
   undelivered `notify` messages and blocked devices are stored in the database and survive
   restarts; claims do not (clients resend them after `welcome`).
-- **Migrations** run automatically on startup (`sqlx migrate`, embedded).
+- **Migrations** run automatically on startup (`sqlx migrate`, embedded). A database migrated by
+  an image built from a Windows checkout (CRLF) is accepted: a stored checksum that differs from
+  the embedded migration only in line endings is corrected at startup (log: `checksum of an
+  applied migration differed only in line endings; corrected`).
 - **Shutdown:** SIGTERM closes live connections with 1012 and waits up to 10 s until they have
   ended and left their teams (Compose `stop_grace_period` and systemd `TimeoutStopSec` give
   20 s); the app reconnects.
