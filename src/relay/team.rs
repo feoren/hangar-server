@@ -1677,8 +1677,10 @@ impl Team {
         }
         let applied = reply.is_ok();
         self.reply(conn, op, reply);
-        self.emit(db, hints, None).await?;
+        // Right after the answer, before anything awaits: once the sender has its `ack`, the
+        // hint is queued for every other connection too.
         self.send_blob_hints(blob_hints);
+        self.emit(db, hints, None).await?;
         if changes_log && applied {
             self.refresh_counting(db, now).await?;
         }
