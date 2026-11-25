@@ -117,6 +117,9 @@ pub struct Config {
     /// possession of its signing key at `hello`. Off by default while released apps of version
     /// 1 and 2 are still in use (`docs/operations.md`).
     pub require_device_proof: bool,
+    /// Whether `build` starts the relay's timer and housekeeping. Always on in operation (not
+    /// read from the environment); off only in a test that drives `Relay::tick` itself.
+    pub relay_timers: bool,
     pub max_connections: usize,
     pub max_connections_per_member: usize,
     pub max_connections_per_ip: usize,
@@ -421,6 +424,7 @@ impl Config {
             allowed_origins,
             trust_proxy: flag("TRUST_PROXY", false)?,
             require_device_proof: flag("REQUIRE_DEVICE_PROOF", false)?,
+            relay_timers: true,
             max_connections: number("MAX_CONNECTIONS", 200)?,
             max_connections_per_member: number("MAX_CONNECTIONS_PER_MEMBER", 8)?,
             max_connections_per_ip: number("MAX_CONNECTIONS_PER_IP", 20)?,
@@ -476,6 +480,7 @@ impl Config {
             allowed_origins: Vec::new(),
             trust_proxy: false,
             require_device_proof: false,
+            relay_timers: true,
             max_connections: 100,
             max_connections_per_member: 8,
             max_connections_per_ip: 200,

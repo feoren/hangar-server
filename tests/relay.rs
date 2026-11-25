@@ -1177,7 +1177,11 @@ async fn team_deleted_while_loading_leaves_no_rows() {
 
 #[tokio::test]
 async fn timer_waits_for_a_team_skipped_three_times() {
-    let s = start_official().await;
+    // Without the relay's own 10 s timer: a tick of it between the ones below would count as a
+    // skip too, and the second tick here would wait for a lock released only after it.
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.relay_timers = false;
+    let s = start(config).await;
     let (_a, _) = Client::join(s.addr, "a", "alice", Role::Owner).await;
     let relay = s.server.state.relay.clone();
     let team = relay.team("a").await.unwrap();
@@ -1190,9 +1194,15 @@ async fn timer_waits_for_a_team_skipped_three_times() {
     });
     is_held.await.unwrap();
     let quick = std::time::Duration::from_millis(500);
+    // A tick that waits for a lock nobody releases fails here instead of hanging the run.
+    let tick = || async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), relay.tick())
+            .await
+            .expect("tick did not finish")
+    };
     for round in 1..=2 {
         let started = std::time::Instant::now();
-        relay.tick().await;
+        tick().await;
         assert!(started.elapsed() < quick, "tick {round} waited");
     }
     // Third tick: the team was skipped twice, so this tick waits for its lock.
@@ -1201,7 +1211,7 @@ async fn timer_waits_for_a_team_skipped_three_times() {
         let _ = release.send(());
     });
     let started = std::time::Instant::now();
-    relay.tick().await;
+    tick().await;
     let waited = started.elapsed();
     assert!(
         waited >= std::time::Duration::from_millis(250),
@@ -1210,7 +1220,7 @@ async fn timer_waits_for_a_team_skipped_three_times() {
     holder.await.unwrap();
     // Caught up: the next tick does not wait.
     let started = std::time::Instant::now();
-    relay.tick().await;
+    tick().await;
     assert!(started.elapsed() < quick);
 }
 

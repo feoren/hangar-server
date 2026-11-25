@@ -68,7 +68,9 @@ pub async fn build(config: Config) -> Result<Server, StartError> {
     if let Some(identity) = &identity {
         identity.attach_relay(relay.clone());
     }
-    relay.spawn_timers(shutdown_rx.clone());
+    if config.relay_timers {
+        relay.spawn_timers(shutdown_rx.clone());
+    }
     if config.identity == IdentityMode::Official {
         match &config.revocation {
             Some(source) => {
