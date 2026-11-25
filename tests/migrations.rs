@@ -79,7 +79,7 @@ async fn a_really_changed_migration_still_refuses_to_start() {
 }
 
 #[tokio::test]
-async fn the_device_proof_table_applies_on_a_database_of_the_previous_release() {
+async fn the_new_migrations_apply_on_a_database_of_release_0_6_3() {
     let (url, dir) = database();
     let db = hangar_server::db::connect(&url).await.unwrap();
     // The state of release 0.6.3: everything up to migration 15, with a team and a blob.
@@ -87,7 +87,11 @@ async fn the_device_proof_table_applies_on_a_database_of_the_previous_release() 
         .execute(&db)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 16")
+    sqlx::query("DROP INDEX relay_blobs_team_kind_row")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version IN (16, 17)")
         .execute(&db)
         .await
         .unwrap();
@@ -105,11 +109,19 @@ async fn the_device_proof_table_applies_on_a_database_of_the_previous_release() 
 
     let db = hangar_server::db::connect(&url).await.unwrap();
     let applied: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 16")
+        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version IN (16, 17)")
             .fetch_one(&db)
             .await
             .unwrap();
-    assert_eq!(applied, 1);
+    assert_eq!(applied, 2);
+    // The index of `blob.list` (17) is in place.
+    let index: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'relay_blobs_team_kind_row'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(index, 1);
     let kept: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM relay_teams), (SELECT COUNT(*) FROM relay_blobs)",
     )

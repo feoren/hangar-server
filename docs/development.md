@@ -9,8 +9,8 @@ see [operations.md](operations.md), for the routes [http-api.md](http-api.md).
 Cargo.toml, Cargo.lock      one crate, pinned versions
 migrations/                 0001_relay.sql (relay), 0002_identity.sql (self-hosting),
                             0003_magic_link_browser.sql (magic link bound to the browser)
-                            through 0016_relay_device_proofs.sql (holders that proved
-                            possession on protocol version 3, for the downgrade protection)
+                            through 0017_blobs_team_kind_index.sql (pages of `blob.list`
+                            on protocol version 4)
 src/
   main.rs                   commands: serve, healthcheck, login-link, create-team, invite, teams, license
   lib.rs                    wiring (also for the tests)
@@ -24,8 +24,8 @@ src/
                             account (/account/devices), pages (browser pages)
   mail/                     sending (SMTP/log/none), templates, texts in 12 languages
   http/                     router, security headers, rate limiting
-tests/                      relay.rs, notes_keys.rs, possession.rs, identity.rs, account_api.rs,
-                            vectors.rs (integration tests)
+tests/                      relay.rs, notes_keys.rs, possession.rs, decisions.rs, identity.rs,
+                            account_api.rs, vectors.rs (integration tests)
 testdata/                   test vectors for tickets and licenses
 tools/php/verify_vectors.php  cross-check of the vectors with PHP/libsodium
 docs/                       formats, protocol, wishes for the protocol crate, security, dependencies
@@ -38,7 +38,7 @@ tools/check-versions.sh     default versions in install.sh, docker-compose.yml, 
 
 Two crates belong to the app (MIT) and are kept as **fixed, unmodified copies** under `vendor/`,
 included as path dependencies (origin and commit per crate in `ORIGIN.md`; currently the
-state with protocol version 3, proof of possession and `blob.delete`). This way the image builds without access to the app repository or GitHub.
+state with protocol version 4, blob listing and decisions). This way the image builds without access to the app repository or GitHub.
 
 | Crate | Contents | In the relay |
 | --- | --- | --- |

@@ -1,4 +1,4 @@
-# Live protocol (versions 1 to 3)
+# Live protocol (versions 1 to 4)
 
 The protocol belongs to the app: the crates `hangar-team-protocol` (step C) and `hangar-team-crypto`
 (step E), kept here as unmodified copies under `vendor/` (origin in each `ORIGIN.md`). Messages,
@@ -78,10 +78,10 @@ Ticket verification: [ticket-format.md](ticket-format.md). The member comes from
 devices). One connection can sign in to several teams, but belongs to exactly one member.
 
 - **Protocol version.** `hello.proto` offers a range; the relay speaks `ProtoRange::CURRENT`
-  (`{1, 3}`), with `REQUIRE_DEVICE_PROOF=true` only `{3, 3}`, and answers with the highest
+  (`{1, 4}`), with `REQUIRE_DEVICE_PROOF=true` only `{3, 4}`, and answers with the highest
   version both speak in `welcome.proto` (an app of version 1 offers `{1, 1}` and gets 1). A
   range that ends below the relay's oldest version gets `err outdatedClient`, one that starts
-  above 3 `err badRequest`. The version holds per connection and team. From version 3 on the
+  above 4 `err badRequest`. The version holds per connection and team. From version 3 on the
   `welcome` carries a `challenge` (see "Proof of possession"); below it the field is left out,
   so a version 2 connection gets the welcome of before, byte for byte.
 - **Downgrade protection.** A holder (member and device) that once proved itself on version 3
@@ -140,14 +140,17 @@ new ticket.
 - After restoring a backup, the stored stream continues. Clients that had
   seen events after that point are ahead of the head (`ahead`) and fetch a snapshot.
 - Logged: whatever `ServerMessage::loggable` lists. Not logged: `presence.update`,
-  `claim.overlap`, `key.wrapped`, `notify`, `notes.keys.updated`, responses. Logged events go to
+  `claim.overlap`, `key.wrapped`, `notify`, `notes.keys.updated`, `blob.stored`, `blob.deleted`,
+  responses. Logged events go to
   every connection of the team, also to one that does not count as a device of the log (see
   "Proof of possession"): leaving events out for one connection would leave gaps in its cursor.
 - Events go to all of the team's connections, including the one that triggered them; after that the response goes to
   the triggering connection. Targeted messages (`ServerMessage::recipient`: `claim.overlap`,
   `key.wrapped`, `notify`) go only to their recipient's connections that count as a device of
-  the log at sending time. The one exception is `notes.keys.updated`, which announces the answer's own write
-  and follows the `ack` of `notes.keys.set`.
+  the log at sending time. The exceptions announce the answer's own write and follow its
+  `ack`: `notes.keys.updated` after `notes.keys.set`, and `blob.stored` and `blob.deleted` after
+  `blob.put` and `blob.delete` of a decision, which go only to connections that count (see
+  "Decisions").
 - **Version filter.** A client kind newer than the connection's negotiated version
   (`ClientMessage::since`) gets `err badRequest`, as a relay of that version would answer; it is
   neither applied nor remembered for retries. A server kind newer than it
@@ -155,7 +158,8 @@ new ticket.
   version through the relay's single send path, which drops it for an older connection. Today
   only the notes key ring kinds are of version 2 and none of them is logged, so replay and
   snapshot are the same for every version. Version 3 adds two client kinds (`device.prove`,
-  `blob.delete`) and the `welcome`'s `challenge`, no server kind.
+  `blob.delete`) and the `welcome`'s `challenge`, no server kind. Version 4 adds `blob.list` and
+  the server kinds `blobs`, `blob.stored` and `blob.deleted`, none of them logged.
 
 ## Reservations
 
@@ -339,7 +343,7 @@ holds the signing key the membership log lists for the device it named (ADR 0020
   with 4401; their next `hello` below version 3 gets `outdatedClient`. A proof with a key the log
   does not list writes none. The row goes when the device leaves the log (`device.remove`, a
   removed member) and with the team.
-- **`REQUIRE_DEVICE_PROOF=true`** offers only `{3, 3}`: every `hello` below version 3 gets
+- **`REQUIRE_DEVICE_PROOF=true`** offers only `{3, 4}`: every `hello` below version 3 gets
   `outdatedClient`, and switching it on (`Relay::set_require_device_proof`, at startup there is
   nothing to close) closes every open connection of versions 1 and 2 with 4401.
 
@@ -353,7 +357,43 @@ holds the signing key the membership log lists for the device it named (ADR 0020
    stored it) deletes from any of its listed devices; anyone else needs owner or admin by the
    lower of log role and ticket role (without a log, the ticket role). Otherwise `forbidden`.
 4. In one write transaction the row goes and its size leaves `relay_teams.blob_bytes`; a
-   concurrent delete that won answers `notFound`. Nothing of the blob stays, no event.
+   concurrent delete that won answers `notFound`. Nothing of the blob stays, and no event is
+   logged; for a decision the hint `blob.deleted` follows on version 4 (see "Decisions").
+
+## Decisions (version 4)
+
+The team's decisions are blobs of the kind `decision`, sealed in the app with the newest key of
+the notes key ring (ADR 0021 and `relay-v4-server-spec.md` in the app repository). The relay
+keeps metadata only and never opens one.
+
+- **`blob.list {kind, after}`**, a read: answered every time, not deduplicated, no epoch. The
+  rule of "Proof of possession" first (a connection that does not count gets `forbidden`); only
+  `kind = decision` is listed, `task` and `transcript` get `badRequest`. `after` null lists from
+  the first blob, otherwise from the blob after it; a blob the team does not have of that kind
+  (deleted meanwhile, another team's, another kind) is `notFound`, and the app lists from the
+  first. The answer `blobs {kind, blobs: [{blob, by: {member, device}, createdAt}], more}` has
+  at most 100 entries (`MAX_BLOB_LIST`) in storage order (rowid, newest last), never content
+  (`data`); `more` says that a next page exists, asked for with the page's last blob as
+  `after`. The page reads the index `relay_blobs_team_kind_row` (migration 0017).
+- **Pace.** A connection starts at most one listing per team every 5 s (`BLOB_LIST_EVERY_MS`);
+  sooner: `err rateLimited` with `retryAfterMs` (the rest of the 5 s), not a broken frame. A
+  `blob.list` of the same kind whose `after` is the last blob of the page this connection got
+  last, when that page said `more`, continues the listing and starts none. The last start and
+  that marker live in the connection's memory.
+- **`blob.put` of a decision** only on version 4 (below: `badRequest`). Content longer than
+  `MAX_DECISION_CIPHERTEXT_LEN` (24 KiB) is `limit` before anything is stored. In the same write
+  transaction as the byte quotas the relay counts the team's decisions and the member's: at 200
+  (`MAX_DECISIONS`) or 50 of the member (`MAX_DECISIONS_PER_MEMBER`) it answers `limit`, as for
+  the byte quotas. Withdrawals the app stores are decisions too and count. Because one
+  connection's frames are handled in order, a `blob.delete` sent before a `blob.put` frees its
+  place for it. The epoch check stays. Task and transcript blobs are not counted.
+- **Hints.** After every stored decision `blob.stored {kind, blob, by}`, after every
+  `blob.delete` of a decision that removed a row `blob.deleted {kind, blob}` (not after
+  `notFound`). They go to every connection of the team of version 4 that counts as a device of
+  the log at sending time, the sender's own included, and to no other: they name blob ids and
+  writers. Not logged, no `seq`, no replay, not kept for anyone offline; a device lists from the
+  first after its next `welcome`.
+- Logs: kind, page size and outcome, never a blob id or content.
 
 ## Revocation list (official mode)
 

@@ -145,7 +145,7 @@ async fn team(addr: SocketAddr) -> Team {
 async fn hello_negotiates_the_highest_common_version() {
     let s = start_official().await;
     let (_a, welcome) = Client::join(s.addr, "t", "alice", Role::Owner).await;
-    assert_eq!(welcome.proto, 3);
+    assert_eq!(welcome.proto, PROTOCOL_VERSION);
     let mut two = Client::connect(s.addr).await;
     let frame = two
         .hello_with(
@@ -297,7 +297,7 @@ async fn retry_gets_the_first_answer() {
 async fn a_team_without_a_log_has_no_one_to_write_the_ring() {
     let s = start_official().await;
     let (mut a, welcome) = Client::join(s.addr, "solo", "alice", Role::Owner).await;
-    assert_eq!(welcome.proto, 3);
+    assert_eq!(welcome.proto, PROTOCOL_VERSION);
     let r = a.request("solo", set(0, sealed(0, "cmluZw"))).await;
     assert_eq!(code(&r), Some(ErrorCode::Forbidden));
     assert_eq!(get(&mut a, "solo").await, None);

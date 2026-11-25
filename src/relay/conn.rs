@@ -463,6 +463,7 @@ async fn run(
                     kick: kick.clone(),
                     removed: removed.clone(),
                     possession: Default::default(),
+                    listing: Default::default(),
                 };
                 let iat_ms = u64::try_from(claims.iat).unwrap_or(0).saturating_mul(1000);
                 let result = {

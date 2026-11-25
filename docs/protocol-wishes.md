@@ -74,8 +74,10 @@ from `ticket.renew` and from the revocation list (`role_changed` with `role`);
 Please align the description of `CLOSE_ROLE_CHANGED` in the crate with this.
 
 Wishes 6 and 7 are implemented in protocol version 3 (app commit 87d47af, ADR 0020) and wired
-up in the relay ([protocol.md](protocol.md), "Proof of possession" and "blob.delete"). The text
-remains as history.
+up in the relay ([protocol.md](protocol.md), "Proof of possession" and "blob.delete"). Listing
+blobs came with protocol version 4 (app commit 38d6c90, ADR 0021): `blob.list` for decisions
+and the hints `blob.stored` and `blob.deleted` ([protocol.md](protocol.md), "Decisions"). The
+text remains as history.
 
 ## 6. Proof of possession at `hello`
 

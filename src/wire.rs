@@ -12,7 +12,9 @@ pub use hangar_team_protocol::ids::{
 };
 pub use hangar_team_protocol::wire::*;
 pub use hangar_team_protocol::{close, limits};
-pub use hangar_team_protocol::{MIN_PROTOCOL_VERSION, PROOF_PROTOCOL_VERSION, PROTOCOL_VERSION};
+pub use hangar_team_protocol::{
+    DECISIONS_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PROOF_PROTOCOL_VERSION, PROTOCOL_VERSION,
+};
 
 /// Maps the role from the ticket to the protocol role.
 pub fn role(role: crate::ticket::Role) -> Role {

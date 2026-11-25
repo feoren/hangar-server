@@ -149,7 +149,14 @@ reversed without the key, but they can be compared within the epoch.
 - Storage has a quota per team (`BLOB_QUOTA_BYTES`) and per member over all teams (twice that),
   and a retention period only for transcripts (`TRANSCRIPT_RETENTION_DAYS`). On protocol version
   3 the author, an owner or an admin deletes a blob with `blob.delete`, which frees the quota;
-  nothing of it stays. The app stores no blob yet, so it deletes none.
+  nothing of it stays.
+- Decisions (protocol version 4) are blobs the app seals with the team's notes key; the relay
+  never opens one. It keeps and shows to the team's counting devices of version 4 what it needs
+  for the listing: how many decisions a team has, their padded sizes, who stored them (member
+  and device) and when. At most 200 per team and 50 per member, each at most 24 KiB, so one
+  member cannot take the whole team's room; owners and admins can delete anyone's. A connection
+  that does not count as a device of the log gets neither the listing nor the hints
+  `blob.stored` and `blob.deleted`, and a connection starts at most one listing per 5 s.
 - Memory over all teams: claims at most 64 MiB in total and four times the per-team limit per
   member. Replay windows: once all of them together hold more than 32 MiB, every team that
   writes keeps only 128 KiB (older cursors get a snapshot), so beyond 32 MiB each loaded team

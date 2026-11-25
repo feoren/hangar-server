@@ -52,7 +52,7 @@ async fn unproven(addr: SocketAddr, team: &str, dev: &Dev, role: Role) -> (Clien
         )
         .await,
     );
-    assert_eq!(welcome.proto, 3);
+    assert_eq!(welcome.proto, PROTOCOL_VERSION);
     let keys = c
         .request(team, ClientMessage::DeviceKeys(dev.keys(team)))
         .await;
@@ -195,7 +195,7 @@ async fn welcome_carries_a_challenge_exactly_from_version_three() {
             c.hello(team, ticket(member, team, Role::Member), "pc", None)
                 .await,
         );
-        assert_eq!(w.proto, 3);
+        assert_eq!(w.proto, PROTOCOL_VERSION);
         let challenge = w.challenge.expect("challenge on version 3");
         assert_eq!(challenge.to_base64url().len(), 43);
         challenges.push(challenge);
@@ -472,7 +472,7 @@ async fn required_proof_refuses_and_closes_older_versions() {
         c.hello("t", ticket("alice", "t", Role::Owner), "pc", None)
             .await,
     );
-    assert_eq!(w.proto, 3);
+    assert_eq!(w.proto, PROTOCOL_VERSION);
 
     // Switched on at runtime: open version 2 connections close with 4401.
     let s = start_official().await;

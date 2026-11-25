@@ -525,7 +525,7 @@ async fn hello_from_removed_device_only_gets_log_up_to_removal() {
     let ServerMessage::Welcome(welcome) = first.message else {
         panic!("{:?}", first.message);
     };
-    assert_eq!(welcome.proto, 3);
+    assert_eq!(welcome.proto, PROTOCOL_VERSION);
     assert!(welcome.challenge.is_some());
     // device.keys and device.prove: ack without effect (no key registered, no proof row).
     for message in [

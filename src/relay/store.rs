@@ -631,6 +631,16 @@ pub const BLOB_TEAMS_PER_MEMBER: u64 = 2;
 pub enum BlobPut {
     Stored(String),
     Quota,
+    /// A decision beyond `MAX_DECISIONS` of the team or `MAX_DECISIONS_PER_MEMBER` of its member
+    /// (protocol version 4); answered `limit` like the quota.
+    Full,
+}
+
+/// The decision counts `put_blob` checks in its write transaction (protocol version 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionCaps {
+    pub per_team: usize,
+    pub per_member: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -642,10 +652,32 @@ pub async fn put_blob(
     data: &Ciphertext,
     holder: &Holder,
     quota: u64,
+    decisions: Option<DecisionCaps>,
     now: u64,
 ) -> Result<BlobPut> {
     let size = i64_of(data.as_str().len() as u64);
     let mut tx = begin_write(db).await?;
+    // Counted in the same transaction as the insert: two puts at once cannot both take the
+    // last place, and a delete the same connection sent before is already applied.
+    if let Some(caps) = decisions {
+        let of_team: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM relay_blobs WHERE team_id = ? AND kind = ?")
+                .bind(team)
+                .bind(kind)
+                .fetch_one(&mut *tx)
+                .await?;
+        let of_member: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM relay_blobs WHERE team_id = ? AND kind = ? AND member = ?",
+        )
+        .bind(team)
+        .bind(kind)
+        .bind(holder.member.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if u64_of(of_team) >= caps.per_team as u64 || u64_of(of_member) >= caps.per_member as u64 {
+            return Ok(BlobPut::Full);
+        }
+    }
     let used: i64 = sqlx::query_scalar("SELECT blob_bytes FROM relay_teams WHERE id = ?")
         .bind(team)
         .fetch_one(&mut *tx)
@@ -688,13 +720,76 @@ pub async fn put_blob(
     Ok(BlobPut::Stored(id))
 }
 
-/// The member that stored a blob of the team, `None` if the team has no blob with this ID.
-pub async fn blob_author(db: &Db, team: &str, id: &str) -> Result<Option<String>> {
-    sqlx::query_scalar("SELECT member FROM relay_blobs WHERE team_id = ? AND id = ?")
+/// The member that stored a blob of the team and the blob's kind, `None` if the team has no
+/// blob with this ID.
+pub async fn blob_author(db: &Db, team: &str, id: &str) -> Result<Option<(String, String)>> {
+    sqlx::query_as("SELECT member, kind FROM relay_blobs WHERE team_id = ? AND id = ?")
         .bind(team)
         .bind(id)
         .fetch_optional(db)
         .await
+}
+
+/// One stored blob in a listing: metadata only, never `data`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedBlob {
+    pub id: String,
+    pub member: String,
+    pub device: String,
+    pub created_at: u64,
+}
+
+/// The page query of `blob.list`; `tests` checks its plan.
+macro_rules! blob_page_select {
+    () => {
+        "SELECT id, member, device, created_at FROM relay_blobs          WHERE team_id = ? AND kind = ? AND rowid > ? ORDER BY rowid LIMIT ?"
+    };
+}
+
+/// `blob.list`: up to `limit` blobs of `kind` in storage order (rowid), after the blob `after`
+/// (`None`: from the first). `None` as result: the team has no blob `after` of this kind (any
+/// more).
+pub async fn list_blobs(
+    db: &Db,
+    team: &str,
+    kind: &str,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Option<Vec<ListedBlob>>> {
+    let from: i64 = match after {
+        None => 0,
+        Some(id) => {
+            let row: Option<i64> = sqlx::query_scalar(
+                "SELECT rowid FROM relay_blobs WHERE team_id = ? AND kind = ? AND id = ?",
+            )
+            .bind(team)
+            .bind(kind)
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+            match row {
+                Some(row) => row,
+                None => return Ok(None),
+            }
+        }
+    };
+    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(blob_page_select!())
+        .bind(team)
+        .bind(kind)
+        .bind(from)
+        .bind(i64_of(limit as u64))
+        .fetch_all(db)
+        .await?;
+    Ok(Some(
+        rows.into_iter()
+            .map(|(id, member, device, created_at)| ListedBlob {
+                id,
+                member,
+                device,
+                created_at: u64_of(created_at),
+            })
+            .collect(),
+    ))
 }
 
 /// `blob.delete`: removes the blob and frees its size in the team's quota in one transaction.
@@ -1193,6 +1288,33 @@ mod tests {
         assert!(
             plan.iter()
                 .any(|step| step.contains("USING INDEX relay_blobs_kind_created")),
+            "{plan:?}"
+        );
+    }
+
+    /// The page of `blob.list` walks the index on (team, kind) in rowid order: no table scan,
+    /// no sorting.
+    #[tokio::test]
+    async fn blob_page_uses_an_index_in_rowid_order() {
+        let db = test_db().await;
+        let plan: Vec<String> = sqlx::query(concat!("EXPLAIN QUERY PLAN ", blob_page_select!()))
+            .bind("t")
+            .bind("decision")
+            .bind(0i64)
+            .bind(101i64)
+            .fetch_all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("USING INDEX relay_blobs_team_kind_row")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter().all(|step| !step.contains("TEMP B-TREE")),
             "{plan:?}"
         );
     }

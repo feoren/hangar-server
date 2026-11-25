@@ -1,9 +1,9 @@
 # Origin of this copy
 
 Unmodified copy of `crates/hangar-team-crypto` from the app repository `feoren/hangar`, taken over
-on 2026-11-25 (protocol version 3, proof of possession and blob.delete).
+on 2026-11-25 (protocol version 4, blob listing and decisions).
 
-Commit: `87d47afbfe786084c2a0bdb9d296792fe763d2b5` (checked with `diff -r` against
+Commit: `38d6c907716d76e99c5de25f5179bee3d90f8c72` (checked with `diff -r` against
 `git archive` of that commit).
 
 License: see `LICENSE` (MIT). Only the copy's `Cargo.lock` and `target/` were left out (the

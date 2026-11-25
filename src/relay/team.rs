@@ -27,19 +27,22 @@ use hangar_team_protocol::reservation::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use super::store::{self, BlobPut, EpochChange, MemberSeen};
+use super::store::{self, BlobPut, DecisionCaps, EpochChange, MemberSeen};
 use crate::db::Db;
 use crate::ticket::Role;
 use crate::wire::{
-    self, ack, check_rotate, error, limits::MAX_DEVICES_PER_MEMBER, limits::MAX_LOG_ENTRIES,
-    limits::MAX_WRAPPED_KEYS, Ack, BlobKind, Challenge, Ciphertext, ClientMessage, Cursor,
-    DeviceList, DeviceProve, DeviceRemoved, Epoch, ErrorBody, ErrorCode, Holder, KeyRotated,
-    KeyWrapped, KeyedHash, MemberId, MemberJoined, MemberLogAppended, MemberLogEntries,
-    MemberRemoved, MemberRoleChanged, NotesKeys, NotesKeysUpdated, Notify as NotifyMessage, OpId,
-    PathHashes, PresenceState, PresenceUpdate, PublicKey, ReservationExpired, ReservationExpiring,
-    ResyncRequired, Sealed, Seq, ServerFrame, ServerMessage, SessionKey, SessionRef, StreamId,
-    TaskReleaseAnswered, TaskReleaseRequestEnded, TaskReleaseRequested, TaskReleased, TaskReserved,
-    TeamId, UnixMillis, Welcome, PROOF_PROTOCOL_VERSION,
+    self, ack, check_rotate, error, limits::BLOB_LIST_EVERY_MS, limits::MAX_BLOB_LIST,
+    limits::MAX_DECISIONS, limits::MAX_DECISIONS_PER_MEMBER, limits::MAX_DECISION_CIPHERTEXT_LEN,
+    limits::MAX_DEVICES_PER_MEMBER, limits::MAX_LOG_ENTRIES, limits::MAX_WRAPPED_KEYS, Ack,
+    BlobDeleted, BlobEntry, BlobId, BlobKind, BlobListing, BlobStored, Challenge, Ciphertext,
+    ClientMessage, Cursor, DeviceId, DeviceList, DeviceProve, DeviceRemoved, Epoch, ErrorBody,
+    ErrorCode, Holder, KeyRotated, KeyWrapped, KeyedHash, MemberId, MemberJoined,
+    MemberLogAppended, MemberLogEntries, MemberRemoved, MemberRoleChanged, NotesKeys,
+    NotesKeysUpdated, Notify as NotifyMessage, OpId, PathHashes, PresenceState, PresenceUpdate,
+    PublicKey, ReservationExpired, ReservationExpiring, ResyncRequired, Sealed, Seq, ServerFrame,
+    ServerMessage, SessionKey, SessionRef, StreamId, TaskReleaseAnswered, TaskReleaseRequestEnded,
+    TaskReleaseRequested, TaskReleased, TaskReserved, TeamId, UnixMillis, Welcome,
+    DECISIONS_PROTOCOL_VERSION, PROOF_PROTOCOL_VERSION,
 };
 
 /// Events kept in memory for replay; older ones require a snapshot.
@@ -163,6 +166,18 @@ pub struct Subscriber {
     pub removed: tokio::sync::mpsc::UnboundedSender<String>,
     /// What the connection has shown of its device's key in this team (protocol version 3).
     pub possession: ConnectionProof,
+    /// Its `blob.list` pace in this team (protocol version 4).
+    pub listing: ListingPace,
+}
+
+/// Where a connection's `blob.list` stands in one team (protocol version 4): when its last
+/// listing started, and where that listing goes on. In memory only.
+#[derive(Debug, Clone, Default)]
+pub struct ListingPace {
+    started_at: Option<u64>,
+    /// Kind and last blob of the page sent last, when that page said `more`: a `blob.list` with
+    /// this kind and this `after` continues the listing and starts none.
+    next: Option<(BlobKind, BlobId)>,
 }
 
 /// The proof of possession of one connection in one team (protocol version 3,
@@ -1420,6 +1435,129 @@ impl Team {
         Ok(())
     }
 
+    /// `blob.stored` and `blob.deleted` (protocol version 4): live hints, never logged, no `seq`,
+    /// not kept for anyone offline, sent only to the connections that count as devices of the
+    /// log (the sender's own included); `send` leaves out those below version 4. They name blob
+    /// ids and writers, which only a device that may list should learn.
+    fn send_blob_hints(&mut self, hints: Vec<ServerMessage>) {
+        if hints.is_empty() {
+            return;
+        }
+        let conns = self.counting(|_| true);
+        for hint in hints {
+            let framed = self.frame(None, None, hint);
+            for conn in &conns {
+                self.send(*conn, framed.clone());
+            }
+        }
+    }
+
+    /// `blob.list` (protocol version 4): a page of the team's decisions in storage order,
+    /// metadata only. A connection starts at most one listing per `BLOB_LIST_EVERY_MS`; the
+    /// pages of one listing (the kind again and the last blob of a page with `more` as `after`)
+    /// follow at once.
+    async fn list_blobs(
+        &mut self,
+        db: &Db,
+        conn: u64,
+        op: &OpId,
+        sub: &Subscriber,
+        list: wire::BlobList,
+        now: u64,
+    ) -> Result<
+        (
+            Vec<ServerMessage>,
+            Option<Reply>,
+            Option<HashMap<Holder, Ciphertext>>,
+        ),
+        sqlx::Error,
+    > {
+        // Nothing lists tasks or transcripts, and their ids are not the team's business yet.
+        if list.kind != BlobKind::Decision {
+            return Ok((Vec::new(), Some(Err(error(ErrorCode::BadRequest))), None));
+        }
+        let pace = &sub.listing;
+        let continues = list.after.is_some()
+            && pace.next.as_ref().is_some_and(|(kind, last)| {
+                *kind == list.kind && list.after.as_ref() == Some(last)
+            });
+        if !continues {
+            let wait = pace
+                .started_at
+                .map_or(0, |at| (at + BLOB_LIST_EVERY_MS).saturating_sub(now));
+            if wait > 0 {
+                tracing::debug!(kind = blob_kind(list.kind), "blob listing too soon");
+                let refused = ErrorBody {
+                    code: ErrorCode::RateLimited,
+                    retry_after_ms: Some(wait),
+                    holder: None,
+                };
+                return Ok((Vec::new(), Some(Err(refused)), None));
+            }
+        }
+        let page = store::list_blobs(
+            db,
+            &self.id,
+            blob_kind(list.kind),
+            list.after.as_ref().map(BlobId::as_str),
+            MAX_BLOB_LIST + 1,
+        )
+        .await?;
+        let Some(rows) = page else {
+            if let Some(entry) = self.subscribers.get_mut(&conn) {
+                if !continues {
+                    entry.listing.started_at = Some(now);
+                }
+                entry.listing.next = None;
+            }
+            tracing::debug!(
+                kind = blob_kind(list.kind),
+                "blob listing after an unknown blob"
+            );
+            return Ok((Vec::new(), Some(Err(error(ErrorCode::NotFound))), None));
+        };
+        let more = rows.len() > MAX_BLOB_LIST;
+        let blobs: Vec<BlobEntry> = rows
+            .into_iter()
+            .take(MAX_BLOB_LIST)
+            .filter_map(|row| {
+                Some(BlobEntry {
+                    blob: BlobId::new(row.id).ok()?,
+                    by: Holder {
+                        member: MemberId::new(row.member).ok()?,
+                        device: DeviceId::new(row.device).ok()?,
+                    },
+                    created_at: UnixMillis(row.created_at),
+                })
+            })
+            .collect();
+        if let Some(entry) = self.subscribers.get_mut(&conn) {
+            if !continues {
+                entry.listing.started_at = Some(now);
+            }
+            entry.listing.next = more
+                .then(|| blobs.last().map(|last| (list.kind, last.blob.clone())))
+                .flatten();
+        }
+        tracing::debug!(
+            kind = blob_kind(list.kind),
+            blobs = blobs.len(),
+            more,
+            "blob listing"
+        );
+        let text = self.frame(
+            Some(op),
+            None,
+            ServerMessage::Blobs(BlobListing {
+                kind: list.kind,
+                blobs,
+                more,
+            }),
+        );
+        self.send(conn, text);
+        Ok((Vec::new(), None, None))
+    }
+
     /// An intent of a joined connection.
     pub async fn handle(
         &mut self,
@@ -1518,9 +1656,20 @@ impl Team {
         };
         // Live hints that announce the answer's own write follow the answer (`notes.keys.updated`
         // after the `ack` of `notes.keys.set`); every other event goes out before it.
-        let (hints, events): (Vec<_>, Vec<_>) = events
-            .into_iter()
-            .partition(|m| matches!(m, ServerMessage::NotesKeysUpdated(_)));
+        let (hints, events): (Vec<_>, Vec<_>) = events.into_iter().partition(|m| {
+            matches!(
+                m,
+                ServerMessage::NotesKeysUpdated(_)
+                    | ServerMessage::BlobStored(_)
+                    | ServerMessage::BlobDeleted(_)
+            )
+        });
+        let (blob_hints, hints): (Vec<_>, Vec<_>) = hints.into_iter().partition(|m| {
+            matches!(
+                m,
+                ServerMessage::BlobStored(_) | ServerMessage::BlobDeleted(_)
+            )
+        });
         self.prune_notes();
         self.emit(db, events, wrapped.as_ref()).await?;
         if let Some((key, digest)) = dedup {
@@ -1529,6 +1678,7 @@ impl Team {
         let applied = reply.is_ok();
         self.reply(conn, op, reply);
         self.emit(db, hints, None).await?;
+        self.send_blob_hints(blob_hints);
         if changes_log && applied {
             self.refresh_counting(db, now).await?;
         }
@@ -1777,6 +1927,20 @@ impl Team {
                 (Vec::new(), Some(Ok(ack())), None)
             }
             ClientMessage::BlobPut(m) => {
+                let decision = m.kind == BlobKind::Decision;
+                // Decisions are counted, sized and announced only from version 4 on, so none
+                // can bypass that through an older connection (no released app of an older
+                // version writes them).
+                if decision && sub.proto < DECISIONS_PROTOCOL_VERSION {
+                    return Ok((Vec::new(), Some(Err(error(ErrorCode::BadRequest))), None));
+                }
+                if decision && m.content.data.as_str().len() > MAX_DECISION_CIPHERTEXT_LEN {
+                    return Ok((Vec::new(), Some(Err(error(ErrorCode::Limit))), None));
+                }
+                let caps = decision.then_some(DecisionCaps {
+                    per_team: MAX_DECISIONS,
+                    per_member: MAX_DECISIONS_PER_MEMBER,
+                });
                 match store::put_blob(
                     db,
                     &self.id,
@@ -1785,31 +1949,46 @@ impl Team {
                     &m.content.data,
                     &who,
                     limits.blob_quota_bytes,
+                    caps,
                     now,
                 )
                 .await?
                 {
-                    BlobPut::Stored(id) => match wire::BlobId::new(id) {
-                        Ok(blob) => (
-                            Vec::new(),
-                            Some(Ok(Ack {
-                                blob: Some(blob),
-                                content: None,
-                                keys: None,
-                            })),
-                            None,
-                        ),
+                    BlobPut::Stored(id) => match BlobId::new(id) {
+                        Ok(blob) => {
+                            let hints = if decision {
+                                vec![ServerMessage::BlobStored(BlobStored {
+                                    kind: m.kind,
+                                    blob: blob.clone(),
+                                    by: who.clone(),
+                                })]
+                            } else {
+                                Vec::new()
+                            };
+                            (
+                                hints,
+                                Some(Ok(Ack {
+                                    blob: Some(blob),
+                                    content: None,
+                                    keys: None,
+                                })),
+                                None,
+                            )
+                        }
                         Err(_) => (Vec::new(), Some(Err(error(ErrorCode::BadRequest))), None),
                     },
-                    BlobPut::Quota => (Vec::new(), Some(Err(error(ErrorCode::Limit))), None),
+                    BlobPut::Quota | BlobPut::Full => {
+                        (Vec::new(), Some(Err(error(ErrorCode::Limit))), None)
+                    }
                 }
             }
             ClientMessage::BlobDelete(m) => {
                 // `notFound` before any right is checked, also for another team's ID: nothing
                 // is told about other teams.
+                let mut hints = Vec::new();
                 let reply = match store::blob_author(db, &self.id, m.blob.as_str()).await? {
                     None => Err(error(ErrorCode::NotFound)),
-                    Some(author) => {
+                    Some((author, kind)) => {
                         let allowed = match MemberId::new(author) {
                             Ok(author) => check_blob_delete(
                                 self.verifier.state(),
@@ -1823,6 +2002,12 @@ impl Team {
                         match allowed {
                             Err(code) => Err(error(code)),
                             Ok(()) if store::delete_blob(db, &self.id, m.blob.as_str()).await? => {
+                                if kind == blob_kind(BlobKind::Decision) {
+                                    hints.push(ServerMessage::BlobDeleted(BlobDeleted {
+                                        kind: BlobKind::Decision,
+                                        blob: m.blob.clone(),
+                                    }));
+                                }
                                 Ok(ack())
                             }
                             // A concurrent delete won.
@@ -1830,8 +2015,9 @@ impl Team {
                         }
                     }
                 };
-                (Vec::new(), Some(reply), None)
+                (hints, Some(reply), None)
             }
+            ClientMessage::BlobList(m) => self.list_blobs(db, conn, op, sub, m, now).await?,
             ClientMessage::BlobGet(m) => {
                 match store::get_blob(db, &self.id, m.blob.as_str()).await? {
                     Some((epoch, data)) => (
