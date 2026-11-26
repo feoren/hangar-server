@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.svg" alt="Hangar logo" width="96" height="96">
+  <img src="docs/images/logo.svg" alt="Hangar Server logo" width="96" height="96">
 </p>
 
 <h1 align="center">Hangar Server</h1>
