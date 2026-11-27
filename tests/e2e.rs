@@ -850,12 +850,18 @@ async fn device_keys_are_fixed_once_the_log_lists_the_device() {
         "replacement not stored: {listed}"
     );
 
-    // A device outside the log may still renew its keys.
+    // A device still waiting for admission keeps its first keys as well: another connection
+    // of the same member cannot put its own keys under the waiting device's ID.
     let phone = Dev::new("alice", "alice-phone");
     let mut p = Client::join_device(s.addr, "t", &phone, Role::Owner).await;
-    let renewed = Dev::new("alice", "alice-phone");
+    let other = Dev::new("alice", "alice-phone");
+    let replaced = p
+        .request("t", ClientMessage::DeviceKeys(other.keys("t")))
+        .await;
+    assert_eq!(code(&replaced), Some(ErrorCode::Conflict), "{replaced:?}");
+    // Sending the same keys again, as the app does at every hello, stays fine.
     assert!(is_ack(
-        &p.request("t", ClientMessage::DeviceKeys(renewed.keys("t")))
+        &p.request("t", ClientMessage::DeviceKeys(phone.keys("t")))
             .await
     ));
 }

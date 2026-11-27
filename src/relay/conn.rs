@@ -47,8 +47,12 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if let Some(origin) = headers.get("origin").and_then(|o| o.to_str().ok()) {
-        if !state.config.origin_allowed(origin) {
+    if let Some(origin) = headers.get("origin") {
+        // A value that is not plain text is refused like a foreign origin, not taken as absent.
+        if !origin
+            .to_str()
+            .is_ok_and(|origin| state.config.origin_allowed(origin))
+        {
             return (StatusCode::FORBIDDEN, "origin").into_response();
         }
     }

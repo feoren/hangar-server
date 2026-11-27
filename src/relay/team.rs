@@ -1821,10 +1821,15 @@ impl Team {
                 (events, reply, None)
             }
             ClientMessage::TaskForceRelease(m) => {
-                let (events, refused) = self
-                    .book
-                    .force_release(wire::role(sub.role), m.task, at)
-                    .into_events();
+                // As everywhere else, the lower of log role and ticket role decides: a
+                // promotion on the website alone does not release other people's tasks. A
+                // member the log does not list acts as a plain member.
+                let role = self.verifier.state().map_or(wire::role(sub.role), |state| {
+                    state
+                        .effective_role(&who.member, wire::role(sub.role))
+                        .unwrap_or(wire::Role::Member)
+                });
+                let (events, refused) = self.book.force_release(role, m.task, at).into_events();
                 self.dirty = true;
                 (
                     self.book_messages(events),
@@ -2059,6 +2064,7 @@ impl Team {
                 let reply = match stored {
                     store::KeysStored::Stored => Ok(ack()),
                     store::KeysStored::TooManyDevices => Err(error(ErrorCode::Limit)),
+                    store::KeysStored::Conflict => Err(error(ErrorCode::Conflict)),
                 };
                 (Vec::new(), Some(reply), None)
             }

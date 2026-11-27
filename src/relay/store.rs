@@ -445,10 +445,15 @@ pub enum KeysStored {
     /// More than `limits::MAX_DEVICES_PER_MEMBER` devices of the member or `MAX_WRAPPED_KEYS`
     /// in the team.
     TooManyDevices,
+    /// The device already registered other keys.
+    Conflict,
 }
 
 /// `device.keys` of a device in the team (keys and proof of possession, per team). New devices
-/// only within the limits per member and per team.
+/// only within the limits per member and per team. The first keys of a device stay: an app
+/// creates a device ID and its keys together and never gives an ID new keys, so other keys
+/// under a known ID come from another connection of the member, which must not get them into
+/// the log in place of the waiting device's.
 pub async fn set_device_keys(
     db: &Db,
     team: &str,
@@ -459,14 +464,19 @@ pub async fn set_device_keys(
     now: u64,
 ) -> Result<KeysStored> {
     let mut tx = begin_write(db).await?;
-    let known: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM relay_device_keys WHERE team_id = ? AND member = ? AND device = ?",
+    let known: Option<(String, String)> = sqlx::query_as(
+        "SELECT sign_key, kem_key FROM relay_device_keys WHERE team_id = ? AND member = ? AND device = ?",
     )
     .bind(team)
     .bind(holder.member.as_str())
     .bind(holder.device.as_str())
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some((sign, kem)) = &known {
+        if *sign != keys.sign.to_base64url() || *kem != keys.kem.to_base64url() {
+            return Ok(KeysStored::Conflict);
+        }
+    }
     if known.is_none() {
         let (of_member, of_team): (i64, i64) = sqlx::query_as(
             "SELECT COALESCE(SUM(member = ?), 0), COUNT(*) FROM relay_device_keys WHERE team_id = ?",
@@ -684,6 +694,28 @@ pub async fn put_blob(
         .await?;
     if used.saturating_add(size) > i64_of(quota) {
         return Ok(BlobPut::Quota);
+    }
+    // In a team of several, one member may fill at most half of the team's quota: task blobs
+    // never expire and nobody else can list them, so a single member could otherwise lock
+    // everyone out of storing for good.
+    let others: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM relay_members WHERE team_id = ? AND member <> ? AND removed_at IS NULL",
+    )
+    .bind(team)
+    .bind(holder.member.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    if others > 0 {
+        let in_team: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size), 0) FROM relay_blobs WHERE team_id = ? AND member = ?",
+        )
+        .bind(team)
+        .bind(holder.member.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if in_team.saturating_add(size) > i64_of(quota / 2) {
+            return Ok(BlobPut::Quota);
+        }
     }
     // Over all teams one member may store `BLOB_TEAMS_PER_MEMBER` times the quota of a team:
     // otherwise a single account fills the disk through many teams of its own.

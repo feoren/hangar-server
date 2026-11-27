@@ -165,7 +165,7 @@ new ticket.
 
 Rules: the crate's `ReservationBook` ("first wins" in order of arrival per team, 30 min timeout
 only while offline with a warning 5 min before, release requests with a 10 min timeout and cooldown, `withdraw`,
-`force_release` for owner/admin, rekey with `prev` and a grace period after a rotation). Time-driven
+`force_release` for owner/admin by the lower of log role and ticket role, rekey with `prev` and a grace period after a rotation). Time-driven
 events (`Applied::timing`) are sent even when the intent is rejected. Presence is counted per
 connection that counts as a device of the log (see "Proof of possession"): an unproven twin
 neither stops a holder's deadlines by joining nor reports it offline by leaving.
@@ -258,7 +258,9 @@ downgrade on the website takes effect immediately, even if the log does not know
 
 - `device.keys` `{sign, kem, proof}`: keys and proof of possession per team and holder
   (`relay_device_keys`). At most `limits::MAX_DEVICES_PER_MEMBER` (16) devices per member and
-  `MAX_WRAPPED_KEYS` (512) per team, otherwise `limit`. `devices.get` lists them including the proof.
+  `MAX_WRAPPED_KEYS` (512) per team, otherwise `limit`. The first keys of a device ID stay:
+  the same keys again are `ack`, other keys under a known ID are `conflict`, whether the log
+  lists the device yet or not. `devices.get` lists them including the proof.
 - `memberlog.append`: first `relay::check_registered_keys` (every device the entry
   adds carries exactly the keys this holder sent over its own connection;
   otherwise `forbidden`), then `LogVerifier::admit(append, sender, ticket_role)` (signature of the

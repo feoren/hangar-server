@@ -1499,7 +1499,37 @@ async fn blob_bytes_are_limited_per_member_over_all_teams() {
     assert_eq!(code(&refused), Some(ErrorCode::Limit), "{refused:?}");
     // Another member can still store in that team.
     let (mut other, _) = Client::join(s.addr, "b3", "other", Role::Member).await;
-    assert!(is_stored(&other.request("b3", put(1000)).await));
+    assert!(is_stored(&other.request("b3", put(500)).await));
+}
+
+/// Security: in a team of several, one member fills at most half of the team's quota, so the
+/// others can still store. Alone in a team, the whole quota is theirs.
+#[tokio::test]
+async fn one_member_fills_at_most_half_of_a_shared_team() {
+    let mut config = Config::for_tests(IdentityMode::Official, website_keys());
+    config.blob_quota_bytes = 1000;
+    let s = start(config).await;
+    let put = |len: usize| {
+        ClientMessage::BlobPut(BlobPut {
+            kind: BlobKind::Task,
+            content: Sealed {
+                epoch: Epoch(0),
+                data: Ciphertext::new("D".repeat(len)).unwrap(),
+            },
+        })
+    };
+    let is_stored =
+        |f: &ServerFrame| matches!(f.message, ServerMessage::Ack(Ack { blob: Some(_), .. }));
+    let (mut solo, _) = Client::join(s.addr, "solo", "alice", Role::Owner).await;
+    assert!(is_stored(&solo.request("solo", put(1000)).await));
+
+    let (mut a, _) = Client::join(s.addr, "shared", "alice2", Role::Owner).await;
+    let (mut b, _) = Client::join(s.addr, "shared", "bob", Role::Member).await;
+    assert!(is_stored(&b.request("shared", put(500)).await));
+    let refused = b.request("shared", put(1)).await;
+    assert_eq!(code(&refused), Some(ErrorCode::Limit), "{refused:?}");
+    // The other half is still there for the rest of the team.
+    assert!(is_stored(&a.request("shared", put(500)).await));
 }
 
 async fn ping(c: &mut Client, id: String) {

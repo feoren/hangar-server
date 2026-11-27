@@ -707,6 +707,23 @@ async fn blobs_are_deleted_by_their_author_an_owner_or_an_admin() {
         "nothing deleted by the refused ones"
     );
 
+    // The same rule for ending someone else's reservation: the ticket alone does not make an
+    // admin, the log's admin with an admin ticket is one.
+    assert!(is_ack(&a.request("t", reserve(9)).await));
+    let force = || {
+        ClientMessage::TaskForceRelease(TaskRef {
+            task: KeyedHash::from_bytes([9; 32]),
+        })
+    };
+    for (who, client) in [
+        ("demoted admin", &mut demoted),
+        ("member with an admin ticket", &mut promoted),
+    ] {
+        let r = client.request("t", force()).await;
+        assert_eq!(code(&r), Some(ErrorCode::Forbidden), "{who}: {r:?}");
+    }
+    assert!(is_ack(&c.request("t", force()).await));
+
     // A retry with the same op ID gets the first ack.
     let op = b.op();
     b.send(&op, Some("t"), blob_delete(&bobs)).await;
