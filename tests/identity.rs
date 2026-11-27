@@ -1701,6 +1701,35 @@ async fn invitations_of_a_removed_admin_are_withdrawn() {
     assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
 }
 
+/// The start page in self-hosting: the server runs, the address for the app in the browser's
+/// language, the version; nothing in it comes from the request.
+#[tokio::test]
+async fn start_page_names_the_address_for_the_app() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let r = call(
+        app,
+        "GET",
+        "/",
+        &[("accept-language", "de-DE,de;q=0.9")],
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("<html lang=\"de\""), "{}", r.body);
+    assert!(r.body.contains("Hangar Server läuft"), "{}", r.body);
+    assert!(r.body.contains(&format!("{ORIGIN}/api/v1")), "{}", r.body);
+    assert!(r.body.contains(env!("CARGO_PKG_VERSION")), "{}", r.body);
+    assert!(r.body.contains("<svg class=\"mark\""), "the logo is inline");
+    let ar = call(app, "GET", "/", &[("accept-language", "ar")], None).await;
+    assert!(ar.body.contains("dir=\"rtl\""), "{}", ar.body);
+    // Every language fills its version placeholder.
+    for lang in hangar_server::mail::i18n::LANGS {
+        let r = call(app, "GET", "/", &[("accept-language", lang)], None).await;
+        assert!(!r.body.contains('{'), "{lang}: {}", r.body);
+    }
+}
+
 /// Security: an admin neither renews nor revokes the owner's open invitation of another admin.
 #[tokio::test]
 async fn an_admin_cannot_change_an_invitation_of_their_own_rank() {

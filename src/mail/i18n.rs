@@ -63,6 +63,15 @@ pub struct Strings {
     pub page_devices_revoked: &'static str,
     /// `{created}` and `{used}`: timestamps as `YYYY-MM-DD hh:mm UTC`.
     pub page_devices_meta: &'static str,
+    // Start page `/`
+    pub page_home_title: &'static str,
+    pub page_home_intro: &'static str,
+    /// Heading above the address the app needs (self-hosting only).
+    pub page_home_address: &'static str,
+    /// Where the address goes in the app; the app's own words for its settings.
+    pub page_home_steps: &'static str,
+    /// `{version}`: the server's version.
+    pub page_home_version: &'static str,
 }
 
 pub fn strings(lang: &str) -> &'static Strings {
@@ -166,6 +175,11 @@ pub static DE: Strings = Strings {
     page_devices_revoke: "Trennen",
     page_devices_revoked: "Das Gerät wurde getrennt. Hangar muss sich dort neu anmelden.",
     page_devices_meta: "Verbunden {created}, zuletzt benutzt {used}",
+    page_home_title: "Hangar Server läuft",
+    page_home_intro: "Dieser Server verbindet die Hangar-Apps deines Teams. Im Browser gibt es hier sonst nichts zu tun.",
+    page_home_address: "Serveradresse für Hangar",
+    page_home_steps: "Trage sie in Hangar unter Einstellungen › Konto bei „Serveradresse (eigener Server)“ ein und klicke auf „Verbindung testen“.",
+    page_home_version: "Version {version}",
 };
 
 pub static EN: Strings = Strings {
@@ -218,6 +232,11 @@ pub static EN: Strings = Strings {
     page_devices_revoke: "Disconnect",
     page_devices_revoked: "The device was disconnected. Hangar has to sign in there again.",
     page_devices_meta: "Connected {created}, last used {used}",
+    page_home_title: "Hangar Server is running",
+    page_home_intro: "This server connects your team's Hangar apps. There is nothing else to do here in the browser.",
+    page_home_address: "Server address for Hangar",
+    page_home_steps: "In Hangar, enter it under Settings › Account at “Server address (self-hosting)”, then click “Test connection”.",
+    page_home_version: "Version {version}",
 };
 
 pub static TR: Strings = Strings {
@@ -270,6 +289,11 @@ pub static TR: Strings = Strings {
     page_devices_revoke: "Bağlantıyı kes",
     page_devices_revoked: "Cihazın bağlantısı kesildi. Oradaki Hangar yeniden oturum açmalı.",
     page_devices_meta: "Bağlandı: {created}, son kullanım: {used}",
+    page_home_title: "Hangar Server çalışıyor",
+    page_home_intro: "Bu sunucu ekibinizin Hangar uygulamalarını birbirine bağlar. Tarayıcıda burada yapmanız gereken başka bir şey yok.",
+    page_home_address: "Hangar için sunucu adresi",
+    page_home_steps: "Hangar'da Ayarlar › Hesap altında “Sunucu adresi (kendi sunucun)” alanına girin ve “Bağlantıyı test et”e tıklayın.",
+    page_home_version: "Sürüm {version}",
 };
 
 pub static FR: Strings = Strings {
@@ -322,6 +346,11 @@ pub static FR: Strings = Strings {
     page_devices_revoke: "Déconnecter",
     page_devices_revoked: "L’appareil a été déconnecté. Hangar devra s’y reconnecter.",
     page_devices_meta: "Connecté le {created}, dernière utilisation {used}",
+    page_home_title: "Hangar Server fonctionne",
+    page_home_intro: "Ce serveur relie les applications Hangar de ton équipe. Il n'y a rien d'autre à faire ici dans le navigateur.",
+    page_home_address: "Adresse du serveur pour Hangar",
+    page_home_steps: "Dans Hangar, saisis-la sous Paramètres › Compte dans « Adresse du serveur (auto-hébergé) », puis clique sur « Tester la connexion ».",
+    page_home_version: "Version {version}",
 };
 
 pub static ES: Strings = Strings {
@@ -374,6 +403,11 @@ pub static ES: Strings = Strings {
     page_devices_revoke: "Desconectar",
     page_devices_revoked: "El dispositivo se ha desconectado. Hangar tendrá que volver a iniciar sesión allí.",
     page_devices_meta: "Conectado el {created}, último uso {used}",
+    page_home_title: "Hangar Server está funcionando",
+    page_home_intro: "Este servidor conecta las apps de Hangar de tu equipo. No hay nada más que hacer aquí en el navegador.",
+    page_home_address: "Dirección del servidor para Hangar",
+    page_home_steps: "En Hangar, introdúcela en Configuración › Cuenta en «Dirección del servidor (propio)» y haz clic en «Probar conexión».",
+    page_home_version: "Versión {version}",
 };
 
 pub static PT: Strings = Strings {
@@ -426,6 +460,11 @@ pub static PT: Strings = Strings {
     page_devices_revoke: "Desconectar",
     page_devices_revoked: "O dispositivo foi desconectado. O Hangar nele terá de entrar novamente.",
     page_devices_meta: "Conectado em {created}, último uso {used}",
+    page_home_title: "O Hangar Server está a funcionar",
+    page_home_intro: "Este servidor liga as apps Hangar da tua equipa. Não há mais nada a fazer aqui no navegador.",
+    page_home_address: "Endereço do servidor para o Hangar",
+    page_home_steps: "No Hangar, introduz-o em Configurações › Conta em “Endereço do servidor (próprio)” e clica em “Testar conexão”.",
+    page_home_version: "Versão {version}",
 };
 
 pub static EL: Strings = Strings {
@@ -478,6 +517,11 @@ pub static EL: Strings = Strings {
     page_devices_revoke: "Αποσύνδεση",
     page_devices_revoked: "Η συσκευή αποσυνδέθηκε. Το Hangar εκεί πρέπει να συνδεθεί ξανά.",
     page_devices_meta: "Συνδέθηκε {created}, τελευταία χρήση {used}",
+    page_home_title: "Ο Hangar Server λειτουργεί",
+    page_home_intro: "Αυτός ο διακομιστής συνδέει τις εφαρμογές Hangar της ομάδας σου. Δεν χρειάζεται να κάνεις τίποτε άλλο εδώ στον περιηγητή.",
+    page_home_address: "Διεύθυνση διακομιστή για το Hangar",
+    page_home_steps: "Στο Hangar, γράψ' την στις Ρυθμίσεις › Λογαριασμός στο «Διεύθυνση διακομιστή (αυτοφιλοξενία)» και πάτησε «Δοκιμή σύνδεσης».",
+    page_home_version: "Έκδοση {version}",
 };
 
 pub static PL: Strings = Strings {
@@ -530,6 +574,11 @@ pub static PL: Strings = Strings {
     page_devices_revoke: "Odłącz",
     page_devices_revoked: "Urządzenie zostało odłączone. Hangar musi się na nim zalogować ponownie.",
     page_devices_meta: "Połączono {created}, ostatnio użyto {used}",
+    page_home_title: "Hangar Server działa",
+    page_home_intro: "Ten serwer łączy aplikacje Hangar twojego zespołu. W przeglądarce nie trzeba tu nic więcej robić.",
+    page_home_address: "Adres serwera dla Hangar",
+    page_home_steps: "W Hangar wpisz go w Ustawienia › Konto w polu „Adres serwera (własny serwer)” i kliknij „Testuj połączenie”.",
+    page_home_version: "Wersja {version}",
 };
 
 pub static RU: Strings = Strings {
@@ -582,6 +631,11 @@ pub static RU: Strings = Strings {
     page_devices_revoke: "Отключить",
     page_devices_revoked: "Устройство отключено. Hangar на нём должен войти снова.",
     page_devices_meta: "Подключено {created}, последнее использование {used}",
+    page_home_title: "Hangar Server работает",
+    page_home_intro: "Этот сервер связывает приложения Hangar вашей команды. Больше в браузере здесь ничего делать не нужно.",
+    page_home_address: "Адрес сервера для Hangar",
+    page_home_steps: "В Hangar введите его в Настройки › Аккаунт в поле «Адрес сервера (свой сервер)» и нажмите «Проверить соединение».",
+    page_home_version: "Версия {version}",
 };
 
 pub static JA: Strings = Strings {
@@ -634,6 +688,11 @@ pub static JA: Strings = Strings {
     page_devices_revoke: "接続を解除",
     page_devices_revoked: "デバイスの接続を解除しました。そのデバイスの Hangar は再度サインインが必要です。",
     page_devices_meta: "接続日時 {created}、最終使用 {used}",
+    page_home_title: "Hangar Server は稼働中です",
+    page_home_intro: "このサーバーはチームの Hangar アプリをつなぎます。ブラウザーでここで行う操作はほかにありません。",
+    page_home_address: "Hangar 用のサーバーアドレス",
+    page_home_steps: "Hangar の 設定 › アカウント の「サーバーアドレス (セルフホスト)」に入力し、「接続をテスト」をクリックしてください。",
+    page_home_version: "バージョン {version}",
 };
 
 pub static ZH: Strings = Strings {
@@ -688,6 +747,11 @@ pub static ZH: Strings = Strings {
     page_devices_revoke: "断开连接",
     page_devices_revoked: "设备已断开连接。该设备上的 Hangar 需要重新登录。",
     page_devices_meta: "连接于 {created},最近使用 {used}",
+    page_home_title: "Hangar Server 正在运行",
+    page_home_intro: "此服务器连接你团队的 Hangar 应用。在浏览器中这里无需再做任何操作。",
+    page_home_address: "Hangar 的服务器地址",
+    page_home_steps: "在 Hangar 中，于 设置 › 账户 的“服务器地址（自托管）”中填入，然后点击“测试连接”。",
+    page_home_version: "版本 {version}",
 };
 
 pub static AR: Strings = Strings {
@@ -740,6 +804,11 @@ pub static AR: Strings = Strings {
     page_devices_revoke: "قطع الاتصال",
     page_devices_revoked: "تم قطع اتصال الجهاز. يجب على Hangar هناك تسجيل الدخول مرة أخرى.",
     page_devices_meta: "متصل منذ {created}، آخر استخدام {used}",
+    page_home_title: "Hangar Server يعمل",
+    page_home_intro: "يربط هذا الخادم تطبيقات Hangar الخاصة بفريقك. لا يوجد شيء آخر لفعله هنا في المتصفح.",
+    page_home_address: "عنوان الخادم لـ Hangar",
+    page_home_steps: "في Hangar، أدخله في الإعدادات › الحساب في خانة «عنوان الخادم (خادمك الخاص)» ثم انقر على «اختبار الاتصال».",
+    page_home_version: "الإصدار {version}",
 };
 
 #[cfg(test)]

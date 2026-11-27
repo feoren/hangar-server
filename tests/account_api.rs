@@ -1060,10 +1060,15 @@ async fn official_mode_does_not_offer_the_account_api() {
 
 #[tokio::test]
 async fn root_page_redirects_with_root_redirect() {
-    // Without ROOT_REDIRECT, `/` stays a 404.
+    // Without ROOT_REDIRECT, `/` is the start page; the official service names no address
+    // (the app knows its server) and serves the stylesheet the page needs.
     let s = start_official().await;
     let r = call(&s.server.router, "GET", "/", &[], In::None).await;
-    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Hangar Server is running"), "{}", r.body);
+    assert!(!r.body.contains("/api/v1"), "{}", r.body);
+    let css = call(&s.server.router, "GET", "/assets/style.css", &[], In::None).await;
+    assert_eq!(css.status, StatusCode::OK);
 
     let mut config = Config::for_tests(IdentityMode::Official, common::website_keys());
     config.root_redirect = Some("https://hangar.feoren.com/".into());

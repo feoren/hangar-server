@@ -6,21 +6,28 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 
 use crate::config::Config;
-use crate::mail::i18n::{pick, strings, Strings};
+use crate::mail::i18n::{fill, pick, strings, Strings};
 use crate::mail::templates::escape;
 use crate::util::{ct_eq, hmac_hex};
 
 const CSS: &str = r#":root{--canvas:#eef1f5;--panel:#fff;--border:#dde3ea;--text:#0e1116;--muted:#59636e;--primary:#0969da;--primary-hover:#0860ca;--on-primary:#fff;--error:#cf222e;--ok:#1a7f37;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--canvas:#0a0d11;--panel:#0e1116;--border:#262e39;--text:#e6edf3;--muted:#8592a3;--primary:#5aa9ff;--primary-hover:#7dbbff;--on-primary:#06121f;--error:#f47067;--ok:#57ab5a}}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--canvas);color:var(--text);font:16px/1.5 'Inter Variable','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif;display:flex;align-items:flex-start;justify-content:center;padding:48px 16px}
-main{width:100%;max-width:480px}.brand{display:flex;gap:10px;align-items:center;font-weight:700;font-size:18px;margin:0 0 16px}.mark{width:28px;height:28px;border-radius:8px;background:var(--primary);color:var(--on-primary);display:grid;place-items:center;font-size:16px}
+main{width:100%;max-width:480px}.brand{display:flex;gap:10px;align-items:center;font-weight:700;font-size:18px;margin:0 0 16px}.mark{width:28px;height:28px;flex:none;display:block}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px}.muted{color:var(--muted);font-size:14px}.error{color:var(--error)}.ok{color:var(--ok)}
 .code{font:600 28px/1.2 'Cascadia Mono',ui-monospace,Consolas,monospace;letter-spacing:.08em;margin:0 0 20px}label{display:block;font-size:14px;margin:0 0 6px}
 input{width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--canvas);color:var(--text);font:inherit;margin:0 0 16px}
 .row{display:flex;gap:12px;flex-wrap:wrap}button{min-height:44px;padding:10px 20px;border-radius:10px;border:1px solid var(--primary);background:var(--primary);color:var(--on-primary);font-family:inherit;font-size:16px;font-weight:600;line-height:1;cursor:pointer}
 button.secondary{background:transparent;color:var(--text);border-color:var(--border)}button:hover{background:var(--primary-hover)}button.secondary:hover{background:var(--canvas)}
 button:focus-visible,input:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
-.devices{list-style:none;padding:0;margin:0 0 16px}.devices li{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-top:1px solid var(--border);padding:12px 0}.devices li:first-child{border-top:0}.devices p{margin:0;overflow-wrap:anywhere}.devices form{margin:0}"#;
+.devices{list-style:none;padding:0;margin:0 0 16px}.devices li{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-top:1px solid var(--border);padding:12px 0}.devices li:first-child{border-top:0}.devices p{margin:0;overflow-wrap:anywhere}.devices form{margin:0}
+.running{display:flex;gap:10px;align-items:center}.running::before{content:"";width:10px;height:10px;flex:none;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 22%,transparent)}
+.label{font-size:14px;font-weight:600;margin:24px 0 6px}.address{font:600 15px/1.4 'Cascadia Mono',ui-monospace,Consolas,monospace;background:var(--canvas);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:0 0 12px;overflow-wrap:anywhere;user-select:all}
+.version{margin:20px 0 0}"#;
+
+/// The Hangar Server logo (`docs/images/logo.svg`) inline: CSP allows no external images
+/// beyond our own origin, and inline SVG needs no request.
+const LOGO: &str = r##"<svg class="mark" viewBox="0 0 256 256" width="28" height="28" aria-hidden="true" focusable="false"><rect width="256" height="256" rx="56" fill="#141a24"/><path d="M216 58H80L40 98V124L176 160H40V200H176L216 160V134L80 98H216Z" fill="#b59aff" fill-rule="evenodd"/><path d="M168 102H200V118H168Z" fill="#f2e3c6"/></svg>"##;
 
 pub async fn stylesheet() -> Response {
     let mut response = (StatusCode::OK, CSS).into_response();
@@ -54,11 +61,39 @@ pub fn t(headers: &HeaderMap, config: &Config) -> (&'static str, &'static String
 pub fn page(lang: &str, title: &str, body: &str, status: StatusCode) -> Response {
     let dir = if strings(lang).rtl { "rtl" } else { "ltr" };
     let html = format!(
-        r#"<!DOCTYPE html><html lang="{lang}" dir="{dir}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="robots" content="noindex"><title>{title} · Hangar</title><link rel="stylesheet" href="/assets/style.css"></head><body><main><div class="brand"><span class="mark" aria-hidden="true">H</span><span>Hangar</span></div><section class="card">{body}</section></main></body></html>"#,
+        r#"<!DOCTYPE html><html lang="{lang}" dir="{dir}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="robots" content="noindex"><title>{title} · Hangar</title><link rel="stylesheet" href="/assets/style.css"></head><body><main><div class="brand">{logo}<span>Hangar Server</span></div><section class="card">{body}</section></main></body></html>"#,
         lang = escape(lang),
         title = escape(title),
+        logo = LOGO,
     );
     (status, Html(html)).into_response()
+}
+
+/// The start page `/`: the server runs, and in self-hosting the address the app needs. Shows
+/// nothing about the server's state beyond what `/health` already tells everyone.
+pub fn home(headers: &HeaderMap, config: &Config) -> Response {
+    let (lang, s) = t(headers, config);
+    let mut body = format!(
+        r#"<h1 class="running">{}</h1><p>{}</p>"#,
+        escape(s.page_home_title),
+        escape(s.page_home_intro)
+    );
+    if config.identity == crate::config::IdentityMode::Local {
+        body.push_str(&format!(
+            r#"<p class="label">{}</p><p class="address" dir="ltr">{}/api/v1</p><p class="muted">{}</p>"#,
+            escape(s.page_home_address),
+            escape(&config.public_url),
+            escape(s.page_home_steps)
+        ));
+    }
+    body.push_str(&format!(
+        r#"<p class="muted version">{}</p>"#,
+        escape(&fill(
+            s.page_home_version,
+            &[("version", env!("CARGO_PKG_VERSION"))]
+        ))
+    ));
+    page(lang, s.page_home_title, &body, StatusCode::OK)
 }
 
 /// Page with a single message.

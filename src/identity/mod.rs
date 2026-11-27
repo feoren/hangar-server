@@ -227,7 +227,6 @@ pub fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 pub fn routes(_identity: Arc<Identity>) -> Router<AppState> {
     Router::new()
-        .route("/assets/style.css", get(pages::stylesheet))
         .route(
             "/oauth/device_authorization",
             post(auth::device_authorization),

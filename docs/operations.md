@@ -243,7 +243,7 @@ All keys with explanations are in [.env.example](../.env.example). The most impo
 | --- | --- |
 | `IDENTITY` | `official` or `local` |
 | `PUBLIC_URL` | own origin, required |
-| `ROOT_REDIRECT` | optional: target for browser requests to `/` (308), e.g. `https://hangar.feoren.com/`; empty = 404 |
+| `ROOT_REDIRECT` | optional: target for browser requests to `/` (308), e.g. `https://hangar.feoren.com/`; empty = a start page that says the server runs and, in self-hosting, names the address for the app |
 | `TICKET_PUBLIC_KEYS` | `kid:base64url` of the ticket issuers; required with `official` |
 | `TICKET_AUDIENCE` | required value for `aud`; empty = `hangar-relay` (official) or `PUBLIC_URL` (local) |
 | `LICENSE_PUBLIC_KEYS` | the website's keys for license documents (self-hosting); empty = the built-in key of hangar.feoren.com |

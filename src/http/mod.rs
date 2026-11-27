@@ -32,12 +32,11 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let mut app = Router::new()
         .route("/health", get(health))
-        .route("/v1/live", get(crate::relay::conn::upgrade));
+        .route("/v1/live", get(crate::relay::conn::upgrade))
+        .route("/", get(start_page))
+        .route("/assets/style.css", get(crate::identity::pages::stylesheet));
     if let Some(identity) = &state.identity {
         app = app.merge(crate::identity::routes(identity.clone()));
-    }
-    if state.config.root_redirect.is_some() {
-        app = app.route("/", get(root_redirect));
     }
     app.fallback(not_found)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -45,11 +44,12 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// `GET /` with `ROOT_REDIRECT`: send browser requests for the start page to the product page.
-async fn root_redirect(State(state): State<AppState>) -> Response {
+/// `GET /`: with `ROOT_REDIRECT` on to the product page, otherwise a short page that says the
+/// server runs and, in self-hosting, which address goes into the app.
+async fn start_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match &state.config.root_redirect {
         Some(target) => Redirect::permanent(target).into_response(),
-        None => not_found().await,
+        None => crate::identity::pages::home(&headers, &state.config),
     }
 }
 
