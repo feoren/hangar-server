@@ -201,24 +201,27 @@ caddy_files() {
 # Caddyfile is put back as it was and the snippet removed; returns 1 then.
 caddy_apply() {
   dir="${HANGAR_CADDY_DIR:-/etc/caddy}"
-  saved=$(mktemp)
+  # A directory of our own: a name next to a mktemp file could be guessed by another user.
+  work=$(mktemp -d)
+  saved="$work/Caddyfile"
   had_file=no
   if [ -f "$dir/Caddyfile" ]; then
     cp "$dir/Caddyfile" "$saved"
     had_file=yes
   fi
   caddy_files "$1"
-  if caddy validate --adapter caddyfile --config "$dir/Caddyfile" > "$saved.log" 2>&1; then
-    rm -f "$saved" "$saved.log"
+  if caddy validate --adapter caddyfile --config "$dir/Caddyfile" > "$work/log" 2>&1; then
+    rm -rf "$work"
     return 0
   fi
   say "Caddy rejects the configuration with the new site, so it was left unchanged:"
-  tail -n 3 "$saved.log"
+  tail -n 3 "$work/log"
   if [ "$had_file" = yes ]; then cp "$saved" "$dir/Caddyfile"; else rm -f "$dir/Caddyfile"; fi
   for backup in "$dir"/Caddyfile.bak.*; do
     if [ -e "$backup" ] && cmp -s "$backup" "$dir/Caddyfile"; then rm -f "$backup"; fi
   done
-  rm -f "$dir/hangar-server.caddy" "$saved" "$saved.log"
+  rm -f "$dir/hangar-server.caddy"
+  rm -rf "$work"
   return 1
 }
 

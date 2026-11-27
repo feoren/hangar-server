@@ -281,6 +281,21 @@ pub fn memory_warning(max_connections: usize, limit: Option<u64>) -> Option<Stri
     })
 }
 
+/// Warning for a `PUBLIC_URL` with plain `http://` on a host other than this machine: the
+/// browser pages then run without TLS, cookies without `Secure` and no HSTS.
+pub fn plain_http_warning(public_url: &str) -> Option<String> {
+    let rest = public_url.strip_prefix("http://")?;
+    let host = match rest.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => rest.split(':').next().unwrap_or(""),
+    };
+    (!matches!(host, "localhost" | "127.0.0.1" | "::1")).then(|| {
+        format!(
+            "PUBLIC_URL={public_url} is plain http: sign-in pages and cookies travel unencrypted; use https:// (a reverse proxy such as Caddy provides it)"
+        )
+    })
+}
+
 /// Content of cgroup v2 `memory.max`: bytes, or `max` for no limit.
 pub fn parse_memory_max(text: &str) -> Option<u64> {
     text.trim().parse().ok()
@@ -530,6 +545,16 @@ mod tests {
         assert_eq!(normalize_origin("https://a.org/path"), None);
         assert_eq!(normalize_origin("ftp://a.org"), None);
         assert_eq!(normalize_origin("https://user@a.org"), None);
+    }
+
+    #[test]
+    fn plain_http_warns_only_for_other_hosts() {
+        assert!(plain_http_warning("https://team.example.org").is_none());
+        assert!(plain_http_warning("http://localhost:8080").is_none());
+        assert!(plain_http_warning("http://127.0.0.1").is_none());
+        assert!(plain_http_warning("http://[::1]:8080").is_none());
+        assert!(plain_http_warning("http://team.example.org").is_some());
+        assert!(plain_http_warning("http://localhost.example.org:8080").is_some());
     }
 
     #[test]

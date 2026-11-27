@@ -19,6 +19,9 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
         // event log (no `seq` before the stored head) requires this.
         .synchronous(SqliteSynchronous::Full)
         .foreign_keys(true)
+        // Temporary tables and sort runs stay in memory: the container's file system is
+        // read-only and has no /tmp.
+        .pragma("temp_store", "MEMORY")
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(4)

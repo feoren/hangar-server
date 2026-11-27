@@ -83,6 +83,25 @@ pub type ApiResult<T> = Result<T, ApiError>;
 fn load_or_create_key(dir: &Path) -> Result<SigningKey, String> {
     let path = dir.join("ticket-signing.key");
     if let Ok(text) = std::fs::read_to_string(&path) {
+        // A file restored from a backup may have come back readable for others.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let open = std::fs::metadata(&path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
+            if open {
+                match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+                    Ok(()) => tracing::warn!(
+                        "{} was readable for other users; its mode is now 0600",
+                        path.display()
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "{} is readable for other users; restrict it to its owner (chmod 600)",
+                        path.display()
+                    ),
+                }
+            }
+        }
         let text = text.trim();
         let bytes: Vec<u8> = (0..text.len() / 2)
             .filter_map(|i| u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok())

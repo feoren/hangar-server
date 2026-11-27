@@ -85,7 +85,10 @@ Point the proxy at `http://127.0.0.1:8080` with WebSocket upgrades and long time
 the proxy must set that header itself (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`,
 or `$proxy_add_x_forwarded_for`; Caddy and Traefik do it on their
 own). A proxy that passes a client's header on unchanged lets anyone pick their address and
-bypass every per-address limit. Admin commands: `docker exec hangar-server hangar-server teams`.
+bypass every per-address limit. The same holds for other users of the machine itself: whoever
+can reach `127.0.0.1:8080` directly sets the header as they like, so on a host shared with
+people you do not trust keep the port away from them (the Docker setup does: the server has no
+published port). Admin commands: `docker exec hangar-server hangar-server teams`.
 
 ## Operation
 
@@ -128,8 +131,8 @@ For the official service at `team-hangar.feoren.com` on a Strato V-Server with D
   can only obtain the certificate once the name resolves.
 - From the website: the relay's bearer token (`RELAY_REVOCATION_TOKEN`) and the public signing
   keys. The keys are served by `https://hangar.feoren.com/api/v1/keys`; they go into
-  `TICKET_PUBLIC_KEYS` as `kid:base64url`, comma-separated. [UNVERIFIED: exact response format
-  of `/api/v1/keys`; the authoritative source is `wiki/Team-Schnittstelle.md` of the website.]
+  `TICKET_PUBLIC_KEYS` as `kid:base64url`, comma-separated. The response has the same shape as `GET /keys` in
+  [account-api.md](account-api.md): `kid` and `x` of each key.
 
 ### Getting the image onto the server
 

@@ -86,6 +86,9 @@ async fn serve(config: Config) -> Result<(), String> {
     ) {
         tracing::warn!("{warning}");
     }
+    if let Some(warning) = hangar_server::config::plain_http_warning(&config.public_url) {
+        tracing::warn!("{warning}");
+    }
     let server = hangar_server::build(config)
         .await
         .map_err(|e| e.to_string())?;
