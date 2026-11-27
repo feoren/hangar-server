@@ -358,7 +358,7 @@ async fn device(State(state): State<AppState>, ip: ClientIp, request: Request) -
     let platform = auth::clean_platform(field(&input, "platform"));
     let started = auth::start_device(
         identity,
-        &ip.key(),
+        &ip,
         field(&input, "client_id"),
         field(&input, "scope"),
         &label,
@@ -377,7 +377,7 @@ async fn token(State(state): State<AppState>, ip: ClientIp, request: Request) ->
     let input = read_input(&parts.headers, body).await?;
     let tokens = auth::exchange(
         identity,
-        &ip.key(),
+        &ip,
         field(&input, "client_id"),
         field(&input, "grant_type"),
         field(&input, "device_code"),
@@ -395,7 +395,7 @@ async fn revoke(State(state): State<AppState>, ip: ClientIp, request: Request) -
     let input = read_input(&parts.headers, body).await?;
     auth::revoke_token(
         identity,
-        &ip.key(),
+        &ip,
         field(&input, "client_id"),
         field(&input, "token"),
         field(&input, "token_type_hint"),

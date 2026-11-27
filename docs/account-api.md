@@ -83,6 +83,10 @@ In memory per process, keys hashed (`src/http/ratelimit.rs`):
 | Tickets (`/api/v1/relay-ticket` and `/v1/tickets` combined) | 600 per account and hour | 429 `rate_limited` |
 | Confirming on `/device` | 10 per account, 30 per address and 15 min | page "too many attempts" |
 
+An address is one IPv4 address or one IPv6 network of /64. On top of that each IPv6 network of
+/48 has four times the limit of an address, so that one network cannot use up the limiter's room
+with its 65536 networks of /64.
+
 ## Browser page `/account/devices`
 
 Hangar links to `<origin>/account/devices`. Without a browser session the page asks for the

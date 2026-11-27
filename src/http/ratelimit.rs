@@ -12,10 +12,14 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::http::ClientIp;
 use crate::util::hmac_hex;
 
 /// Maximum number of remembered keys per scope.
 const MAX_KEYS: usize = 100_000;
+
+/// A wider network (IPv6 /48) gets this many times the limit of a single address.
+const WIDE_FACTOR: u32 = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rule {
@@ -50,6 +54,19 @@ impl RateLimiter {
             max_keys,
             scopes: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Counts one attempt of a client address: per address (IPv6 per /64) and, `WIDE_FACTOR`
+    /// times as generous, per wider network (IPv6 per /48), checked first. Without the wider
+    /// count a single /48 holds 65536 keys of /64, enough to fill the scope's table and with it
+    /// refuse every address the table does not know yet.
+    pub fn hit_ip(&self, scope: &str, ip: &ClientIp, rule: Rule, now_s: i64) -> bool {
+        let wide = Rule {
+            limit: rule.limit.saturating_mul(WIDE_FACTOR),
+            window_s: rule.window_s,
+        };
+        self.hit(&format!("{scope}/48"), &ip.wide_key(), wide, now_s)
+            && self.hit(scope, &ip.key(), rule, now_s)
     }
 
     /// Counts one attempt. `false`: limit reached.
@@ -129,6 +146,27 @@ mod tests {
             rl.hit("magic-ip", "me", RULE, 2),
             "an existing key is not refused"
         );
+    }
+
+    #[test]
+    fn one_ipv6_network_cannot_fill_the_table() {
+        let rl = RateLimiter::with_max(b"s", 50);
+        let ip = |text: String| ClientIp(Some(text.parse().unwrap()));
+        // 200 networks of /64 out of one /48: only WIDE_FACTOR * limit attempts get through.
+        let passed = (0..200)
+            .filter(|i| rl.hit_ip("token-ip", &ip(format!("2001:db8:1:{i:x}::1")), RULE, 0))
+            .count();
+        assert_eq!(passed, (WIDE_FACTOR * RULE.limit) as usize);
+        assert!(
+            rl.hit_ip("token-ip", &ip("203.0.113.7".into()), RULE, 0),
+            "an address from elsewhere still gets through"
+        );
+        // A single address keeps its own limit.
+        let one = ip("198.51.100.9".into());
+        let passed = (0..20)
+            .filter(|_| rl.hit_ip("token-ip", &one, RULE, 0))
+            .count();
+        assert_eq!(passed, RULE.limit as usize);
     }
 
     #[test]

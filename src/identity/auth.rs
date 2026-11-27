@@ -244,8 +244,10 @@ pub async fn housekeeping(db: &Db) -> Result<(), sqlx::Error> {
         .bind(now - 86_400)
         .execute(db)
         .await?;
+    // An hour is enough for a waiting app to still read `expired_token`; keeping them longer
+    // only lets a flood of device starts grow the table.
     sqlx::query("DELETE FROM device_codes WHERE expires_at < ?")
-        .bind(now - 86_400)
+        .bind(now - 3600)
         .execute(db)
         .await?;
     sqlx::query("DELETE FROM mail_throttle WHERE sent_at < ?")
@@ -343,11 +345,11 @@ pub async fn request_magic_link(
     raw_email: &str,
     return_to: Option<&str>,
     lang: &str,
-    ip: &str,
+    ip: &ClientIp,
     browser: Option<&str>,
 ) -> ApiResult<()> {
     let now = now_s();
-    if !identity.limiter.hit(
+    if !identity.limiter.hit_ip(
         "magic-ip",
         ip,
         Rule {
@@ -452,7 +454,7 @@ pub async fn email_submit(
         &form.email,
         form.return_to.as_deref(),
         lang,
-        &ip.key(),
+        &ip,
         Some(&browser),
     )
     .await
@@ -704,12 +706,13 @@ pub fn normalize_user_code(raw: &str) -> Option<String> {
 }
 
 /// Device name for the session list and confirmation page: control characters become spaces,
-/// trimmed, shortened; empty becomes `Hangar`.
+/// invisible formatting characters (bidi overrides, zero-width) are dropped, trimmed, shortened; empty becomes `Hangar`.
 pub fn clean_label(raw: Option<&str>, max_chars: usize) -> String {
     let spaced: String = raw
         .unwrap_or_default()
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
+        .filter(|c| !crate::util::is_hidden(*c))
         .collect();
     let label: String = spaced.trim().chars().take(max_chars).collect();
     let label = label.trim_end();
@@ -760,13 +763,16 @@ pub struct DeviceStart {
 /// Service: start the device flow. Errors as OAuth code (`rate_limited` becomes 429).
 pub async fn start_device(
     identity: &Identity,
-    ip: &str,
+    ip: &ClientIp,
     client_id: Option<&str>,
     scope: Option<&str>,
     label: &str,
     platform: Option<&str>,
 ) -> Result<DeviceStart, &'static str> {
-    if !identity.limiter.hit("device-ip", ip, DEVICE_RULE, now_s()) {
+    if !identity
+        .limiter
+        .hit_ip("device-ip", ip, DEVICE_RULE, now_s())
+    {
         return Err("rate_limited");
     }
     if !client_ok(client_id) {
@@ -806,13 +812,13 @@ pub async fn start_device(
 /// OAuth code per RFC 6749 5.2 and RFC 8628 3.5; `rate_limited` becomes 429.
 pub async fn exchange(
     identity: &Identity,
-    ip: &str,
+    ip: &ClientIp,
     client_id: Option<&str>,
     grant_type: Option<&str>,
     device_code: Option<&str>,
     refresh_token: Option<&str>,
 ) -> Result<TokenResponse, &'static str> {
-    if !identity.limiter.hit("token-ip", ip, TOKEN_RULE, now_s()) {
+    if !identity.limiter.hit_ip("token-ip", ip, TOKEN_RULE, now_s()) {
         return Err("rate_limited");
     }
     if !client_ok(client_id) {
@@ -838,12 +844,15 @@ pub async fn exchange(
 /// Browser tokens are excluded. `token_type_hint` is only a hint (RFC 7009 2.1).
 pub async fn revoke_token(
     identity: &Identity,
-    ip: &str,
+    ip: &ClientIp,
     client_id: Option<&str>,
     token: Option<&str>,
     hint: Option<&str>,
 ) -> Result<(), &'static str> {
-    if !identity.limiter.hit("revoke-ip", ip, REVOKE_RULE, now_s()) {
+    if !identity
+        .limiter
+        .hit_ip("revoke-ip", ip, REVOKE_RULE, now_s())
+    {
         return Err("rate_limited");
     }
     if !client_ok(client_id) {
@@ -933,7 +942,7 @@ pub async fn device_authorization(
     let platform = clean_platform(form.platform.as_deref());
     match start_device(
         identity,
-        &ip.key(),
+        &ip,
         form.client_id.as_deref(),
         form.scope.as_deref(),
         &label,
@@ -965,7 +974,7 @@ pub async fn token(
     };
     match exchange(
         identity,
-        &ip.key(),
+        &ip,
         form.client_id.as_deref(),
         form.grant_type.as_deref(),
         form.device_code.as_deref(),
@@ -1280,9 +1289,9 @@ pub async fn device_decide(
             window_s: 900,
         },
         now,
-    ) || !identity.limiter.hit(
+    ) || !identity.limiter.hit_ip(
         "device-decide-ip",
-        &ip.key(),
+        &ip,
         Rule {
             limit: 30,
             window_s: 900,
@@ -1416,6 +1425,16 @@ pub fn mail_lang(stored: Option<&str>, config: &Config) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_names_lose_control_and_invisible_characters() {
+        assert_eq!(clean_label(Some(" Work\tPC \n"), 64), "Work PC");
+        // A bidi override would reorder the name and the platform shown after it.
+        assert_eq!(clean_label(Some("lap\u{202E}top\u{200B}"), 64), "laptop");
+        assert_eq!(clean_label(Some("\u{202E}\u{2066}"), 64), "Hangar");
+        assert_eq!(clean_label(None, 64), "Hangar");
+        assert_eq!(clean_label(Some("abcdef"), 3), "abc");
+    }
 
     #[test]
     fn user_code_format() {
