@@ -12,7 +12,7 @@
 
 services:
   server:
-    image: ghcr.io/feoren/hangar-server:${HANGAR_VERSION:-0.7.0}
+    image: ghcr.io/feoren/hangar-server:${HANGAR_VERSION:-0.8.0}
     restart: unless-stopped
     env_file:
       - path: .env

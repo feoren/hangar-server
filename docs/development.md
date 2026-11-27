@@ -99,7 +99,7 @@ Image: `docker build -t hangar-server .`; for amd64 and arm64:
    `docker-compose.yml` and the image tag in `README.md` (all checked by
    `tools/check-versions.sh`), plus the placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`;
    commit, push, wait for CI.
-2. Tag and push: `git tag v0.7.0 && git push github v0.7.0`.
+2. Tag and push: `git tag v0.8.0 && git push github v0.8.0`.
 3. The workflow `Release image` (`.github/workflows/release.yml`) checks that the tag matches
    `Cargo.toml`, builds amd64 and arm64 and pushes `ghcr.io/feoren/hangar-server:<version>`.
    No `latest` tag. From the same build it takes the static binaries and creates the GitHub
