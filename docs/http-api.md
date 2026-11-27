@@ -17,6 +17,10 @@ The app's account API under **`/api/v1`**, identical to the website (details:
 | `GET /api/v1/keys` | public ticket key |
 | `GET/POST /account/devices` | browser page: view and disconnect connected devices |
 
+`GET /` is a browser page in every mode: that the server runs, its version and, in
+self-hosting, the address for the app (`ROOT_REDIRECT` sends it elsewhere instead, see
+operations.md). `GET /assets/style.css` is its stylesheet, shared by every browser page.
+
 Further routes (administration and browser; the old OAuth routes remain for existing scripts,
 `client_id` there is `hangar` or `hangar-desktop`, form data only):
 

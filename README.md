@@ -137,6 +137,9 @@ It asks four questions:
 If it offers to install Docker or Caddy, answer `y`. A few minutes later it prints `Done`, the
 server address for Hangar and your sign-in link. Keep the window open.
 
+To check, open your domain in the browser, such as `https://team.example.org`: the page says
+**Hangar Server is running** and shows the exact address to enter in Hangar.
+
 If it stops with an error, fix the cause it names and run the same command again; it continues
 where it stopped. See also [Troubleshooting](#troubleshooting).
 
@@ -299,7 +302,9 @@ existing web server as described under [Other ways to run it](#other-ways-to-run
 <summary><strong>Is my server running?</strong></summary>
 <br>
 
-Open `https://team.example.org/health` in the browser; it shows `{"status":"ok",...}`. In
+Open `https://team.example.org` in the browser; the page says **Hangar Server is running** and
+shows the address for Hangar. For scripts there is `https://team.example.org/health`, which
+answers `{"status":"ok",...}`. In
 Hangar, **Test connection** under Settings › Account checks every part. The latest log lines:
 
 ```sh
