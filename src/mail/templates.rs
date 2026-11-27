@@ -66,7 +66,8 @@ struct Parts {
     note: Option<String>,
 }
 
-fn parts(kind: &MailKind, s: &Strings) -> Parts {
+/// `server` is the server's host, already escaped where HTML is built.
+fn parts(kind: &MailKind, s: &Strings, server: &str) -> Parts {
     match kind {
         MailKind::Invitation {
             inviter,
@@ -84,7 +85,7 @@ fn parts(kind: &MailKind, s: &Strings) -> Parts {
         }
         MailKind::LoginLink { link, minutes } => Parts {
             subject: s.login_subject.to_owned(),
-            intro: s.login_intro.to_owned(),
+            intro: fill(s.login_intro, &[("server", server)]),
             action: Some((s.login_action.to_owned(), link.clone())),
             note: Some(fill(s.login_note, &[("minutes", &minutes.to_string())])),
         },
@@ -136,7 +137,7 @@ pub fn render(kind: &MailKind, lang: &str, server: &str) -> Rendered {
     let s = strings(lang);
     let kind = cleaned(kind);
     let footer = fill(s.footer, &[("server", server)]);
-    let plain = parts(&kind, s);
+    let plain = parts(&kind, s, server);
 
     let mut text = format!("{}\n\n{}\n", s.greeting, plain.intro);
     if let Some((label, link)) = &plain.action {
@@ -167,7 +168,7 @@ pub fn render(kind: &MailKind, lang: &str, server: &str) -> Rendered {
         MailKind::Attention { team } => MailKind::Attention { team: escape(team) },
         other => other.clone(),
     };
-    let rich = parts(&html_kind, s);
+    let rich = parts(&html_kind, s, &escape(server));
     let dir = if s.rtl { "rtl" } else { "ltr" };
     let align = if s.rtl { "right" } else { "left" };
     let lang_attr = escape(lang);
@@ -299,7 +300,9 @@ mod tests {
                 let r = render(kind, lang, "t.example");
                 assert!(!r.subject.is_empty() && !r.text.is_empty());
                 assert!(
-                    !r.subject.contains('{') && !r.text.contains("{team}"),
+                    !r.subject.contains('{')
+                        && !r.text.contains('{')
+                        && !r.html.contains("{server}"),
                     "{lang}: {}",
                     r.subject
                 );
