@@ -44,7 +44,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 lettre = { version = "0.11.24", default-features = false, features = ["builder", "hostname", "smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"
 
