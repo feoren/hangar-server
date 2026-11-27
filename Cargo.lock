@@ -727,7 +727,7 @@ name = "hangar-server"
 version = "0.8.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dotenvy",
  "ed25519-dalek 2.2.0",
  "futures-util",
