@@ -92,6 +92,12 @@ devices). One connection can sign in to several teams, but belongs to exactly on
 - **Snapshot**: `resync_required`, then `member.joined`, `task.reserved` per hold (plus
   `reservation.expiring` and `task.release_requested` where they apply), `presence.update`, and finally
   `welcome`.
+- **Unlisted device:** in a team with a log, a `hello` from a device the log does not list gets
+  `resync_required` and `welcome` without the state in between. Once an entry lists the device,
+  the relay sends `resync_required`, the snapshot and a second `welcome` on the same connection,
+  all without `id`; the second `welcome` carries the challenge of the first, so a
+  `device.prove` already sent stays valid. A `hello` with a cursor in the window gets its replay
+  as before.
 - Replay and snapshot are queued in one piece under the team lock, whatever their length (up to
   the 2048 events of the window): no live event comes before or in between, and `welcome` is
   never dropped. Live events follow afterwards.

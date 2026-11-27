@@ -433,6 +433,101 @@ async fn a_pending_device_counts_from_its_admission_and_gets_its_proof_row_then(
     );
 }
 
+/// Security: a device the log does not list gets no state of the team at its `hello` (holds,
+/// sealed notes, presence). Once an entry admits it, the relay sends `resync_required`, the
+/// state and a new `welcome` with the challenge of its `hello`, on the same connection.
+#[tokio::test]
+async fn an_unlisted_device_gets_the_snapshot_only_once_the_log_lists_it() {
+    let s = start_official().await;
+    let (mut log, alice, mut a, bob, mut b) = team(&s).await;
+    assert!(is_ack(&a.request("t", reserve(3)).await));
+    let held = KeyedHash::from_bytes([3; 32]);
+    let is_hold =
+        |f: &ServerFrame| matches!(&f.message, ServerMessage::TaskReserved(r) if r.task == held);
+
+    let phone = Dev::new("bob", "bob-phone");
+    let mut p = Client::connect(s.addr).await;
+    let op = p.op();
+    p.send(
+        &op,
+        Some("t"),
+        ClientMessage::Hello(Hello {
+            ticket: Ticket::new(ticket("bob", "t", Role::Member)).unwrap(),
+            device: phone.holder.device.clone(),
+            proto: ProtoRange::CURRENT,
+            last_seq: None,
+        }),
+    )
+    .await;
+    let mut before = Vec::new();
+    let first = loop {
+        let frame = p.recv().await.expect("welcome");
+        if let ServerMessage::Welcome(w) = &frame.message {
+            break w.clone();
+        }
+        before.push(frame);
+    };
+    assert!(
+        matches!(
+            before.first().map(|f| &f.message),
+            Some(ServerMessage::ResyncRequired(_))
+        ),
+        "{before:?}"
+    );
+    assert!(
+        !before.iter().any(is_hold),
+        "no holds before admission: {before:?}"
+    );
+    assert!(
+        !before
+            .iter()
+            .any(|f| matches!(f.message, ServerMessage::PresenceUpdate(_))),
+        "no presence before admission: {before:?}"
+    );
+    let keys = p
+        .request("t", ClientMessage::DeviceKeys(phone.keys("t")))
+        .await;
+    assert!(is_ack(&keys), "{keys:?}");
+
+    let add = log.add_device(&bob, &phone);
+    assert!(is_ack(&append(&mut b, "t", &add).await));
+    log.accept(&add, &bob.holder);
+    let after = drain(&mut p).await;
+    let resync = after
+        .iter()
+        .position(|f| matches!(f.message, ServerMessage::ResyncRequired(_)))
+        .expect("resync_required after admission");
+    let hold = after
+        .iter()
+        .position(is_hold)
+        .expect("the hold after admission");
+    let welcome = after
+        .iter()
+        .position(|f| matches!(f.message, ServerMessage::Welcome(_)))
+        .expect("welcome after admission");
+    assert!(resync < hold && hold < welcome, "{after:?}");
+    let ServerMessage::Welcome(second) = &after[welcome].message else {
+        unreachable!()
+    };
+    assert_eq!(
+        second.challenge, first.challenge,
+        "the hello's challenge stays"
+    );
+
+    // Only once: a later entry sends no second snapshot.
+    let carol = Dev::new("carol", "carol-pc");
+    let _c = Client::join_device(s.addr, "t", &carol, Role::Member).await;
+    let add = log.add_member(&alice, &carol, LogRole::Member);
+    assert!(is_ack(&append(&mut a, "t", &add).await));
+    let later = drain(&mut p).await;
+    assert!(
+        !later
+            .iter()
+            .any(|f| matches!(f.message, ServerMessage::ResyncRequired(_))),
+        "{later:?}"
+    );
+}
+
 #[tokio::test]
 async fn version_two_connections_follow_the_transition_rule() {
     let s = start_official().await;

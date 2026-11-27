@@ -140,10 +140,9 @@ reversed without the key, but they can be compared within the epoch.
   the build provenance (`gh attestation verify` does that by hand, see development.md). The Caddy
   image in `docker-compose.yml` follows the tag `caddy:2-alpine` on purpose, so that security
   updates arrive without a new release of this server.
-- A connection with a valid ticket whose device the log does not list still receives the
-  snapshot (holds with member and device, sealed notes, presence) when it joins without a
-  cursor, not only the later event stream. A removed device that returns under a new device ID
-  can read sealed notes of the epoch it still knows until `key.rotate`.
+- A connection whose device the log does not list gets no snapshot at its `hello` (no holds,
+  sealed notes or presence); the relay sends it once an entry admits the device, on the same
+  connection. What it still receives is the logged event stream after its `hello` (see above).
 - The snapshot has no size limit of its own: reservation notes of up to 16 KiB each, in a team
   that uses 32 holds per member to the full with about 16 members, can exceed the 16 MiB a
   connection's queue takes; connections that need a snapshot are then closed.
@@ -197,7 +196,7 @@ reversed without the key, but they can be compared within the epoch.
   list, it may only register (`device.keys`, `device.prove`), read the log and the device
   directory, renew its ticket and ping (docs/protocol.md, "Proof of possession"). A blocked device
   (`device.remove`) that comes back with a new ID therefore acts as nothing and reads no
-  claims, blobs or notes key ring (for the snapshot of reservations see below). A second
+  claims, blobs, notes key ring or snapshot of reservations and presence. A second
   connection with a stolen ticket and a listed device ID acts as nothing on version 3, receives
   no targeted message (`claim.overlap`, `key.wrapped`, `notify`) and causes no presence or
   reservation change. What stays open:

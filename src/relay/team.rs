@@ -39,10 +39,10 @@ use crate::wire::{
     ErrorCode, Holder, KeyRotated, KeyWrapped, KeyedHash, MemberId, MemberJoined,
     MemberLogAppended, MemberLogEntries, MemberRemoved, MemberRoleChanged, NotesKeys,
     NotesKeysUpdated, Notify as NotifyMessage, OpId, PathHashes, PresenceState, PresenceUpdate,
-    PublicKey, ReservationExpired, ReservationExpiring, ResyncRequired, Sealed, Seq, ServerFrame,
-    ServerMessage, SessionKey, SessionRef, StreamId, TaskReleaseAnswered, TaskReleaseRequestEnded,
-    TaskReleaseRequested, TaskReleased, TaskReserved, TeamId, UnixMillis, Welcome,
-    DECISIONS_PROTOCOL_VERSION, PROOF_PROTOCOL_VERSION,
+    PublicKey, ReservationExpired, ReservationExpiring, ResyncReason, ResyncRequired, Sealed, Seq,
+    ServerFrame, ServerMessage, SessionKey, SessionRef, StreamId, TaskReleaseAnswered,
+    TaskReleaseRequestEnded, TaskReleaseRequested, TaskReleased, TaskReserved, TeamId, UnixMillis,
+    Welcome, DECISIONS_PROTOCOL_VERSION, PROOF_PROTOCOL_VERSION,
 };
 
 /// Events kept in memory for replay; older ones require a snapshot.
@@ -193,6 +193,10 @@ pub struct ConnectionProof {
     counted: bool,
     /// Its proof row is written (`relay_device_proofs`).
     recorded: bool,
+    /// The snapshot this connection's `hello` asked for, held back because the log did not list
+    /// its device then: sent with `resync_required` and a new `welcome` once the log lists it
+    /// (`Team::deliver_withheld`).
+    withheld: Option<ResyncReason>,
 }
 
 impl Subscriber {
@@ -488,6 +492,60 @@ impl Team {
         match self.verifier.state() {
             None => true,
             Some(state) => counts_as_listed(state, &sub.holder, sub.possession()),
+        }
+    }
+
+    /// Whether the team's log lists `holder`'s device; in a team without a log every device is.
+    fn listed(&self, holder: &Holder) -> bool {
+        self.verifier
+            .state()
+            .is_none_or(|state| state.device(holder).is_some())
+    }
+
+    /// Sends the held-back snapshot to every connection whose device the log lists by now:
+    /// `resync_required`, the state, and a `welcome` with the connection's challenge from its
+    /// `hello`, so a proof it already sent stays valid. One entry in the queue, under the team
+    /// lock: no live event gets in between.
+    fn deliver_withheld(&mut self) {
+        let due: Vec<(u64, ResyncReason)> = self
+            .subscribers
+            .iter()
+            .filter_map(|(conn, sub)| {
+                let reason = sub.possession.withheld?;
+                self.listed(&sub.holder).then_some((*conn, reason))
+            })
+            .collect();
+        for (conn, reason) in due {
+            let Some(sub) = self.subscribers.get(&conn) else {
+                continue;
+            };
+            let proto = sub.proto;
+            let welcome = ServerMessage::Welcome(Welcome {
+                proto,
+                stream: self.log.stream().clone(),
+                head: self.log.head(),
+                member: sub.holder.member.clone(),
+                epoch: self.book.epoch(),
+                challenge: sub.possession.challenge,
+            });
+            let resync = ServerMessage::ResyncRequired(ResyncRequired {
+                stream: self.log.stream().clone(),
+                head: self.log.head(),
+                reason,
+            });
+            let mut batch = Vec::new();
+            let mut add = |framed: Option<Framed>| {
+                batch.extend(framed.and_then(|f| f.for_proto(proto)));
+            };
+            add(self.frame(None, None, resync));
+            for message in self.snapshot() {
+                add(self.frame(None, None, message));
+            }
+            add(self.frame(None, None, welcome));
+            if let Some(sub) = self.subscribers.get_mut(&conn) {
+                sub.possession.withheld = None;
+                sub.tx.try_send(Outgoing::Batch(batch));
+            }
         }
     }
 
@@ -1002,8 +1060,15 @@ impl Team {
                     reason,
                 });
                 add(self.frame(Some(op), None, resync));
-                for message in self.snapshot() {
-                    add(self.frame(None, None, message));
+                // A device the team's log does not list (one waiting for admission, or a
+                // removed one back under a new ID) gets no state of the team: holds, sealed
+                // notes and presence wait until the log lists it.
+                if self.listed(&holder) {
+                    for message in self.snapshot() {
+                        add(self.frame(None, None, message));
+                    }
+                } else if let Some(sub) = self.subscribers.get_mut(&conn) {
+                    sub.possession.withheld = Some(reason);
                 }
                 add(self.frame(Some(op), None, welcome));
             }
@@ -1161,6 +1226,7 @@ impl Team {
     /// row, which closes the holder's connections of older versions. Runs after `hello`, after
     /// a passing `device.prove` and after every stored log entry.
     async fn refresh_counting(&mut self, db: &Db, now: u64) -> Result<(), sqlx::Error> {
+        self.deliver_withheld();
         let mut events = Vec::new();
         let mut joined = Vec::new();
         let mut record = Vec::new();
