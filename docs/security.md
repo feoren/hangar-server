@@ -126,6 +126,33 @@ reversed without the key, but they can be compared within the epoch.
   of the same member may wrap, never the target device itself (`e2e::check_wrap`).
 - Outgoing requests: only fetching the revocation list, only to `REVOCATION_URL` (https, without
   redirects or proxy, 10 s, 1 MiB). The bearer token is kept only in the environment.
+- Rate limiting per address counts IPv6 per /64 and, four times as generous, per /48
+  (`RateLimiter::hit_ip`). Someone with many /48 networks (a /32) can still fill a limiter table
+  of 100000 keys; new addresses of that scope are then refused until windows end, known ones
+  keep working.
+- App sessions have no absolute lifetime: every refresh extends them by 30 days. A stolen
+  refresh token that is used before the real device keeps its session alive until someone
+  disconnects it under `/account/devices`; a second use by the real device revokes the session.
+- An admin of one team learns from the invitation answer (`license_required` or not) whether an
+  address already holds a seat in another team of the same owner, while that owner has no
+  active license. A hit sends a real invitation; 50 invitations per hour.
+- `install.sh` verifies downloads against the release's `SHA256SUMS` (integrity), not against
+  the build provenance (`gh attestation verify` does that by hand, see development.md). The Caddy
+  image in `docker-compose.yml` follows the tag `caddy:2-alpine` on purpose, so that security
+  updates arrive without a new release of this server.
+- A connection with a valid ticket whose device the log does not list still receives the
+  snapshot (holds with member and device, sealed notes, presence) when it joins without a
+  cursor, not only the later event stream. A removed device that returns under a new device ID
+  can read sealed notes of the epoch it still knows until `key.rotate`.
+- The snapshot has no size limit of its own: reservation notes of up to 16 KiB each, in a team
+  that uses 32 holds per member to the full with about 16 members, can exceed the 16 MiB a
+  connection's queue takes; connections that need a snapshot are then closed.
+- `device.keys` of a device the log does not list yet keeps its first keys as well: other keys
+  under the same device ID are `conflict`, the same keys again are fine (the app sends them at
+  every `hello`). A second connection of the member's account can therefore not swap its own
+  keys in under the ID of a device waiting for admission.
+- Rows in `relay_device_keys` of devices never admitted and of removed members are kept and
+  count against 16 devices per member and 512 per team.
 - Rate limiting and operation IDs live in the memory of a single process; multiple nodes would
   need Redis or the database.
 - Passkeys and OIDC (GitHub, self-hosted forges) are planned for later.
@@ -146,7 +173,9 @@ reversed without the key, but they can be compared within the epoch.
   zero-width characters); an address containing one is refused.
 - Request headers must arrive within 10 s (`HEADER_READ_TIMEOUT`).
 - Account deletion and data export in self-hosting are still missing (GDPR Art. 17 and 20).
-- Storage has a quota per team (`BLOB_QUOTA_BYTES`) and per member over all teams (twice that),
+- Storage has a quota per team (`BLOB_QUOTA_BYTES`), per member within a team of several (half
+  of it, so that one member cannot lock the others out of storing) and per member over all teams
+  (twice that),
   and a retention period only for transcripts (`TRANSCRIPT_RETENTION_DAYS`). On protocol version
   3 the author, an owner or an admin deletes a blob with `blob.delete`, which frees the quota;
   nothing of it stays.
@@ -167,8 +196,8 @@ reversed without the key, but they can be compared within the epoch.
   `welcome`'s random challenge); until then, and on every version for a device the log does not
   list, it may only register (`device.keys`, `device.prove`), read the log and the device
   directory, renew its ticket and ping (docs/protocol.md, "Proof of possession"). A blocked device
-  (`device.remove`) that comes back with a new ID therefore reads only the log and the device
-  directory, no snapshot of reservations, claims, blobs or the notes key ring. A second
+  (`device.remove`) that comes back with a new ID therefore acts as nothing and reads no
+  claims, blobs or notes key ring (for the snapshot of reservations see below). A second
   connection with a stolen ticket and a listed device ID acts as nothing on version 3, receives
   no targeted message (`claim.overlap`, `key.wrapped`, `notify`) and causes no presence or
   reservation change. What stays open:
