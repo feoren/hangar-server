@@ -1701,6 +1701,96 @@ async fn invitations_of_a_removed_admin_are_withdrawn() {
     assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
 }
 
+/// Security: an admin neither renews nor revokes the owner's open invitation of another admin.
+#[tokio::test]
+async fn an_admin_cannot_change_an_invitation_of_their_own_rank() {
+    let s = start(local_config()).await;
+    let app = &s.server.router;
+    let (owner, _) = login(&s, "owner@example.org").await;
+    grant_license(app, &owner, "owner@example.org", 5).await;
+    let team = create_team(app, &owner, "Ranks").await;
+    let links = invite_links(app, &owner, &team, &["admin@example.org"], "admin").await;
+    let (admin, _) = login(&s, "admin@example.org").await;
+    assert_eq!(accept(app, &admin, &links[0]).await.status, StatusCode::OK);
+    let by_owner = invite_links(app, &owner, &team, &["z@example.org"], "admin")
+        .await
+        .remove(0);
+
+    // Inviting the same address as a member would lower the role and void the owner's link.
+    let lowered = call(
+        app,
+        "POST",
+        &format!("/v1/teams/{team}/invitations"),
+        &[("authorization", &bearer(&admin))],
+        json_body(json!({ "emails": ["z@example.org"], "role": "member" })),
+    )
+    .await;
+    assert_eq!(lowered.status, StatusCode::FORBIDDEN, "{}", lowered.body);
+
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{team}"),
+        &[("authorization", &bearer(&owner))],
+        None,
+    )
+    .await
+    .json();
+    let id = detail["invitations"][0]["id"].as_str().unwrap().to_owned();
+    let path = format!("/v1/teams/{team}/invitations/{id}");
+    let revoked = call(
+        app,
+        "DELETE",
+        &path,
+        &[("authorization", &bearer(&admin))],
+        None,
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::FORBIDDEN, "{}", revoked.body);
+
+    // The owner's link still works and still makes an admin.
+    let (z, _) = login(&s, "z@example.org").await;
+    assert_eq!(accept(app, &z, &by_owner).await.status, StatusCode::OK);
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{team}"),
+        &[("authorization", &bearer(&owner))],
+        None,
+    )
+    .await
+    .json();
+    let z_role = detail["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["email"] == "z@example.org")
+        .map(|m| m["role"].clone());
+    assert_eq!(z_role, Some(json!("admin")), "{detail}");
+
+    // An invitation below the admin's rank stays theirs to revoke, the owner's included.
+    invite_links(app, &owner, &team, &["m@example.org"], "member").await;
+    let detail = call(
+        app,
+        "GET",
+        &format!("/v1/teams/{team}"),
+        &[("authorization", &bearer(&owner))],
+        None,
+    )
+    .await
+    .json();
+    let id = detail["invitations"][0]["id"].as_str().unwrap().to_owned();
+    let revoked = call(
+        app,
+        "DELETE",
+        &format!("/v1/teams/{team}/invitations/{id}"),
+        &[("authorization", &bearer(&admin))],
+        None,
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT, "{}", revoked.body);
+}
+
 /// Security: a demoted admin's open invitations are withdrawn as well.
 #[tokio::test]
 async fn invitations_of_a_demoted_admin_are_withdrawn() {

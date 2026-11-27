@@ -30,7 +30,7 @@ Further routes (administration and browser; the old OAuth routes remain for exis
 | `GET /v1/sessions`, `DELETE /v1/sessions/{id}`, `POST /v1/auth/logout` | sessions |
 | `POST /v1/teams`, `GET/DELETE /v1/teams/{team}` | teams |
 | `PATCH/DELETE /v1/teams/{team}/members/{user}` | change role, remove, leave |
-| `POST /v1/teams/{team}/invitations` | invite (`emails`, `role`, optional `lang`); status per address `invited`, `renewed`, `member` or `license_required` (owner without an active license, nothing created) |
+| `POST /v1/teams/{team}/invitations` | invite (`emails`, `role`, optional `lang`); status per address `invited`, `renewed`, `member` or `license_required` (owner without an active license, nothing created); 403 when an address has an open invitation of the caller's own rank or above, which only someone of a higher rank renews or revokes |
 | `POST .../invitations/{id}/resend`, `DELETE .../invitations/{id}` | resend, revoke |
 | `POST /v1/invitations/accept`, `GET/POST /invite/{token}` | accept (app or browser) |
 | `GET/PUT/DELETE /v1/license` | license document |

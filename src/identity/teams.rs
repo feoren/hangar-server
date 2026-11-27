@@ -828,6 +828,20 @@ pub async fn invite(
             emails.push(email);
         }
     }
+    // An open invitation someone of a higher rank sent is theirs to change: renewing it here
+    // would lower its role, void the link already mailed and move it to this inviter.
+    for email in &emails {
+        let open: Option<String> = sqlx::query_scalar("SELECT role FROM invitations WHERE team_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL")
+            .bind(&team)
+            .bind(email)
+            .fetch_optional(&identity.db)
+            .await?;
+        if let Some(open) = open {
+            if Role::parse(&open).is_none_or(|open| open.rank() >= actor.rank()) {
+                return Err(ApiError::FORBIDDEN);
+            }
+        }
+    }
     // Each address counts separately (otherwise 20 mails per request for a single hit).
     let now = now_s();
     for _ in &emails {
@@ -927,7 +941,18 @@ pub async fn revoke(
 ) -> ApiResult<StatusCode> {
     let identity = identity(&state)?;
     let user = authenticate(identity, &headers).await?;
-    if require_member(identity, &team, &user).await?.rank() < Role::Admin.rank() {
+    let actor = require_member(identity, &team, &user).await?;
+    if actor.rank() < Role::Admin.rank() {
+        return Err(ApiError::FORBIDDEN);
+    }
+    // Same rule as for resending: only an invitation below one's own rank.
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM invitations WHERE id = ? AND team_id = ? AND accepted_at IS NULL AND revoked_at IS NULL")
+        .bind(&invitation)
+        .bind(&team)
+        .fetch_optional(&identity.db)
+        .await?;
+    let role = role.ok_or(ApiError::NOT_FOUND)?;
+    if Role::parse(&role).is_none_or(|role| role.rank() >= actor.rank()) {
         return Err(ApiError::FORBIDDEN);
     }
     let done = sqlx::query("UPDATE invitations SET revoked_at = ? WHERE id = ? AND team_id = ? AND accepted_at IS NULL AND revoked_at IS NULL")
@@ -1085,6 +1110,15 @@ pub async fn invite_accept_page(
             }
             let created = async {
                 let mut tx = begin_write(&identity.db).await?;
+                // The account must be new in this very transaction: one created since the
+                // check above belongs to someone else and is never signed in to from here.
+                let before: Option<i64> = sqlx::query_scalar("SELECT 1 FROM users WHERE email = ?")
+                    .bind(&email)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                if before.is_some() {
+                    return Ok(None);
+                }
                 let id = find_or_create_user(&mut tx, &email, lang, now_s()).await?;
                 // Without mail the inviter holds this link: the account counts as unproven
                 // until its first real sign-in, which ends every session started before.
@@ -1095,13 +1129,18 @@ pub async fn invite_accept_page(
                         .await?;
                 }
                 tx.commit().await?;
-                Ok::<_, sqlx::Error>(id)
+                Ok::<_, sqlx::Error>(Some(id))
             }
             .await;
             match created {
-                Ok(id) => {
+                Ok(Some(id)) => {
                     new_account = true;
                     (id, email.clone())
+                }
+                Ok(None) => {
+                    let mut response = super::auth::sign_in_page(identity, lang, title, "/device");
+                    *response.status_mut() = StatusCode::FORBIDDEN;
+                    return response;
                 }
                 Err(error) => return ApiError::from(error).into_response(),
             }
