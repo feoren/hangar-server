@@ -38,6 +38,11 @@ middleware, and no CORS is needed because the app does not use a browser), `json
 brings algorithm selection and headers that are not needed here; the custom format is smaller
 and free of `alg` confusion), `openmls` (plan: no MLS in version 1).
 
+Sources and licenses are enforced by `cargo deny check bans licenses sources` (`deny.toml`,
+cargo-deny 0.20.2, also in the CI): crates come only from crates.io, and a license outside the
+list there fails the check. Besides the licenses above the list allows 0BSD, Zlib, Unicode-3.0
+(Unicode tables) and CDLA-Permissive-2.0 (the CA list in `webpki-roots`).
+
 Maintenance: run `cargo update` only selectively, then `cargo test`; check security advisories
 with `cargo audit` (cargo-audit 0.22.2, as of 2026-11-09: 271 dependencies, one finding).
 

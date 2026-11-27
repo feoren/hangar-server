@@ -64,6 +64,13 @@ jobs:
       - name: Rust dependencies
         run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0459
 
+      # Crates only from crates.io and only under the licenses listed in deny.toml.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Sources and licenses
+        run: cargo deny check bans licenses sources
+
   # The image must build (amd64); nothing is published here.
   docker:
     runs-on: ubuntu-latest
